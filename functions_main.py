@@ -1,0 +1,649 @@
+import numpy as np
+from scipy.constants import mu_0  # Magnetic constant (permeability of free space)
+from scipy.optimize import minimize
+
+
+# =============================================================================
+# NOMENCLATURE & UNITS REFERENCE
+# =============================================================================
+#
+# --- Control & Actuation Variables ---
+# u (control_inputs_u)  : Dimensionless [-1, 1]. The mathematical control input.
+#                         CRITICAL: This is the COSINE of the magnet angle (u = cos(θ)), 
+#                         NOT the angle itself in radians!
+# theta_rad             : Radians (rad). The actual physical angle of the magnet's 
+#                         moment relative to the z-axis (calculated via arccos(u)).
+# theta_deg             : Degrees (°). The physical angle converted for display/UI.
+# 
+# --- Geometry & Position Variables ---
+# pos / r / p1 / p2     : Meters (m). Spatial position vectors (x, y, z) of the 
+#                         microrobot or actuator magnets.
+# r_norm (|r|)          : Meters (m). Euclidean distance between magnets.
+#
+# --- Force & Physics Variables ---
+# net_force / F_m       : Newtons (N). The magnetic force exerted on the microrobot.
+# C_F                   : N·m^4 (Newtons * meters^4). The lumped magnetic force constant 
+#                         combining permeability and magnetic moments.
+#                         (Derived from F = C_F * u * (r / |r|^5))
+# mu_0                  : T·m/A (Tesla-meters per Ampere) or H/m. Vacuum permeability.
+# m_ba / M              : A·m^2 (Ampere-square meters). Magnetic dipole moment.
+# B                     : Tesla (T). Magnetic flux density (magnetic field).
+# U (potential_energy)  : Joules (J). Magnetic potential energy landscape.
+#
+# --- Stability & Optimization Variables ---
+# H (Hessian)           : N/m (Newtons per meter). The spatial derivative of the 
+#                         force (Jacobian of force, Hessian of energy), representing 
+#                         the magnetic stiffness matrix.
+# eigenvalues           : N/m (Newtons per meter). The eigenvalues of the Hessian matrix. 
+#                         Negative eigenvalues indicate stable restoring forces (a well).
+# eigenvectors          : Dimensionless (normalized direction vectors). The principal 
+#                         directions of the stiffness/instability.
+# =============================================================================
+
+
+
+# =============================================================================
+# CORE PHYSICS MODELS
+# =============================================================================
+
+def calculate_field_potential_abbott_2d(source_pos, point_pos, source_moment_vec, target_moment_vec=None):
+    """
+    Calculates the 2D magnetic field and potential energy using the general dipole model.
+
+    This model is based on the fundamental 3D formulas adapted for a 2D plane.
+    It calculates the magnetic field B at a point and the potential energy U of a
+    target dipole placed at that point.
+
+    Formulas from Abbott2020.pdf:
+    ---------------------------------------------------------------------
+    Magnetic Field B(r) = (mu_0 / 4pi) * [ (3r(m_s . r) / |r|^5) - (m_s / |r|^3) ]
+      (page 2, eq. 1)
+
+    Potential Energy U = -B . m_t
+      (page 3, eq. 5)
+
+    where:
+    - m_s = source magnetic moment vector
+    - m_t = target (robot) magnetic moment vector
+    - r   = vector from source to the point of interest
+    ---------------------------------------------------------------------
+
+    Args:
+        source_pos (np.ndarray): A 2-element array [x, y] for the source magnet's position.
+        point_pos (np.ndarray): A 2-element array [x, y] for the point of interest (e.g., robot pos).
+        source_moment_vec (np.ndarray): The 2D magnetic moment vector [mx, my] of the source.
+        target_moment_vec (np.ndarray, optional): The 2D magnetic moment vector of the target.
+                                                  If None, potential energy will be 0. Defaults to None.
+
+    Returns:
+        dict: A dictionary containing {'field': B_vector, 'potential': U_scalar}.
+    """
+    source_pos = np.asarray(source_pos)
+    point_pos = np.asarray(point_pos)
+    source_moment_vec = np.asarray(source_moment_vec)
+
+    r_vec = point_pos - source_pos
+    r_mag = np.linalg.norm(r_vec)
+
+    if r_mag < 1e-9:
+        return {'field': np.array([np.inf, np.inf]), 'potential': np.inf}
+
+    # Calculate magnetic field (B)
+    m_s_dot_r = np.dot(source_moment_vec, r_vec)
+    term1 = 3 * r_vec * m_s_dot_r / (r_mag**5)
+    term2 = source_moment_vec / (r_mag**3)
+    field_vec = (mu_0 / (4 * np.pi)) * (term1 - term2)
+
+    # Calculate potential energy (U)
+    potential = 0.0
+    if target_moment_vec is not None:
+        target_moment_vec = np.asarray(target_moment_vec)
+        potential = -np.dot(field_vec, target_moment_vec)
+
+    return {'field': field_vec, 'potential': potential}
+
+def calculate_force_yousefi_model(source_pos, robot_pos, control_input_u, m_source, m_robot):
+    """
+    Calculates the 2D magnetic force based on the simplified planar model from Yousefi et al., 2021.
+    This model is computationally efficient and well-suited for control applications.
+
+    Formula from Yousefi2021.pdf (page 4, simplified from eq. 5):
+    F_m = C_F * u * r / |r|^5
+    """
+    source_pos = np.asarray(source_pos)
+    robot_pos = np.asarray(robot_pos)
+
+    r_vec = robot_pos - source_pos
+    r_mag = np.linalg.norm(r_vec)
+
+    if r_mag < 1e-9:
+        return np.zeros(2)
+
+    C_F = (3 * mu_0 * m_source * m_robot) / (4 * np.pi)
+    force_vector = C_F * control_input_u * (r_vec / (r_mag**5))
+
+    return force_vector
+
+# --- System Configuration & Simulation ---
+
+def generate_circular_source_positions(num_sources, radius):
+    """
+    Generates positions for source magnets arranged in a circle.
+    """
+    positions = np.zeros((num_sources, 2))
+    angles = np.linspace(0, 2 * np.pi, num_sources, endpoint=False)
+    positions[:, 0] = radius * np.cos(angles)
+    positions[:, 1] = radius * np.sin(angles)
+    return positions
+
+def calculate_total_force_from_sources(source_positions, control_inputs_u, robot_pos, m_source, m_robot):
+    """
+    Calculates the total magnetic force on the robot from all source magnets using the Yousefi model.
+    """
+    total_force = np.zeros(2)
+    if len(source_positions) != len(control_inputs_u):
+        raise ValueError("Number of source positions must match the number of control inputs.")
+
+    for i, pos in enumerate(source_positions):
+        total_force += calculate_force_yousefi_model(pos, robot_pos, control_inputs_u[i], m_source, m_robot)
+
+    return total_force
+
+def calculate_total_field(source_positions, source_moment_vectors, point_pos):
+    """
+    Calculates the total magnetic field at a point from all source magnets.
+    """
+    total_field = np.zeros(2)
+    if len(source_positions) != len(source_moment_vectors):
+        raise ValueError("Number of source positions must match the number of moment vectors.")
+
+    for i, pos in enumerate(source_positions):
+        # We only need the field, so we don't pass a target moment
+        result = calculate_field_potential_abbott_2d(pos, point_pos, source_moment_vectors[i])
+        total_field += result['field']
+
+    return total_field
+
+
+def calculate_dipole_interaction_force(pos_k, pos_j, m_k, m_j):
+    """
+    Calculates the repulsive interaction force exerted BY robot k ON robot j.
+    Assumes purely vertical (Z-axis) magnetic moments.
+    """
+    mu_0 = 4 * np.pi * 1e-7 # Vacuum permeability
+    
+    r_kj = pos_j - pos_k # Vector from k to j
+    r_mag = np.linalg.norm(r_kj)
+    
+    if r_mag < 1e-6: # Prevent division by zero
+        return np.zeros(2)
+        
+    # Simplified purely repulsive force
+    force = (3 * mu_0 * m_k * m_j / (4 * np.pi)) * (r_kj / (r_mag**5))
+    
+    return force
+
+
+def calculate_capillary_force(pos_j, pos_i, robot_radius, gamma=0.072, meniscus_angle=None, sin_C=None):
+    """
+    Capillary force exerted BY robot j ON robot i.
+    
+    Dong formula:
+        F_cap_ij = 2*pi*gamma*R^2*sin(C)^2 * r_ij / |r_ij|^2
+    
+    pos_i, pos_j: 2D positions [x, y] in meters
+    robot_radius: R in meters
+    gamma: surface tension, water ~0.072 N/m
+    meniscus_angle: C in radians, optional
+    sin_C: optional direct value of sin(C)
+    """
+    r_ij = np.asarray(pos_i) - np.asarray(pos_j)
+    r_mag = np.linalg.norm(r_ij)
+    
+    if r_mag < 1e-9:
+        return np.zeros(2)
+    
+    if sin_C is None:
+        if meniscus_angle is None:
+            raise ValueError("Provide either meniscus_angle or sin_C.")
+        sin_C = np.sin(meniscus_angle)
+    
+    K_cap = 2 * np.pi * gamma * robot_radius**2 * sin_C**2
+    return K_cap * r_ij / (r_mag**2)
+
+
+def calculate_robot_payload_contact_force(
+    robot_pos,
+    robot_vel,
+    payload_pos,
+    payload_vel,
+    robot_radius,
+    payload_radius,
+    k_contact,
+    c_contact
+):
+    """
+    Contact force exerted BY robot ON payload.
+    Equal and opposite force acts on robot.
+    """
+    r_vec = np.asarray(payload_pos) - np.asarray(robot_pos)
+    dist = np.linalg.norm(r_vec)
+
+    if dist < 1e-12:
+        return np.zeros(2)
+
+    n = r_vec / dist
+    overlap = robot_radius + payload_radius - dist
+
+    if overlap <= 0:
+        return np.zeros(2)
+
+    rel_vel = np.asarray(payload_vel) - np.asarray(robot_vel)
+    normal_rel_vel = np.dot(rel_vel, n)
+
+    # # Spring-damper normal contact
+    # F_mag = k_contact * overlap - c_contact * normal_rel_vel
+
+    # # No adhesive pulling from contact model
+    # F_mag = max(F_mag, 0.0)
+
+    closing_speed = max(-normal_rel_vel, 0.0)
+    F_mag = k_contact * overlap + c_contact * closing_speed
+
+    return F_mag * n
+
+
+def calculate_robot_payload_capillary_force(
+    robot_pos,
+    payload_pos,
+    robot_radius,
+    payload_radius,
+    capillary_gain,
+    capillary_range
+):
+    """
+    Approximate attractive capillary force exerted BY robot ON payload.
+
+    This is a phenomenological model, not Dong's exact robot-robot capillary formula.
+    It helps nearby robots stick to a floating nonmagnetic payload.
+    """
+    r_vec = np.asarray(payload_pos) - np.asarray(robot_pos)
+    dist = np.linalg.norm(r_vec)
+
+    if dist < 1e-12:
+        return np.zeros(2)
+
+    n = r_vec / dist
+    gap = dist - (robot_radius + payload_radius)
+
+    if gap < 0:
+        gap = 0.0
+
+    # Exponential short-range attraction
+    F_mag = capillary_gain * np.exp(-gap / capillary_range)
+
+    return F_mag * n
+
+
+def calculate_robot_payload_interaction_force(
+    robot_pos,
+    robot_vel,
+    payload_pos,
+    payload_vel,
+    robot_radius,
+    payload_radius,
+    k_contact,
+    c_contact,
+    capillary_gain,
+    capillary_range,
+    capillary_cutoff,
+    adhesion_gap=0.0
+):
+    """
+    Combined robot-payload interaction.
+
+    Returns force exerted BY robot ON payload.
+
+    Model:
+    - If robot is outside payload contact distance:
+        capillary attraction pulls payload toward robot.
+    - If robot overlaps payload:
+        soft contact repulsion prevents penetration.
+    - Near contact:
+        attraction smoothly weakens so capillary/contact do not fight badly.
+
+    adhesion_gap:
+        small preferred surface gap. Use 0 for touching.
+    """
+    robot_pos = np.asarray(robot_pos)
+    payload_pos = np.asarray(payload_pos)
+    robot_vel = np.asarray(robot_vel)
+    payload_vel = np.asarray(payload_vel)
+
+    r_vec = payload_pos - robot_pos
+    dist = np.linalg.norm(r_vec)
+
+    if dist < 1e-12:
+        return np.zeros(2)
+
+    n = r_vec / dist
+
+    contact_dist = robot_radius + payload_radius
+    gap = dist - contact_dist
+
+    rel_vel = payload_vel - robot_vel
+    normal_rel_vel = np.dot(rel_vel, n)
+
+    F_total = np.zeros(2)
+
+    # -----------------------------------------------------
+    # 1. Capillary attraction: only when not deeply overlapping
+    # -----------------------------------------------------
+    # Positive direction n means force on payload away from robot.
+    # Attraction means payload is pulled toward robot: -n.
+    if capillary_gain > 0:
+        if gap > capillary_cutoff:
+            F_cap_mag = 0.0
+        else:
+            effective_gap = max(gap - adhesion_gap, 0.0)
+            F_cap_mag = capillary_gain * np.exp(-effective_gap / capillary_range)
+            
+            # If overlapping, fade attraction so it does not fight contact too much.
+            if gap < 0:
+                penetration = -gap
+                fade = np.exp(-penetration / max(robot_radius, 1e-12))
+                F_cap_mag *= fade
+            
+            F_cap_on_payload = -F_cap_mag * n
+            F_total += F_cap_on_payload
+
+    # -----------------------------------------------------
+    # 2. Contact repulsion: only if overlapping
+    # -----------------------------------------------------
+    if gap < 0:
+        overlap = -gap
+
+        # Repulsion pushes payload away from robot: +n
+        # Damping only when bodies are approaching/contact-compressing.
+        closing_speed = max(-normal_rel_vel, 0.0)
+
+        F_contact_mag = k_contact * overlap + c_contact * closing_speed
+        F_contact_on_payload = F_contact_mag * n
+
+        F_total += F_contact_on_payload
+
+    return F_total
+
+
+
+
+
+
+
+
+# =============================================================================
+# CALCULUS
+# =============================================================================
+
+def build_actuation_matrix(target_pos, source_positions, C_F):
+    """
+    Builds the 2xN actuation matrix A(p) at the target position.
+    Based on Yousefi2021 formula: f_m = C_F * u * r / |r|^5
+    """
+    N = len(source_positions)
+    A = np.zeros((2, N))
+    
+    for i in range(N):
+        # r_vec = source_positions[i] - target_pos
+        r_vec = target_pos - source_positions[i] 
+        distance = np.linalg.norm(r_vec)
+        
+        # Avoid division by zero if target is exactly on a magnet
+        if distance < 1e-6:
+            continue
+            
+        # The contribution of magnet i for u_i = 1
+        A[:, i] = C_F * r_vec / (distance**5)
+        
+    return A
+
+
+def calculate_potential_hessian(target_pos, source_positions, C_F, u):
+    """
+    Calculates the Hessian matrix of the Potential Energy 
+    (which is exactly the negative of the Force Jacobian).
+    A positive definite Hessian indicates a stable equilibrium point (a potential well).
+    """
+    H = np.zeros((2, 2))
+    N = len(source_positions)
+    
+    for i in range(N):
+        r_vec = target_pos - source_positions[i]
+        dx, dy = r_vec[0], r_vec[1]
+        R_sq = dx**2 + dy**2
+        R = np.sqrt(R_sq)
+        
+        if R < 1e-6:
+            continue
+            
+        R_7 = R**7
+        
+        # Second derivatives of Potential Energy (negative derivatives of Force)
+        hxx = C_F * u[i] * (5 * dx**2 - R_sq) / R_7
+        hxy = C_F * u[i] * (5 * dx * dy) / R_7
+        hyy = C_F * u[i] * (5 * dy**2 - R_sq) / R_7
+        
+        H[0, 0] += hxx
+        H[0, 1] += hxy
+        H[1, 0] += hxy
+        H[1, 1] += hyy
+        
+    return H
+
+
+# def find_equilibrium_inputs(desired_pos, source_positions, C_F):
+#     """
+#     Finds the control inputs (u) that make the desired position an equilibrium point (Fx=0, Fy=0).
+#     """
+#     N = len(source_positions)
+#     desired_pos = np.array(desired_pos)
+    
+#     # 1. Calculate the Actuation Matrix A at the desired position
+#     A = build_actuation_matrix(desired_pos, source_positions, C_F)
+    
+#     # 2. Define the objective function: Minimize ||u||^2
+#     def objective(u):
+#         return np.sum(u**2)
+    
+#     # 3. Define the Equality constraint: A * u = 0
+#     def force_constraint(u):
+#         return A @ u  # This must return an array of zeros [fx, fy]
+    
+#     constraints = [{'type': 'eq', 'fun': force_constraint}]
+    
+#     # 4. Define the bounds: -1 <= u_i <= 1
+#     bounds = [(-1.0, 1.0) for _ in range(N)]
+    
+#     # 5. Initial guess: start with all inputs at 0
+#     u0 = np.zeros(N)
+    
+#     # 6. Run the optimization
+#     result = minimize(
+#         objective, 
+#         u0, 
+#         method='SLSQP', 
+#         bounds=bounds, 
+#         constraints=constraints
+#     )
+    
+#     if result.success:
+#         return result.x  # The optimized control inputs u
+#     else:
+#         raise ValueError(f"Optimization failed: {result.message}")
+
+
+def find_equilibrium_inputs(desired_pos, source_positions, C_F, target_effort=2.0):
+    """
+    Finds u to get zero force, but forces the magnets to be active.
+    target_effort controls how 'strong' the field is around the zero point.
+    """
+    num_sources = len(source_positions)
+    desired_pos = np.array(desired_pos)
+    
+    A = build_actuation_matrix(desired_pos, source_positions, C_F)
+    
+    def objective(u):
+        return (np.sum(u**2) - target_effort)**2
+        
+    def force_constraint(u):
+        return A @ u 
+        
+    constraints = [{'type': 'eq', 'fun': force_constraint}]
+    bounds = [(0.0, 1.0) for _ in range(num_sources)]
+    
+    # Initialize inside the valid bounds
+    u0 = np.random.uniform(0.1, 0.9, num_sources)
+    
+    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
+    
+    if result.success:
+        return result.x
+    else:
+        print("Optimization failed:", result.message)
+        return np.zeros(num_sources)
+
+
+def find_stable_equilibrium_inputs(
+    desired_pos,
+    source_positions,
+    C_F,
+    target_effort=2.0,
+    ratio=1.0,
+    eig_angle_rad=None
+):
+    """
+    Finds permanent magnets inputs (u) to create a stable trap at target_pos.
+    
+    Optimization problem definition
+    --------------------------------
+    Solve for source inputs u so that the desired point becomes a stable
+    equilibrium with prescribed shape/orientation properties.
+
+    Objective:
+        Minimize (sum(u^2) - target_effort)^2
+
+    Constraints:
+        1. force = 0
+        2. trace >= eps
+        3. det >= eps
+        4. eig_ratio = target_ratio
+        5. eig_angle = target_angle   (optional)
+
+    Notes:
+    - The Hessian H here is the potential-energy Hessian.
+    - Stability requires positive definiteness of H in 2D, enforced through
+      positive trace and positive determinant margins.
+    - The principal eigenvector angle is computed analytically from the 2x2
+      symmetric matrix:
+          phi = 0.5 * atan2(2*Hxy, Hxx - Hyy)
+    - Because eigenvectors are defined up to sign, the direction is constrained
+      modulo pi using cos(2*(phi - phi_target)).
+    """
+    num_sources = len(source_positions)
+    desired_pos = np.array(desired_pos)
+    
+    A = build_actuation_matrix(desired_pos, source_positions, C_F)
+    
+    def objective(u):
+        return (np.sum(u**2) - target_effort)**2
+        
+    
+    # ------------------------------------------------------------------
+    # Primary equilibrium constraint F_net = 0
+    # ------------------------------------------------------------------
+    
+    def force_constraint(u):
+        return A @ u
+        
+    # ------------------------------------------------------------------
+    # Stability: Trace(J) < 0 and Det(J) > 0 (already in your code)
+    # ------------------------------------------------------------------
+    
+    def stability_trace_constraint(u):
+        J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
+        trace = J[0, 0] + J[1, 1]
+        # SciPy inequality constraints require the return value to be >= 0.
+        # Trace >= 1e-6   -->  Trace - 1e-6 >= 0
+        return trace - 1e-6 
+        
+    def stability_det_constraint(u):
+        J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
+        det = (J[0, 0] * J[1, 1]) - (J[0, 1]**2)
+        # SciPy inequality constraints require the return value to be >= 0.
+        # Det >= 1e-12     -->   Det - 1e-12 >= 0
+        return det - 1e-12
+        
+    # ------------------------------------------------------------------
+    # NEW: Analytic eigenvalue ratio constraint
+    #
+    # For 2x2 matrix J:
+    #   trace = J11 + J22
+    #   det   = J11*J22 - J12^2
+    #   Delta = trace^2 - 4 det
+    #
+    # Ratio constraint:
+    #   (λ1/λ2 = ratio)  →  trace^2 (1 - r)^2  -  Delta (1 + r)^2  = 0
+    # ------------------------------------------------------------------
+    def eigen_ratio_constraint(u):
+        J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
+        
+        a = J[0, 0]
+        b = J[0, 1]
+        c = J[1, 0]
+        d = J[1, 1]
+        
+        trace = a + d
+        det = a * d - b * c
+        Delta = trace * trace - 4 * det
+        
+        r = ratio
+        return trace * trace * (1 - r) ** 2 - Delta * (1 + r) ** 2
+
+    def eigen_angle_constraint(u):
+        H = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
+
+        hxx = H[0, 0]
+        hxy = H[0, 1]
+        hyy = H[1, 1]
+
+        # Principal-axis angle of a 2x2 symmetric matrix.
+        principal_angle = 0.5 * np.arctan2(2.0 * hxy, hxx - hyy)
+
+        # Eigenvector sign ambiguity means phi and phi + pi represent the same
+        # axis. Enforce angle equality modulo pi.
+        return 1.0 - np.cos(2.0 * (principal_angle - eig_angle_rad))
+    
+    constraints = [
+        {'type': 'eq', 'fun': force_constraint},
+        {'type': 'ineq', 'fun': stability_trace_constraint},
+        {'type': 'ineq', 'fun': stability_det_constraint},
+        {'type': 'eq',  'fun': eigen_ratio_constraint}
+    ]
+
+    if eig_angle_rad is not None:
+        constraints.append({'type': 'eq', 'fun': eigen_angle_constraint})
+    
+    bounds = [(0, 1.0) for _ in range(num_sources)]
+    
+    # A symmetric starting guess helps the optimizer find the stable trap 
+    # instead of getting stuck on an edge constraint
+    # u0 = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
+    u0 = np.ones(num_sources) * 0.1 
+    
+    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
+    
+    if result.success:
+        return result.x
+    else:
+        print("Stable optimization failed:", result.message)
+        return np.zeros(num_sources)
