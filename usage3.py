@@ -6,10 +6,13 @@ from case_loader import (
     get_case_name_from_argv,
     load_case,
     require_keys,
+    unpack_target_schedule_entry,
 )
 from functions_main import (
     calculate_potential_hessian,
     calculate_total_force_from_sources,
+    find_two_stable_equilibrium_inputs,
+    find_two_equilibrium_inputs,
     find_stable_equilibrium_inputs,
     generate_circular_source_positions,
 )
@@ -34,10 +37,10 @@ require_keys(
         "NUM_SOURCES",
         "RADIUS",
         "TARGET_SCHEDULE",
-        "M_SATURATION",
+        "SOURCE_MAGNETIZATION",
+        "ROBOT_MAGNETIZATION",
         "L_SOURCE",
         "L_ROBOT",
-        "MAGNETIZATION",
         "GRID_MIN",
         "GRID_MAX",
         "RESOLUTION",
@@ -64,22 +67,56 @@ def main():
     opt_infos = []
     field_data = []
 
-    for start_time, target_pos, target_eig_ratio, target_eig_angle in CFG.TARGET_SCHEDULE:
+    for target_entry in CFG.TARGET_SCHEDULE:
+        (
+            start_time,
+            target_pos,
+            second_equilibrium_pos,
+            target_eig_ratio,
+            target_eig_angle,
+        ) = unpack_target_schedule_entry(target_entry)
+
         print("\n" + "=" * 70)
-        print(
-            f"Finding control inputs for target {target_pos} "
-            f"starting at t={start_time} with eig_ratio={target_eig_ratio} "
-            f"and eig_angle={target_eig_angle:.3f} rad"
-        )
+        if second_equilibrium_pos is None:
+            print(
+                f"Finding control inputs for target {target_pos} "
+                f"starting at t={start_time} with eig_ratio={target_eig_ratio} "
+                f"and eig_angle={target_eig_angle:.3f} rad"
+            )
+        else:
+            print(
+                f"Finding control inputs for equilibrium points {target_pos} "
+                f"and {second_equilibrium_pos} starting at t={start_time}"
+            )
         print("=" * 70)
 
-        u_target = find_stable_equilibrium_inputs(
-            target_pos,
-            source_positions,
-            CFG.C_F,
-            ratio=target_eig_ratio,
-            eig_angle_rad=target_eig_angle
-        )
+        if second_equilibrium_pos is None:
+            u_target = find_stable_equilibrium_inputs(
+                target_pos,
+                source_positions,
+                CFG.C_F,
+                ratio=target_eig_ratio,
+                eig_angle_rad=target_eig_angle,
+                trace_margin=CFG.STABILITY_TRACE_MARGIN,
+                det_margin=CFG.STABILITY_DET_MARGIN
+            )
+        else:
+            if PARAMS.get("TWO_EQUILIBRIUM_SOLVER") == "plain":
+                u_target = find_two_equilibrium_inputs(
+                    target_pos,
+                    second_equilibrium_pos,
+                    source_positions,
+                    CFG.C_F
+                )
+            else:
+                u_target = find_two_stable_equilibrium_inputs(
+                    target_pos,
+                    second_equilibrium_pos,
+                    source_positions,
+                    CFG.C_F,
+                    trace_margin=CFG.STABILITY_TRACE_MARGIN,
+                    det_margin=CFG.STABILITY_DET_MARGIN
+                )
 
         target_controls.append(
             (start_time, target_pos, target_eig_ratio, target_eig_angle, u_target)
@@ -92,6 +129,20 @@ def main():
             CFG.M_SOURCE_MAGNITUDE,
             CFG.M_ROBOT_MAGNITUDE
         )
+
+        equilibrium_positions = [target_pos]
+        equilibrium_net_forces = [net_force]
+
+        if second_equilibrium_pos is not None:
+            net_force_2 = calculate_total_force_from_sources(
+                source_positions,
+                u_target,
+                second_equilibrium_pos,
+                CFG.M_SOURCE_MAGNITUDE,
+                CFG.M_ROBOT_MAGNITUDE
+            )
+            equilibrium_positions.append(second_equilibrium_pos)
+            equilibrium_net_forces.append(net_force_2)
 
         H = calculate_potential_hessian(
             target_pos,
@@ -109,6 +160,8 @@ def main():
             eigenvalues=eigenvalues,
             eigenvectors=eigenvectors,
             desired_pos=target_pos,
+            equilibrium_positions=equilibrium_positions,
+            equilibrium_net_forces=equilibrium_net_forces,
             microrobot_positions=CFG.INITIAL_ROBOT_POSITIONS
         )
         opt_infos.append(opt_info)

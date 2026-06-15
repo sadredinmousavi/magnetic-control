@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from scipy.constants import mu_0
 
 from functions_main import (
     calculate_capillary_force,
@@ -9,6 +10,112 @@ from functions_main import (
     calculate_total_force_from_sources,
 )
 from functions_utility import get_control_at_time, get_schedule_index
+
+
+def get_target_points_from_schedule_entry(entry):
+    if len(entry) == 3:
+        return np.array([entry[1], entry[2]])
+    return np.array([entry[1]])
+
+
+def calculate_external_forces_batch(
+    robot_positions,
+    source_positions,
+    control_inputs_u,
+    m_source,
+    m_robot
+):
+    r_vec = robot_positions[:, None, :] - source_positions[None, :, :]
+    r_mag = np.linalg.norm(r_vec, axis=2)
+    valid = r_mag > 1e-9
+
+    c_f = (3 * mu_0 * m_source * m_robot) / (4 * np.pi)
+    scale = np.zeros_like(r_mag)
+    scale[valid] = (
+        np.broadcast_to(control_inputs_u, r_mag.shape)[valid]
+        / (r_mag[valid] ** 5)
+    )
+
+    return c_f * np.sum(r_vec * scale[:, :, None], axis=1)
+
+
+def calculate_robot_robot_forces_batch(
+    robot_positions,
+    m_robot,
+    robot_radius,
+    gamma,
+    capillary_sin_C
+):
+    r_vec = robot_positions[:, None, :] - robot_positions[None, :, :]
+    r_mag = np.linalg.norm(r_vec, axis=2)
+    valid = r_mag > 1e-9
+
+    magnetic_scale = np.zeros_like(r_mag)
+    magnetic_valid = r_mag > 1e-6
+    magnetic_scale[magnetic_valid] = 1.0 / (r_mag[magnetic_valid] ** 5)
+    k_mag = (3 * mu_0 * m_robot * m_robot) / (4 * np.pi)
+    magnetic_forces = k_mag * np.sum(r_vec * magnetic_scale[:, :, None], axis=1)
+
+    capillary_scale = np.zeros_like(r_mag)
+    capillary_scale[valid] = 1.0 / (r_mag[valid] ** 2)
+    k_cap = 2 * np.pi * gamma * robot_radius**2 * capillary_sin_C**2
+    capillary_forces = k_cap * np.sum(r_vec * capillary_scale[:, :, None], axis=1)
+
+    return magnetic_forces + capillary_forces
+
+
+def calculate_wall_forces_batch(
+    robot_positions,
+    robot_velocities,
+    wall_segments,
+    robot_radius,
+    wall_stiffness,
+    wall_damping,
+    wall_interaction_range
+):
+    if not wall_segments or wall_stiffness <= 0:
+        return np.zeros_like(robot_positions)
+
+    wall_forces = np.zeros_like(robot_positions)
+    activation_distance = robot_radius + wall_interaction_range
+
+    for wall_start, wall_end in wall_segments:
+        start = np.asarray(wall_start, dtype=float)
+        end = np.asarray(wall_end, dtype=float)
+        segment = end - start
+        segment_len_sq = np.dot(segment, segment)
+
+        if segment_len_sq <= 1e-18:
+            continue
+
+        rel = robot_positions - start
+        t = np.clip((rel @ segment) / segment_len_sq, 0.0, 1.0)
+        closest = start + t[:, None] * segment
+        offset = robot_positions - closest
+        dist = np.linalg.norm(offset, axis=1)
+        active = dist < activation_distance
+
+        if not np.any(active):
+            continue
+
+        normals = np.zeros_like(offset)
+        safe = active & (dist > 1e-12)
+        normals[safe] = offset[safe] / dist[safe, None]
+
+        degenerate = active & ~safe
+        if np.any(degenerate):
+            tangent = segment / np.sqrt(segment_len_sq)
+            fallback_normal = np.array([-tangent[1], tangent[0]])
+            normals[degenerate] = fallback_normal
+
+        penetration = activation_distance - dist[active]
+        normal_velocity = np.sum(robot_velocities[active] * normals[active], axis=1)
+        damping_force = -wall_damping * np.minimum(normal_velocity, 0.0)
+        force_magnitude = wall_stiffness * penetration + damping_force
+        wall_forces[active] += force_magnitude[:, None] * normals[active]
+
+    return wall_forces
+
 
 def microrobot_payload_dynamics(
     t, state,
@@ -28,7 +135,13 @@ def microrobot_payload_dynamics(
     contact_damping,
     payload_capillary_gain=0.0,
     payload_capillary_range=0.003,
-    payload_capillary_cutoff=0.009
+    payload_capillary_cutoff=0.009,
+    use_overdamped_dynamics=False,
+    dynamics_speedup=1.0,
+    wall_segments=None,
+    wall_stiffness=0.0,
+    wall_damping=0.0,
+    wall_interaction_range=0.0
 ):
     """
     State layout:
@@ -49,46 +162,44 @@ def microrobot_payload_dynamics(
     payload_vel = np.array([state[payload_idx + 2], state[payload_idx + 3]])
 
     F_payload = np.zeros(2)
+    robot_states = state[:num_robot_states].reshape(N, 4)
+    robot_positions = robot_states[:, :2]
+    robot_velocities = robot_states[:, 2:4]
+
+    external_forces = calculate_external_forces_batch(
+        robot_positions,
+        np.asarray(source_positions),
+        np.asarray(control_inputs_u),
+        M_SOURCE_MAGNITUDE,
+        M_ROBOT_MAGNITUDE
+    )
+    robot_robot_forces = calculate_robot_robot_forces_batch(
+        robot_positions,
+        M_ROBOT_MAGNITUDE,
+        robot_radius,
+        gamma,
+        capillary_sin_C
+    )
+    wall_forces = calculate_wall_forces_batch(
+        robot_positions,
+        robot_velocities,
+        wall_segments or [],
+        robot_radius,
+        wall_stiffness,
+        wall_damping,
+        wall_interaction_range
+    )
 
     for i in range(N):
         idx = i * 4
-        pos_i = np.array([state[idx], state[idx + 1]])
-        vel_i = np.array([state[idx + 2], state[idx + 3]])
+        pos_i = robot_positions[i]
+        vel_i = robot_velocities[i]
 
         # 1. External magnetic force
-        F_ext = calculate_total_force_from_sources(
-            source_positions,
-            control_inputs_u,
-            pos_i,
-            M_SOURCE_MAGNITUDE,
-            M_ROBOT_MAGNITUDE
-        )
+        F_ext = external_forces[i]
 
         # 2. Robot-robot magnetic + capillary forces
-        F_rr = np.zeros(2)
-
-        for j in range(N):
-            if i == j:
-                continue
-
-            pos_j = np.array([state[j * 4], state[j * 4 + 1]])
-
-            F_mag = calculate_dipole_interaction_force(
-                pos_j,
-                pos_i,
-                M_ROBOT_MAGNITUDE,
-                M_ROBOT_MAGNITUDE
-            )
-
-            F_cap = calculate_capillary_force(
-                pos_j,
-                pos_i,
-                robot_radius=robot_radius,
-                gamma=gamma,
-                sin_C=capillary_sin_C
-            )
-
-            F_rr += F_mag + F_cap
+        F_rr = robot_robot_forces[i]
 
         # # 3. Robot-payload contact
         # F_robot_on_payload_contact = calculate_robot_payload_contact_force(
@@ -143,25 +254,43 @@ def microrobot_payload_dynamics(
         F_payload += F_robot_on_payload
 
 
+        F_robot_no_drag = (
+            F_ext
+            + F_rr
+            + F_payload_on_robot
+            + wall_forces[i]
+        )
+
+        if use_overdamped_dynamics:
+            terminal_velocity = dynamics_speedup * F_robot_no_drag / fluid_drag
+            derivatives[idx] = terminal_velocity[0]
+            derivatives[idx + 1] = terminal_velocity[1]
+            derivatives[idx + 2] = 0.0
+            derivatives[idx + 3] = 0.0
+            continue
+
         # 5. Robot drag
         F_drag = -fluid_drag * vel_i
 
         # 6. Robot net force
-        F_robot = (
-            F_ext
-            + F_rr
-            # + F_payload_contact_on_robot
-            # + F_payload_cap_on_robot
-            + F_payload_on_robot
-            + F_drag
-        )
-
+        F_robot = F_robot_no_drag + F_drag
         accel_i = F_robot / robot_mass
 
         derivatives[idx] = vel_i[0]
         derivatives[idx + 1] = vel_i[1]
         derivatives[idx + 2] = accel_i[0]
         derivatives[idx + 3] = accel_i[1]
+
+    if use_overdamped_dynamics:
+        payload_terminal_velocity = np.zeros(2)
+        if payload_drag is not None and payload_drag > 0:
+            payload_terminal_velocity = dynamics_speedup * F_payload / payload_drag
+
+        derivatives[payload_idx] = payload_terminal_velocity[0]
+        derivatives[payload_idx + 1] = payload_terminal_velocity[1]
+        derivatives[payload_idx + 2] = 0.0
+        derivatives[payload_idx + 3] = 0.0
+        return derivatives
 
     # Payload dynamics
     F_payload_drag = -payload_drag * payload_vel
@@ -221,6 +350,7 @@ def animate_trajectories(
     plot_trajectories=True,
     plot_microrobots=True,
     payload_radius=None,
+    wall_segments=None,
     contour_levels=20,
     save_video=False,
     video_name="microrobots_simulation.mp4"
@@ -373,11 +503,27 @@ def animate_trajectories(
             label="Source magnets"
         )
 
+    if wall_segments:
+        for idx, (wall_start, wall_end) in enumerate(wall_segments):
+            wall_start = np.asarray(wall_start)
+            wall_end = np.asarray(wall_end)
+            ax.plot(
+                [wall_start[0], wall_end[0]],
+                [wall_start[1], wall_end[1]],
+                color="dimgray",
+                linewidth=4,
+                solid_capstyle="round",
+                label="Walls" if idx == 0 else None
+            )
+
     # ---------------------------------------------------------
     # Scheduled targets
     # ---------------------------------------------------------
     if draw_all_targets:
-        all_targets = np.array([entry[1] for entry in target_schedule])
+        all_targets = np.vstack([
+            get_target_points_from_schedule_entry(entry)
+            for entry in target_schedule
+        ])
         ax.scatter(
             all_targets[:, 0],
             all_targets[:, 1],
@@ -393,10 +539,10 @@ def animate_trajectories(
     # ---------------------------------------------------------
     active_target_scat = None
     if draw_active_target:
-        initial_target = target_schedule[0][1]
+        initial_targets = get_target_points_from_schedule_entry(target_schedule[0])
         active_target_scat = ax.scatter(
-            initial_target[0],
-            initial_target[1],
+            initial_targets[:, 0],
+            initial_targets[:, 1],
             c="red",
             s=180,
             marker="X",
@@ -497,8 +643,8 @@ def animate_trajectories(
                 artists.append(line)
 
         if draw_active_target and active_target_scat is not None:
-            active_target = target_schedule[active_idx][1]
-            active_target_scat.set_offsets([active_target])
+            active_targets = get_target_points_from_schedule_entry(target_schedule[active_idx])
+            active_target_scat.set_offsets(active_targets)
             artists.append(active_target_scat)
         
         if has_payload and payload_patch is not None:

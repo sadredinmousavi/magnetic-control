@@ -491,12 +491,26 @@ def find_equilibrium_inputs(desired_pos, source_positions, C_F, target_effort=2.
     desired_pos = np.array(desired_pos)
     
     A = build_actuation_matrix(desired_pos, source_positions, C_F)
+    force_scale = max(np.max(np.abs(A)), 1e-30)
     
     def objective(u):
-        return (np.sum(u**2) - target_effort)**2
+        effort_error = (np.sum(u**2) - target_effort)**2
+
+        if np.isclose(ratio, 1.0):
+            H = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
+            trace = H[0, 0] + H[1, 1]
+            det = H[0, 0] * H[1, 1] - H[0, 1] * H[1, 0]
+            delta = trace * trace - 4.0 * det
+
+            if abs(trace) < 1e-30:
+                return effort_error + 1e6
+
+            return effort_error + delta / (trace * trace)
+
+        return effort_error
         
     def force_constraint(u):
-        return A @ u 
+        return (A @ u) / force_scale
         
     constraints = [{'type': 'eq', 'fun': force_constraint}]
     bounds = [(0.0, 1.0) for _ in range(num_sources)]
@@ -513,13 +527,251 @@ def find_equilibrium_inputs(desired_pos, source_positions, C_F, target_effort=2.
         return np.zeros(num_sources)
 
 
+def find_two_equilibrium_inputs(
+    desired_pos_1,
+    desired_pos_2,
+    source_positions,
+    C_F,
+    target_effort=2.0
+):
+    """
+    Finds u that makes two desired positions equilibrium points.
+
+    This enforces zero net force at both positions:
+        F(desired_pos_1) = 0
+        F(desired_pos_2) = 0
+
+    It does not constrain stability, eigenvalue ratio, or eigenvector angle.
+    """
+    num_sources = len(source_positions)
+    desired_pos_1 = np.array(desired_pos_1)
+    desired_pos_2 = np.array(desired_pos_2)
+
+    A1 = build_actuation_matrix(desired_pos_1, source_positions, C_F)
+    A2 = build_actuation_matrix(desired_pos_2, source_positions, C_F)
+
+    def objective(u):
+        return (np.sum(u**2) - target_effort)**2
+
+    def force_constraint(u):
+        return np.concatenate((A1 @ u, A2 @ u))
+
+    constraints = [{'type': 'eq', 'fun': force_constraint}]
+    bounds = [(0.0, 1.0) for _ in range(num_sources)]
+    u0 = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
+    u0 = np.clip(u0, 0.1, 0.9)
+
+    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
+
+    if result.success:
+        return result.x
+    else:
+        print("Two-equilibrium optimization failed:", result.message)
+        return np.zeros(num_sources)
+
+
+def find_two_equilibrium_with_center_repulsion_inputs(
+    desired_pos_1,
+    desired_pos_2,
+    source_positions,
+    C_F,
+    target_effort=2.0,
+    center_line_repulsion_margin=1e-7,
+    repulsion_weight=1e9
+):
+    """
+    Finds u for two equilibrium points with a strong repelling midpoint.
+
+    Constraints:
+        1. F(desired_pos_1) = 0
+        2. F(desired_pos_2) = 0
+        3. F(center) = 0
+        4. The center has negative potential curvature along the line between
+           the two desired points, so force dynamics repel away from center
+           toward one of the two equilibrium points.
+
+    The line repulsion condition is:
+        -line_unit.T @ H(center) @ line_unit >= center_line_repulsion_margin
+
+    This is intentionally separate from find_two_equilibrium_inputs so the
+    plain two-equilibrium solver stays unchanged.
+    """
+    num_sources = len(source_positions)
+    desired_pos_1 = np.array(desired_pos_1)
+    desired_pos_2 = np.array(desired_pos_2)
+    center_pos = 0.5 * (desired_pos_1 + desired_pos_2)
+
+    line_vec = desired_pos_1 - desired_pos_2
+    line_len = np.linalg.norm(line_vec)
+    if line_len == 0:
+        raise ValueError("The two equilibrium points must be different.")
+    line_unit = line_vec / line_len
+
+    A1 = build_actuation_matrix(desired_pos_1, source_positions, C_F)
+    A2 = build_actuation_matrix(desired_pos_2, source_positions, C_F)
+    force_scale = max(np.max(np.abs(A1)), np.max(np.abs(A2)), 1e-30)
+    A_center = build_actuation_matrix(center_pos, source_positions, C_F)
+
+    def center_line_curvature(u):
+        H_center = calculate_potential_hessian(center_pos, source_positions, C_F, u)
+        return line_unit @ H_center @ line_unit
+
+    def objective(u):
+        line_repulsion = -center_line_curvature(u)
+        effort_error = (np.sum(u**2) - target_effort)**2
+        return effort_error - repulsion_weight * line_repulsion
+
+    def force_constraint(u):
+        return np.concatenate((A1 @ u, A2 @ u, A_center @ u))
+
+    def center_line_repulsion_constraint(u):
+        return -center_line_curvature(u) - center_line_repulsion_margin
+
+    constraints = [
+        {'type': 'eq', 'fun': force_constraint},
+        {'type': 'ineq', 'fun': center_line_repulsion_constraint}
+    ]
+    bounds = [(-1.0, 1.0) for _ in range(num_sources)]
+    u0 = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
+    u0[1::2] *= -1.0
+    u0 = np.clip(u0, -0.9, 0.9)
+
+    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
+
+    if result.success:
+        return result.x
+    else:
+        print("Two-equilibrium center-repulsion optimization failed:", result.message)
+        return np.zeros(num_sources)
+
+
+def find_two_stable_equilibrium_inputs(
+    desired_pos_1,
+    desired_pos_2,
+    source_positions,
+    C_F,
+    target_effort=2.0,
+    ratio_weight=10.0,
+    trace_margin=1e-8,
+    det_margin=1e-14
+):
+    """
+    Finds u for two stable equilibrium points with near-equal eigenvalues.
+
+    Constraints:
+        1. F(desired_pos_1) = 0
+        2. F(desired_pos_2) = 0
+        3. H(desired_pos_1) and H(desired_pos_2) are positive definite
+
+    The objective pulls each Hessian eigenvalue ratio toward 1 using:
+        Delta / trace^2 = ((ratio - 1) / (ratio + 1))^2
+
+    This avoids the center-repulsion constraint, which made the endpoints
+    unstable in some cases.
+    """
+    num_sources = len(source_positions)
+    desired_pos_1 = np.array(desired_pos_1)
+    desired_pos_2 = np.array(desired_pos_2)
+
+    A1 = build_actuation_matrix(desired_pos_1, source_positions, C_F)
+    A2 = build_actuation_matrix(desired_pos_2, source_positions, C_F)
+    force_scale = max(np.max(np.abs(A1)), np.max(np.abs(A2)), 1e-30)
+
+    def hessian_metrics(pos, u):
+        H = calculate_potential_hessian(pos, source_positions, C_F, u)
+        trace = H[0, 0] + H[1, 1]
+        det = H[0, 0] * H[1, 1] - H[0, 1] * H[1, 0]
+        delta = trace * trace - 4.0 * det
+        return trace, det, delta
+
+    def anisotropy_penalty(pos, u):
+        trace, _, delta = hessian_metrics(pos, u)
+        if trace == 0:
+            return np.inf
+        return delta / (trace * trace)
+
+    def objective(u):
+        effort_error = (np.sum(u**2) - target_effort)**2
+        anisotropy_error = (
+            anisotropy_penalty(desired_pos_1, u)
+            + anisotropy_penalty(desired_pos_2, u)
+        )
+        return effort_error + ratio_weight * anisotropy_error
+
+    def force_constraint(u):
+        return np.concatenate((A1 @ u, A2 @ u)) / force_scale
+
+    def stability_trace_1(u):
+        trace, _, _ = hessian_metrics(desired_pos_1, u)
+        return (trace / trace_margin) - 1.0
+
+    def stability_trace_2(u):
+        trace, _, _ = hessian_metrics(desired_pos_2, u)
+        return (trace / trace_margin) - 1.0
+
+    def stability_det_1(u):
+        _, det, _ = hessian_metrics(desired_pos_1, u)
+        return (det / det_margin) - 1.0
+
+    def stability_det_2(u):
+        _, det, _ = hessian_metrics(desired_pos_2, u)
+        return (det / det_margin) - 1.0
+
+    constraints = [
+        {'type': 'eq', 'fun': force_constraint},
+        {'type': 'ineq', 'fun': stability_trace_1},
+        {'type': 'ineq', 'fun': stability_trace_2},
+        {'type': 'ineq', 'fun': stability_det_1},
+        {'type': 'ineq', 'fun': stability_det_2},
+    ]
+    bounds = [(-1.0, 1.0) for _ in range(num_sources)]
+
+    base = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
+    base = np.clip(base, 0.1, 0.9)
+
+    initial_guesses = []
+    for sign in (1.0, -1.0):
+        guess = sign * base.copy()
+        initial_guesses.append(guess)
+
+        alternating_guess = guess.copy()
+        alternating_guess[1::2] *= -1.0
+        initial_guesses.append(alternating_guess)
+
+    rng = np.random.default_rng(7)
+    for _ in range(12):
+        initial_guesses.append(rng.uniform(-0.9, 0.9, num_sources))
+
+    best_result = None
+    for u0 in initial_guesses:
+        result = minimize(
+            objective,
+            u0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 500}
+        )
+
+        if best_result is None or result.fun < best_result.fun:
+            best_result = result
+
+        if result.success:
+            return result.x
+
+    print("Two-stable-equilibrium optimization failed:", best_result.message)
+    return best_result.x
+
+
 def find_stable_equilibrium_inputs(
     desired_pos,
     source_positions,
     C_F,
     target_effort=2.0,
     ratio=1.0,
-    eig_angle_rad=None
+    eig_angle_rad=None,
+    trace_margin=1e-6,
+    det_margin=1e-12
 ):
     """
     Finds permanent magnets inputs (u) to create a stable trap at target_pos.
@@ -553,6 +805,8 @@ def find_stable_equilibrium_inputs(
     desired_pos = np.array(desired_pos)
     
     A = build_actuation_matrix(desired_pos, source_positions, C_F)
+    force_scale = max(np.max(np.abs(A)), 1e-30)
+    hessian_scale = max(trace_margin, 1e-30)
     
     def objective(u):
         return (np.sum(u**2) - target_effort)**2
@@ -563,7 +817,7 @@ def find_stable_equilibrium_inputs(
     # ------------------------------------------------------------------
     
     def force_constraint(u):
-        return A @ u
+        return (A @ u) / force_scale
         
     # ------------------------------------------------------------------
     # Stability: Trace(J) < 0 and Det(J) > 0 (already in your code)
@@ -572,16 +826,12 @@ def find_stable_equilibrium_inputs(
     def stability_trace_constraint(u):
         J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
         trace = J[0, 0] + J[1, 1]
-        # SciPy inequality constraints require the return value to be >= 0.
-        # Trace >= 1e-6   -->  Trace - 1e-6 >= 0
-        return trace - 1e-6 
+        return (trace / trace_margin) - 1.0
         
     def stability_det_constraint(u):
         J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
         det = (J[0, 0] * J[1, 1]) - (J[0, 1]**2)
-        # SciPy inequality constraints require the return value to be >= 0.
-        # Det >= 1e-12     -->   Det - 1e-12 >= 0
-        return det - 1e-12
+        return (det / det_margin) - 1.0
         
     # ------------------------------------------------------------------
     # NEW: Analytic eigenvalue ratio constraint
@@ -607,7 +857,8 @@ def find_stable_equilibrium_inputs(
         Delta = trace * trace - 4 * det
         
         r = ratio
-        return trace * trace * (1 - r) ** 2 - Delta * (1 + r) ** 2
+        ratio_error = trace * trace * (1 - r) ** 2 - Delta * (1 + r) ** 2
+        return ratio_error / (hessian_scale * hessian_scale)
 
     def eigen_angle_constraint(u):
         H = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
@@ -627,23 +878,46 @@ def find_stable_equilibrium_inputs(
         {'type': 'eq', 'fun': force_constraint},
         {'type': 'ineq', 'fun': stability_trace_constraint},
         {'type': 'ineq', 'fun': stability_det_constraint},
-        {'type': 'eq',  'fun': eigen_ratio_constraint}
     ]
 
-    if eig_angle_rad is not None:
+    if not np.isclose(ratio, 1.0):
+        constraints.append({'type': 'eq', 'fun': eigen_ratio_constraint})
+
+    if eig_angle_rad is not None and not np.isclose(ratio, 1.0):
         constraints.append({'type': 'eq', 'fun': eigen_angle_constraint})
     
     bounds = [(0, 1.0) for _ in range(num_sources)]
     
-    # A symmetric starting guess helps the optimizer find the stable trap 
-    # instead of getting stuck on an edge constraint
-    # u0 = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
-    u0 = np.ones(num_sources) * 0.1 
-    
-    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
-    
-    if result.success:
-        return result.x
-    else:
-        print("Stable optimization failed:", result.message)
-        return np.zeros(num_sources)
+    base = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
+    base = np.clip(base, 0.1, 0.9)
+
+    initial_guesses = [
+        base,
+        np.ones(num_sources) * 0.1,
+        np.ones(num_sources) * 0.5,
+        np.ones(num_sources) * 0.9,
+    ]
+
+    rng = np.random.default_rng(11)
+    for _ in range(8):
+        initial_guesses.append(rng.uniform(0.05, 0.95, num_sources))
+
+    best_result = None
+    for u0 in initial_guesses:
+        result = minimize(
+            objective,
+            u0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 500}
+        )
+
+        if best_result is None or result.fun < best_result.fun:
+            best_result = result
+
+        if result.success:
+            return result.x
+
+    print("Stable optimization failed:", best_result.message)
+    return best_result.x

@@ -30,19 +30,56 @@ def require_keys(params, required_keys, case_name):
         )
 
 
+def unpack_target_schedule_entry(entry):
+    """
+    Returns schedule fields for supported target entry formats.
+
+    Stable single-equilibrium entry:
+        (start_time, target_pos, eig_ratio, eigvec_angle_rad)
+
+    Two-equilibrium entry:
+        (start_time, target_pos_1, target_pos_2)
+    """
+    if len(entry) == 4:
+        start_time, target_pos, eig_ratio, eigvec_angle_rad = entry
+        return start_time, target_pos, None, eig_ratio, eigvec_angle_rad
+
+    if len(entry) == 3:
+        start_time, target_pos_1, target_pos_2 = entry
+        return start_time, target_pos_1, target_pos_2, None, None
+
+    raise ValueError(
+        "TARGET_SCHEDULE entries must be either "
+        "(start_time, target_pos, eig_ratio, eigvec_angle_rad) or "
+        "(start_time, target_pos_1, target_pos_2)."
+    )
+
+
 def build_common_config(params):
     num_sources = params["NUM_SOURCES"]
     radius = params["RADIUS"]
 
     target_schedule = params["TARGET_SCHEDULE"]
 
-    m_saturation = params["M_SATURATION"]
+    source_magnetization = params["SOURCE_MAGNETIZATION"]
+    robot_magnetization = params["ROBOT_MAGNETIZATION"]
     l_source = params["L_SOURCE"]
     l_robot = params["L_ROBOT"]
-    magnetization = params["MAGNETIZATION"]
-    m_source_magnitude = (l_source**3) * m_saturation
-    m_robot_magnitude = (l_robot**3) * m_saturation
+    m_source_magnitude = (l_source**3) * source_magnetization
+    m_robot_magnitude = (l_robot**3) * robot_magnetization
     c_f = (3 * mu_0 / (4 * np.pi)) * m_source_magnitude * m_robot_magnitude
+    reference_source_moment = (0.02**3) * 1000e3
+    reference_robot_moment = (0.0005**3) * 868e3
+    reference_c_f = (3 * mu_0 / (4 * np.pi)) * reference_source_moment * reference_robot_moment
+    stiffness_scale = c_f / reference_c_f
+    stability_trace_margin = params.get(
+        "STABILITY_TRACE_MARGIN",
+        1e-6 * stiffness_scale
+    )
+    stability_det_margin = params.get(
+        "STABILITY_DET_MARGIN",
+        1e-12 * stiffness_scale**2
+    )
 
     grid_min = params["GRID_MIN"]
     grid_max = params["GRID_MAX"]
@@ -54,6 +91,12 @@ def build_common_config(params):
     alpha = params.get("ALPHA")
     capillary_sin_c = params.get("CAPILLARY_SIN_C")
     gamma = params.get("GAMMA")
+    use_overdamped_dynamics = params.get("USE_OVERDAMPED_DYNAMICS", False)
+    dynamics_speedup = params.get("DYNAMICS_SPEEDUP", 1.0)
+    wall_segments = params.get("WALL_SEGMENTS", [])
+    wall_stiffness = params.get("WALL_STIFFNESS", 0.0)
+    wall_damping = params.get("WALL_DAMPING", 0.0)
+    wall_interaction_range = params.get("WALL_INTERACTION_RANGE", 0.0)
 
     robot_volume = l_robot**3
     robot_radius = l_robot / 2
@@ -101,13 +144,18 @@ def build_common_config(params):
         NUM_SOURCES=num_sources,
         RADIUS=radius,
         TARGET_SCHEDULE=target_schedule,
-        M_SATURATION=m_saturation,
+        SOURCE_MAGNETIZATION=source_magnetization,
+        ROBOT_MAGNETIZATION=robot_magnetization,
         L_SOURCE=l_source,
         L_ROBOT=l_robot,
-        MAGNETIZATION=magnetization,
+        # Legacy aliases for older plotting/debug code that may inspect CFG.
+        M_SATURATION=robot_magnetization,
+        MAGNETIZATION=robot_magnetization,
         M_SOURCE_MAGNITUDE=m_source_magnitude,
         M_ROBOT_MAGNITUDE=m_robot_magnitude,
         C_F=c_f,
+        STABILITY_TRACE_MARGIN=stability_trace_margin,
+        STABILITY_DET_MARGIN=stability_det_margin,
         GRID_MIN=grid_min,
         GRID_MAX=grid_max,
         RESOLUTION=resolution,
@@ -117,6 +165,12 @@ def build_common_config(params):
         ALPHA=alpha,
         CAPILLARY_SIN_C=capillary_sin_c,
         GAMMA=gamma,
+        USE_OVERDAMPED_DYNAMICS=use_overdamped_dynamics,
+        DYNAMICS_SPEEDUP=dynamics_speedup,
+        WALL_SEGMENTS=wall_segments,
+        WALL_STIFFNESS=wall_stiffness,
+        WALL_DAMPING=wall_damping,
+        WALL_INTERACTION_RANGE=wall_interaction_range,
         ROBOT_VOLUME=robot_volume,
         ROBOT_RADIUS=robot_radius,
         ROBOT_MASS=robot_mass,

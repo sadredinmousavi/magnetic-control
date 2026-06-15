@@ -24,20 +24,23 @@ PARAMS = {
 
     # --- Desired Parameters ---
     # TARGET_SCHEDULE entries:
-    # (start_time, target_pos, eig_ratio, eigvec_angle_rad)
+    # Stable one-equilibrium mode:
+    #   (start_time, target_pos, eig_ratio, eigvec_angle_rad)
+    # Two-equilibrium mode, without eigenvalue/eigenvector constraints:
+    #   (start_time, target_pos_1, target_pos_2)
     # Write the angle by hand in degrees and convert inline with np.deg2rad(...).
     "TARGET_SCHEDULE": [
-        (0.0, np.array([0.01, 0.00]), 1, np.deg2rad(90.0)),
-        (3.0, np.array([0.00, 0.00]), 2, np.deg2rad(0.0)),
-        (6.0, np.array([0.00, 0.00]), 2, np.deg2rad(45.0)),
-        (9.0, np.array([0.00, 0.00]), 2, np.deg2rad(90.0)),
-        (12.0, np.array([0.00, 0.00]), 2, np.deg2rad(135.0)),
-        (15.0, np.array([0.00, 0.00]), 2, np.deg2rad(180.0)),
-        (18.0, np.array([0.00, 0.00]), 2, np.deg2rad(225.0)),
-        (21.0, np.array([0.00, 0.00]), 2, np.deg2rad(270.0)),
-        (24.0, np.array([0.00, 0.00]), 2, np.deg2rad(315.0)),
-        (27.0, np.array([0.00, 0.00]), 2, np.deg2rad(360.0)),
-        (30.0, np.array([0.001, 0.00]), 1, np.deg2rad(90.0)),
+        (0.0, np.array([0.00, 0.00]), 1, np.deg2rad(80.0)),
+        (6.0, np.array([0.00, 0.00]), 2, np.deg2rad(0.0)),
+        (12.0, np.array([0.00, 0.00]), 2, np.deg2rad(45.0)),
+        (18.0, np.array([0.00, 0.00]), 2, np.deg2rad(90.0)),
+        (24.0, np.array([0.00, 0.00]), 2, np.deg2rad(135.0)),
+        (30.0, np.array([0.00, 0.00]), 2, np.deg2rad(180.0)),
+        (36.0, np.array([0.00, 0.00]), 2, np.deg2rad(225.0)),
+        (42.0, np.array([0.00, 0.00]), 2, np.deg2rad(270.0)),
+        (48.0, np.array([0.00, 0.00]), 2, np.deg2rad(315.0)),
+        (54.0, np.array([0.00, 0.00]), 2, np.deg2rad(360.0)),
+        (60.0, np.array([0.001, 0.00]), 1, np.deg2rad(80.0)),
     ],
 
     # --- Magnetic Properties ---
@@ -66,19 +69,20 @@ PARAMS = {
     ]),
 
     # --- Time / Solver Parameters ---
-    "T_SPAN": (0, 33.0),
+    "T_SPAN": (0, 66.0),
     "T_EVAL_POINTS": 300,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
 
     # --- Payload Parameters ---
-    "PAYLOAD_RADIUS": 0.015,
-    "PAYLOAD_HEIGHT": 0.001,
-    "PAYLOAD_DENSITY": 50,
-    "PAYLOAD_DRAG_FACTOR": 200,
-    "CONTACT_STIFFNESS": 2e-4,
-    "CONTACT_DAMPING": 5e-4,
-    "PAYLOAD_CAPILLARY_GAIN": 5e-7,
-    "PAYLOAD_CAPILLARY_RANGE": 0.007,
-    "PAYLOAD_INITIAL_POS": np.array([0.0, 0.0]),
+    # Disabled for this case: kept only to satisfy usage4.py's required keys.
+    "PAYLOAD_RADIUS": 1e-12,
+    "PAYLOAD_HEIGHT": 1.0,
+    "PAYLOAD_DENSITY": 1.0,
+    "PAYLOAD_DRAG_FACTOR": 0.0,
+    "CONTACT_STIFFNESS": 0.0,
+    "CONTACT_DAMPING": 0.0,
+    "PAYLOAD_CAPILLARY_GAIN": 0.0,
+    "PAYLOAD_CAPILLARY_RANGE": 1.0,
+    "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
     "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),
 }

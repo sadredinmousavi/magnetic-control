@@ -16,6 +16,14 @@ import numpy as np
 # eigenvalues           : N/m. Eigenvalues of Hessian (negative = stable restoring force).
 # =============================================================================
 
+def two_equilibrium_points(center, angle_rad, radius=0.05):
+    direction = np.array([np.cos(angle_rad), np.sin(angle_rad)])
+    center = np.array(center)
+    return center + radius * direction, center - radius * direction
+
+
+SHAPE_DURATION = 15.0
+
 
 PARAMS = {
     # --- System Geometry ---
@@ -23,28 +31,26 @@ PARAMS = {
     "RADIUS": 0.25,
 
     # --- Desired Parameters ---
-    # TARGET_SCHEDULE entries:
-    # (start_time, target_pos, eig_ratio, eigvec_angle_rad)
-    # Write the angle by hand in degrees and convert inline with np.deg2rad(...).
     "TARGET_SCHEDULE": [
-        (0.0, np.array([0.01, 0.00]), 1, np.deg2rad(90.0)),
-        (3.0, np.array([0.00, 0.00]), 2, np.deg2rad(0.0)),
-        (6.0, np.array([0.00, 0.00]), 2, np.deg2rad(45.0)),
-        (9.0, np.array([0.00, 0.00]), 2, np.deg2rad(90.0)),
-        (12.0, np.array([0.00, 0.00]), 2, np.deg2rad(135.0)),
-        (15.0, np.array([0.00, 0.00]), 2, np.deg2rad(180.0)),
-        (18.0, np.array([0.00, 0.00]), 2, np.deg2rad(225.0)),
-        (21.0, np.array([0.00, 0.00]), 2, np.deg2rad(270.0)),
-        (24.0, np.array([0.00, 0.00]), 2, np.deg2rad(315.0)),
-        (27.0, np.array([0.00, 0.00]), 2, np.deg2rad(360.0)),
-        (30.0, np.array([0.001, 0.00]), 1, np.deg2rad(90.0)),
+        (0 * SHAPE_DURATION, np.array([0.00, 0.00]), 1, np.deg2rad(80.0)),
+        (1 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(0.0)),
+        (2 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(45.0)),
+        (3 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(90.0)),
+        (4 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(135.0)),
+        (5 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(180.0)),
+        (6 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(225.0)),
+        (7 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(270.0)),
+        (8 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(315.0)),
+        (9 * SHAPE_DURATION, np.array([0.00, 0.00]), 2, np.deg2rad(360.0)),
+        (10 * SHAPE_DURATION, np.array([0.001, 0.00]), 1, np.deg2rad(80.0)),
     ],
 
     # --- Magnetic Properties ---
     "SOURCE_MAGNETIZATION": 1000e3,
-    "ROBOT_MAGNETIZATION": 868e3,
+    "ROBOT_MAGNETIZATION": 1.56e5,  # A/m, PDMS + 20 wt% SPION
     "L_SOURCE": 0.02,
-    "L_ROBOT": 0.0005,
+    "L_ROBOT": 0.00025,
+    "ROBOT_HEIGHT": 0.00025,
 
     # --- Observation Space (Grid) ---
     "GRID_MIN": -0.3,
@@ -52,33 +58,37 @@ PARAMS = {
     "RESOLUTION": 50,
 
     # --- Microrobot Dynamics Parameters ---
-    "DENSITY_NDFEB": 7500,
+    "DENSITY_NDFEB": 1200,
     "FLUID_VISCOSITY": 0.001,
     "ALPHA": 0.3,
-    "CAPILLARY_SIN_C": 0.1,
+    "CAPILLARY_SIN_C": 0.01,
     "GAMMA": 0.072,
 
     # --- Initial Robot Positions ---
+    # Generate 30 robots in a grid pattern for simplicity
     "INITIAL_ROBOT_POSITIONS": np.array([
-        [-0.08, 0.04], [-0.05, 0.06], [-0.02, 0.08],
-        [0.02, 0.08], [0.05, 0.06], [0.08, 0.04],
-        [0.00, -0.09],
-    ]),
+        [x, y] for x in np.linspace(-0.05, 0.05, 6)
+                for y in np.linspace(-0.05, 0.05, 5)
+    ]),  # 6x5=30
 
     # --- Time / Solver Parameters ---
-    "T_SPAN": (0, 33.0),
+    "T_SPAN": (0, 11 * SHAPE_DURATION),
     "T_EVAL_POINTS": 300,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
+    "USE_OVERDAMPED_DYNAMICS": True,
+    "DYNAMICS_SPEEDUP": 5.0,
+    "SOLVER_RTOL": 1e-4,
+    "SOLVER_ATOL": 1e-7,
 
     # --- Payload Parameters ---
-    "PAYLOAD_RADIUS": 0.015,
-    "PAYLOAD_HEIGHT": 0.001,
-    "PAYLOAD_DENSITY": 50,
-    "PAYLOAD_DRAG_FACTOR": 200,
-    "CONTACT_STIFFNESS": 2e-4,
-    "CONTACT_DAMPING": 5e-4,
-    "PAYLOAD_CAPILLARY_GAIN": 5e-7,
-    "PAYLOAD_CAPILLARY_RANGE": 0.007,
-    "PAYLOAD_INITIAL_POS": np.array([0.0, 0.0]),
+    "PAYLOAD_RADIUS": 1e-12,
+    "PAYLOAD_HEIGHT": 1.0,
+    "PAYLOAD_DENSITY": 1.0,
+    "PAYLOAD_DRAG_FACTOR": 0.0,
+    "CONTACT_STIFFNESS": 0.0,
+    "CONTACT_DAMPING": 0.0,
+    "PAYLOAD_CAPILLARY_GAIN": 0.0,
+    "PAYLOAD_CAPILLARY_RANGE": 1.0,
+    "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
     "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),
 }

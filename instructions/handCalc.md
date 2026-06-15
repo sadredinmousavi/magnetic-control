@@ -8,7 +8,7 @@
 |---|---:|
 | External PM side length | \(L_s = 0.02\ \mathrm{m}\) |
 | Microrobot side length | \(L_r = 0.0005\ \mathrm{m}\) |
-| Magnetization | \(M = 868\times10^3\ \mathrm{A/m}\) |
+| Magnetization | \(M = 1.0\times10^6\ \mathrm{A/m}\) |
 | External PM distance from center | \(r = 0.25\ \mathrm{m}\) |
 | Robot density | \(\rho = 7500\ \mathrm{kg/m^3}\) |
 | Fluid viscosity | \(\mu = 0.001\ \mathrm{Pa\,s}\) |
@@ -27,26 +27,73 @@ m = M L^3
 ### External magnet
 
 \[
-m_s = 868000(0.02)^3
+m_s = 1.0\times10^6(0.02)^3
 \]
 
 \[
-\boxed{m_s = 6.94\ \mathrm{A\,m^2}}
+m_s = 1.0\times10^6(8\times10^{-6})
+\]
+
+\[
+\boxed{m_s = 8.0\ \mathrm{A\,m^2}}
 \]
 
 ### Microrobot
 
 \[
-m_r = 868000(0.0005)^3
+m_r = 1.0\times10^6(0.0005)^3
 \]
 
 \[
-\boxed{m_r = 1.085\times10^{-4}\ \mathrm{A\,m^2}}
+m_r = 1.0\times10^6(1.25\times10^{-10})
+\]
+
+\[
+\boxed{m_r = 1.25\times10^{-4}\ \mathrm{A\,m^2}}
 \]
 
 ---
 
-## 3. External PM force on one microrobot at workspace center
+## 3. Comparison with Khalesi parameters
+
+Khalesi uses:
+
+| Parameter | Khalesi |
+|---|---:|
+| PM magnetic moment | \(8\ \mathrm{A\,m^2}\) |
+| MR magnetic moment | \(2\times10^{-6}\ \mathrm{A\,m^2}\) |
+| MR radius | \(0.250\ \mathrm{mm}\) |
+
+My current simulation:
+
+| Parameter | This simulation |
+|---|---:|
+| PM magnetic moment | \(8\ \mathrm{A\,m^2}\) |
+| MR magnetic moment | \(1.25\times10^{-4}\ \mathrm{A\,m^2}\) |
+| MR side length | \(0.500\ \mathrm{mm}\) |
+
+Moment ratio:
+
+\[
+\frac{1.25\times10^{-4}}
+     {2\times10^{-6}}
+=
+62.5
+\]
+
+\[
+\boxed{
+m_r(\text{mine})
+\approx 62.5\times
+m_r(\text{Khalesi})
+}
+\]
+
+Thus the PMs are essentially identical, but the microrobot magnetic moment in the current simulation is approximately two orders of magnitude larger.
+
+---
+
+## 4. External PM force on one microrobot at workspace center
 
 Using the simplified vertical-dipole planar force model:
 
@@ -56,131 +103,222 @@ F =
 \frac{m_s m_r}{r^4}
 \]
 
-Since:
+Since
 
 \[
-\frac{\mu_0}{4\pi}=10^{-7}
+\frac{\mu_0}{4\pi}
+=
+10^{-7}
 \]
 
 \[
-F =
+F=
 3\times10^{-7}
-\frac{(6.94)(1.085\times10^{-4})}{(0.25)^4}
+\frac{(8.0)(1.25\times10^{-4})}
+     {(0.25)^4}
 \]
 
 \[
-\boxed{F \approx 5.79\times10^{-8}\ \mathrm{N}}
+(0.25)^4
+=
+0.00390625
 \]
 
 \[
-\boxed{F \approx 57.9\ \mathrm{nN}}
-\]
-
-This uses the same dipole-force scaling as the magnetic actuation formulation in Khalesi/Yousefi and the general magnetic dipole model from Abbott. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
-
----
-
-## 4. Microrobot mass
-
-\[
-V_r = L_r^3 = (0.0005)^3
+F=
+3\times10^{-7}
+\frac{0.001}
+     {0.00390625}
 \]
 
 \[
-V_r = 1.25\times10^{-10}\ \mathrm{m^3}
+F
+=
+7.68\times10^{-8}\ \mathrm{N}
 \]
 
 \[
-m_{robot} = \rho V_r
+\boxed{
+F \approx 7.68\times10^{-8}\ \mathrm{N}
+}
 \]
 
 \[
-m_{robot}=7500(1.25\times10^{-10})
-\]
-
-\[
-\boxed{m_{robot}=9.38\times10^{-7}\ \mathrm{kg}}
-\]
-
----
-
-## 5. Acceleration without drag
-
-\[
-a=\frac{F}{m}
-\]
-
-\[
-a=
-\frac{5.79\times10^{-8}}{9.38\times10^{-7}}
-\]
-
-\[
-\boxed{a\approx6.17\times10^{-2}\ \mathrm{m/s^2}}
-\]
-
-So the acceleration order is:
-
-\[
-\boxed{a\sim10^{-2}\text{ to }10^{-1}\ \mathrm{m/s^2}}
+\boxed{
+F \approx 76.8\ \mathrm{nN}
+}
 \]
 
 ---
 
-## 6. Drag-limited speed with my current drag model
+## 5. Microrobot mass
+
+Robot volume:
+
+\[
+V_r
+=
+L_r^3
+=
+(0.0005)^3
+\]
+
+\[
+V_r
+=
+1.25\times10^{-10}\ \mathrm{m^3}
+\]
+
+Robot mass:
+
+\[
+m_{robot}
+=
+\rho V_r
+\]
+
+\[
+m_{robot}
+=
+7500
+(1.25\times10^{-10})
+\]
+
+\[
+\boxed{
+m_{robot}
+=
+9.38\times10^{-7}\ \mathrm{kg}
+}
+\]
+
+---
+
+## 6. Acceleration without drag
+
+\[
+a
+=
+\frac{F}{m}
+\]
+
+\[
+a
+=
+\frac
+{7.68\times10^{-8}}
+{9.38\times10^{-7}}
+\]
+
+\[
+\boxed{
+a
+\approx
+8.19\times10^{-2}
+\ \mathrm{m/s^2}
+}
+\]
+
+Thus
+
+\[
+\boxed{
+a
+\sim
+10^{-1}
+\ \mathrm{m/s^2}
+}
+\]
+
+---
+
+## 7. Drag-limited speed with current drag model
 
 Current drag model:
 
 \[
-c = \alpha 6\pi \mu R
+c
+=
+\alpha
+6\pi
+\mu
+R
 \]
 
-where:
+where
 
 \[
-R=0.00025\ \mathrm{m}
-\]
-
-\[
-\alpha=0.3
-\]
-
-\[
-\mu=0.001\ \mathrm{Pa\,s}
-\]
-
-\[
-c = 0.3(6\pi)(0.001)(0.00025)
+R
+=
+0.00025\ \mathrm{m}
 \]
 
 \[
-\boxed{c \approx 1.41\times10^{-6}\ \mathrm{N\,s/m}}
-\]
-
-Terminal speed estimate:
-
-\[
-v = \frac{F}{c}
+\alpha
+=
+0.3
 \]
 
 \[
-v=
-\frac{5.79\times10^{-8}}{1.41\times10^{-6}}
+\mu
+=
+0.001\ \mathrm{Pa\,s}
 \]
 
 \[
-\boxed{v\approx4.09\times10^{-2}\ \mathrm{m/s}}
+c
+=
+0.3
+(6\pi)
+(0.001)
+(0.00025)
 \]
 
 \[
-\boxed{v\approx4.1\ \mathrm{cm/s}}
+\boxed{
+c
+=
+1.41\times10^{-6}
+\ \mathrm{N\,s/m}
+}
 \]
 
-This is likely high for real experiments because the drag model is light and assumes surface correction.
+Terminal speed:
+
+\[
+v
+=
+\frac{F}{c}
+\]
+
+\[
+v
+=
+\frac
+{7.68\times10^{-8}}
+{1.41\times10^{-6}}
+\]
+
+\[
+\boxed{
+v
+=
+5.45\times10^{-2}
+\ \mathrm{m/s}
+}
+\]
+
+\[
+\boxed{
+v
+\approx
+5.45\ \mathrm{cm/s}
+}
+\]
 
 ---
 
-# 7. Inter-robot magnetic force
+# 8. Inter-robot magnetic force
 
 For two identical microrobots with vertical moments:
 
@@ -191,287 +329,180 @@ F_{rr}
 \frac{m_r^2}{d^4}
 \]
 
-where \(d\) is the center-to-center distance.
-
-Using:
+Using
 
 \[
-m_r = 1.085\times10^{-4}\ \mathrm{A\,m^2}
+m_r
+=
+1.25\times10^{-4}
+\ \mathrm{A\,m^2}
 \]
 
 \[
 F_{rr}
 =
 3\times10^{-7}
-\frac{(1.085\times10^{-4})^2}{d^4}
+\frac
+{(1.25\times10^{-4})^2}
+{d^4}
 \]
-
-This is the same simplified vertical-dipole inter-robot force used in Dong’s model. :contentReference[oaicite:2]{index=2}
-
----
-
-## 8. Inter-robot force table
-
-| Center distance \(d\) | Force \(F_{rr}\) | Force |
-|---:|---:|---:|
-| 0.5 mm | \(5.65\times10^{-2}\ \mathrm{N}\) | 56.5 mN |
-| 1 mm | \(3.53\times10^{-3}\ \mathrm{N}\) | 3.53 mN |
-| 2 mm | \(2.21\times10^{-4}\ \mathrm{N}\) | 221 µN |
-| 4 mm | \(1.38\times10^{-5}\ \mathrm{N}\) | 13.8 µN |
-| 5 mm | \(5.65\times10^{-6}\ \mathrm{N}\) | 5.65 µN |
-| 10 mm | \(3.53\times10^{-7}\ \mathrm{N}\) | 353 nN |
-| 20 mm | \(2.21\times10^{-8}\ \mathrm{N}\) | 22.1 nN |
-| 50 mm | \(5.65\times10^{-10}\ \mathrm{N}\) | 0.565 nN |
-
-Important: these inter-robot forces are very large at short distances because the force scales as:
 
 \[
-F_{rr}\propto \frac{1}{d^4}
+F_{rr}
+=
+3\times10^{-7}
+\frac
+{1.5625\times10^{-8}}
+{d^4}
 \]
 
-So the simulation needs a cutoff/contact model near \(d\approx2R\).
+\[
+F_{rr}
+=
+\frac
+{4.6875\times10^{-15}}
+{d^4}
+\]
 
 ---
 
-## 9. Python plot for inter-robot force vs distance
+## 9. Inter-robot force table
 
-```python
-import numpy as np
-import matplotlib.pyplot as plt
+| Center distance \(d\) | Force \(F_{rr}\) |
+|---:|---:|
+| 0.5 mm | \(7.50\times10^{-2}\ \mathrm{N}\) |
+| 1 mm | \(4.69\times10^{-3}\ \mathrm{N}\) |
+| 2 mm | \(2.93\times10^{-4}\ \mathrm{N}\) |
+| 4 mm | \(1.83\times10^{-5}\ \mathrm{N}\) |
+| 5 mm | \(7.50\times10^{-6}\ \mathrm{N}\) |
+| 10 mm | \(4.69\times10^{-7}\ \mathrm{N}\) |
+| 20 mm | \(2.93\times10^{-8}\ \mathrm{N}\) |
+| 50 mm | \(7.50\times10^{-10}\ \mathrm{N}\) |
 
-mu0 = 4 * np.pi * 1e-7
+Important:
 
-M = 868e3
-L_robot = 0.0005
+\[
+F_{rr}
+\propto
+\frac{1}{d^4}
+\]
 
-m_r = M * L_robot**3
+Therefore very small changes in distance generate extremely large changes in magnetic interaction force.
 
-d = np.linspace(0.0005, 0.05, 500)  # 0.5 mm to 50 mm
+A cutoff/contact model is required near
 
-F_rr = (3 * mu0 / (4 * np.pi)) * (m_r**2) / d**4
+\[
+d
+\approx
+2R
+=
+0.5\ \mathrm{mm}
+\]
 
-plt.figure(figsize=(7, 5))
-plt.loglog(d * 1000, F_rr, linewidth=2)
-plt.grid(True, which="both", linestyle="--", alpha=0.5)
-plt.xlabel("Center-to-center distance d [mm]")
-plt.ylabel("Inter-robot magnetic force [N]")
-plt.title("Inter-robot magnetic repulsion vs distance")
-plt.show()
-```
-
-
-
-
-
-
-
-
-
-
+to avoid unrealistic forces.
 
 ---
 
-## 10. Payload mass
+## 10. Summary
 
-For the circular PLA payload:
+### Magnetic moments
+
+| Quantity | Value |
+|---|---:|
+| PM magnetic moment | \(8.0\ \mathrm{A\,m^2}\) |
+| MR magnetic moment | \(1.25\times10^{-4}\ \mathrm{A\,m^2}\) |
+
+### Force scales
+
+| Quantity | Value |
+|---|---:|
+| PM \(\rightarrow\) MR force | \(76.8\ \mathrm{nN}\) |
+| MR acceleration | \(8.19\times10^{-2}\ \mathrm{m/s^2}\) |
+| Drag-limited MR speed | \(5.45\ \mathrm{cm/s}\) |
+
+### Comparison with Khalesi
+
+| Quantity | Khalesi | This simulation |
+|---|---:|---:|
+| PM moment | \(8\ \mathrm{A\,m^2}\) | \(8\ \mathrm{A\,m^2}\) |
+| MR moment | \(2\times10^{-6}\) | \(1.25\times10^{-4}\) |
+| Ratio | 1 | 62.5 |
+
+Thus the dominant difference between the two models is not the permanent magnet but the microrobot magnetic moment, which is approximately:
+
+\[
+\boxed{
+62.5\times
+\text{larger than Khalesi}
+}
+\]
+
+in the current simulation.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Updated Comparison Table with Corrected Equilibrium Distances
+Common external PM parameters:
 
 | Parameter | Value |
-|---|---:|
-| Payload radius | \(R_p = 0.015\ \mathrm{m}\) |
-| Payload height | \(h_p = 0.001\ \mathrm{m}\) |
-| Payload density | \(\rho_p = 1240\ \mathrm{kg/m^3}\) |
-
-The payload volume is:
-
-\[
-V_p=\pi R_p^2 h_p
-\]
-
-\[
-V_p=\pi(0.015)^2(0.001)
-\]
-
-\[
-V_p=7.07\times10^{-7}\ \mathrm{m^3}
-\]
-
-The payload mass is:
-
-\[
-m_p=\rho_p V_p
-\]
-
-\[
-m_p=1240(7.07\times10^{-7})
-\]
-
-\[
-\boxed{m_p\approx8.76\times10^{-4}\ \mathrm{kg}}
-\]
-
-\[
-\boxed{m_p\approx0.876\ \mathrm{g}}
-\]
+|---|---|
+| PM side length | \(L_s=0.02\ \mathrm{m}\) |
+| PM magnetization | \(M_s=1.0\times10^6\ \mathrm{A/m}\) |
+| PM magnetic moment | \(m_s=8.0\ \mathrm{A\,m^2}\) |
+| PM distance from center | \(r=0.25\ \mathrm{m}\) |
+| Fluid viscosity | \(\mu=0.001\ \mathrm{Pa\,s}\) |
+| Drag correction | \(\alpha=0.3\) |
 
 ---
 
-## 11. Payload acceleration from one microrobot
+## Main comparison
 
-If one microrobot can transmit approximately the characteristic magnetic actuation force to the payload, then:
-
-\[
-F_{robot}\approx5.79\times10^{-8}\ \mathrm{N}
-\]
-
-The ideal payload acceleration is:
-
-\[
-a_p=\frac{F_{robot}}{m_p}
-\]
-
-\[
-a_p=
-\frac{5.79\times10^{-8}}{8.76\times10^{-4}}
-\]
-
-\[
-\boxed{
-a_p\approx6.61\times10^{-5}\ \mathrm{m/s^2}
-}
-\]
-
-Thus, a single microrobot produces only a very small acceleration on the payload:
-
-\[
-\boxed{
-a_p\sim10^{-5}\ \mathrm{m/s^2}
-}
-\]
+| Case | Robot model | Robot moment \(m_r\) | Robot mass | PM force \(F_{PM}\) | Acceleration \(a\) | Drag \(c\) | Speed \(v=F/c\) | Contact distance | Estimated \(d_{eq}\) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Current | 0.5 mm NdFeB cube | \(1.25\times10^{-4}\) | \(9.38\times10^{-7}\) kg | \(7.68\times10^{-8}\) N | \(8.19\times10^{-2}\) m/s² | \(1.41\times10^{-6}\) Ns/m | \(5.43\times10^{-2}\) m/s | 0.50 mm | 15.7 mm |
+| Yousefi | 250 µm disk, 250 µm thick N42 | \(1.29\times10^{-5}\) | \(1.23\times10^{-7}\) kg | \(7.91\times10^{-9}\) N | \(6.43\times10^{-2}\) m/s² | \(7.07\times10^{-7}\) Ns/m | \(1.12\times10^{-2}\) m/s | 0.25 mm | 9.3 mm |
+| Dong | 350 µm disk, 100 µm thick, 20% NdFeB | \(1.50\times10^{-5}\) | \(1.78\times10^{-8}\) kg | \(9.20\times10^{-10}\) N | \(5.17\times10^{-2}\) m/s² | \(9.91\times10^{-7}\) Ns/m | \(9.28\times10^{-4}\) m/s | 0.35 mm | 3.9 mm |
+| PDMS + SPION | 250 µm disk, 250 µm thick, 20% SPION | \(3.12\times10^{-6}\) | \(1.42\times10^{-8}\) kg | \(2.62\times10^{-10}\) N | \(1.84\times10^{-2}\) m/s² | \(7.07\times10^{-7}\) Ns/m | \(3.70\times10^{-4}\) m/s | 0.25 mm | 3.9 mm |
 
 ---
 
-## 12. Payload acceleration from multiple microrobots
-
-If \(N_c\) microrobots are attached to the payload and their transmitted forces are approximately aligned, then:
+## Inter-robot magnetic force
 
 \[
-F_{payload}\approx N_c F_{robot}
+F_{rr}
+=
+\frac{3\mu_0}{4\pi}
+\frac{m_r^2}{d^4}
 \]
 
-and:
-
-\[
-a_p\approx
-\frac{N_cF_{robot}}{m_p}
-\]
-
-For example:
-
-| Number of attached robots \(N_c\) | Force on payload | Payload acceleration |
-|---:|---:|---:|
-| 1 | \(5.79\times10^{-8}\ \mathrm{N}\) | \(6.61\times10^{-5}\ \mathrm{m/s^2}\) |
-| 2 | \(1.16\times10^{-7}\ \mathrm{N}\) | \(1.32\times10^{-4}\ \mathrm{m/s^2}\) |
-| 3 | \(1.74\times10^{-7}\ \mathrm{N}\) | \(1.98\times10^{-4}\ \mathrm{m/s^2}\) |
-| 5 | \(2.90\times10^{-7}\ \mathrm{N}\) | \(3.31\times10^{-4}\ \mathrm{m/s^2}\) |
-
-Therefore, even with several attached microrobots, the payload acceleration remains on the order of:
-
-\[
-\boxed{
-a_p\sim10^{-4}\ \mathrm{m/s^2}
-}
-\]
-
-for the present payload size and mass.
+| Center distance \(d\) | Mine | Yousefi | Dong | PDMS + SPION |
+|---:|---:|---:|---:|---:|
+| 0.25 mm | \(1.20\ \mathrm{N}\) | \(2.50\times10^{-4}\ \mathrm{N}\) | \(1.20\times10^{-4}\ \mathrm{N}\) | \(3.64\times10^{-5}\ \mathrm{N}\) |
+| 0.35 mm | \(3.12\times10^{-1}\ \mathrm{N}\) | \(1.02\times10^{-4}\ \mathrm{N}\) | \(5.50\times10^{-5}\ \mathrm{N}\) | \(1.52\times10^{-5}\ \mathrm{N}\) |
+| 0.50 mm | \(7.50\times10^{-2}\ \mathrm{N}\) | \(4.10\times10^{-5}\ \mathrm{N}\) | \(2.75\times10^{-5}\ \mathrm{N}\) | \(6.10\times10^{-6}\ \mathrm{N}\) |
+| 1.00 mm | \(4.69\times10^{-3}\ \mathrm{N}\) | \(2.56\times10^{-6}\ \mathrm{N}\) | \(1.70\times10^{-6}\ \mathrm{N}\) | \(3.81\times10^{-7}\ \mathrm{N}\) |
+| 5.00 mm | \(7.50\times10^{-6}\ \mathrm{N}\) | \(4.10\times10^{-9}\ \mathrm{N}\) | \(2.73\times10^{-9}\ \mathrm{N}\) | \(6.10\times10^{-10}\ \mathrm{N}\) |
+| 10.00 mm | \(4.69\times10^{-7}\ \mathrm{N}\) | \(2.56\times10^{-10}\ \mathrm{N}\) | \(1.71\times10^{-10}\ \mathrm{N}\) | \(3.81\times10^{-11}\ \mathrm{N}\) |
 
 ---
 
-## 13. Payload speed estimate with drag
+## Equilibrium spacing estimate
 
-The current payload drag coefficient in the simulation is:
-
-\[
-c_p = 2000c_r
-\]
-
-where the robot drag coefficient is:
-
-\[
-c_r=1.41\times10^{-6}\ \mathrm{N\,s/m}
-\]
-
-Thus:
-
-\[
-c_p=2000(1.41\times10^{-6})
-\]
-
-\[
-\boxed{
-c_p\approx2.83\times10^{-3}\ \mathrm{N\,s/m}
-}
-\]
-
-The drag-limited payload speed from one microrobot is:
-
-\[
-v_p=\frac{F_{robot}}{c_p}
-\]
-
-\[
-v_p=
-\frac{5.79\times10^{-8}}{2.83\times10^{-3}}
-\]
-
-\[
-\boxed{
-v_p\approx2.05\times10^{-5}\ \mathrm{m/s}
-}
-\]
-
-\[
-\boxed{
-v_p\approx20.5\ \mu\mathrm{m/s}
-}
-\]
-
-For multiple attached microrobots:
-
-| Number of attached robots \(N_c\) | Estimated payload speed |
-|---:|---:|
-| 1 | \(20.5\ \mu\mathrm{m/s}\) |
-| 2 | \(41.0\ \mu\mathrm{m/s}\) |
-| 3 | \(61.5\ \mu\mathrm{m/s}\) |
-| 5 | \(102.5\ \mu\mathrm{m/s}\) |
-
----
-
-## 14. Interpretation
-
-The calculation shows that the payload is much harder to move than a single microrobot. Although one external permanent magnet can exert a force of approximately:
-
-\[
-F\approx58\ \mathrm{nN}
-\]
-
-on one microrobot, the resulting acceleration of the \(15\ \mathrm{mm}\)-radius PLA payload is only:
-
-\[
-a_p\approx6.6\times10^{-5}\ \mathrm{m/s^2}.
-\]
-
-Moreover, with the current payload drag coefficient, the corresponding drag-limited speed is only:
-
-\[
-v_p\approx20\ \mu\mathrm{m/s}
-\]
-
-for one attached microrobot. Therefore, visible payload transport requires either:
-
-1. several microrobots attached to the payload,
-2. lower payload drag,
-3. lower payload mass,
-4. stronger magnetic actuation,
-5. or stronger robot-payload tangential coupling.
-
-The payload will not move significantly if the robot-payload interaction is only normal contact without sufficient tangential adhesion/friction, because attached robots must be able to transmit tangential magnetic force into the payload.
+| Case | Estimated \(d_{eq}\) | Meaning |
+|---|---:|---|
+| Mine | 15.7 mm | MR magnetic moment very large → strong repulsion |
+| Yousefi | 9.3 mm | Corrected using PM force and disk m_r from N42 250 µm |
+| Dong | 3.9 mm | 350 µm disk, 20% NdFeB, effective M |
+| PDMS + SPION | 3.9 mm | 250 µm disk, 250 µm thick, 20% SPION |

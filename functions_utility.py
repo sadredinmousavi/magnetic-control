@@ -104,7 +104,18 @@ def compute_grid_fields(source_positions, control_inputs_u, source_moment_vector
     return X, Y, Fx, Fy, U_pot, Bx, By
 
 
-def extract_optimization_info(control_inputs_u, net_force, H, eigenvalues, eigenvectors=None, desired_pos=None, microrobot_positions=None):
+def extract_optimization_info(
+    control_inputs_u,
+    net_force,
+    H,
+    eigenvalues,
+    eigenvectors=None,
+    desired_pos=None,
+    equilibrium_positions=None,
+    equilibrium_net_forces=None,
+    center_repulsion_info=None,
+    microrobot_positions=None
+):
     """
     Extracts physical quantities from raw optimization results into a single dictionary.
     Extracts and computes physical quantities (angles, force magnitude) 
@@ -124,6 +135,12 @@ def extract_optimization_info(control_inputs_u, net_force, H, eigenvalues, eigen
     
     if microrobot_positions is not None:
         microrobot_positions = np.array(microrobot_positions)
+
+    if equilibrium_positions is None and desired_pos is not None:
+        equilibrium_positions = [desired_pos]
+
+    if equilibrium_net_forces is None:
+        equilibrium_net_forces = [net_force]
     
     return {
         'u_values': control_inputs_u,
@@ -137,6 +154,9 @@ def extract_optimization_info(control_inputs_u, net_force, H, eigenvalues, eigen
         'eigenvalues': eigenvalues,
         'eigenvectors': eigenvectors,
         'desired_pos': desired_pos,
+        'equilibrium_positions': equilibrium_positions,
+        'equilibrium_net_forces': equilibrium_net_forces,
+        'center_repulsion_info': center_repulsion_info,
         'microrobot_positions': microrobot_positions
     }
 
@@ -148,11 +168,50 @@ def print_optimization_results(opt_info):
     print("="*45)
     
     formatted_u = np.array2string(opt_info['u_values'], formatter={'float_kind': lambda x: f"{x:.3f}"})
-    print(f"Optimized control inputs (u = cos(θ)):\n{formatted_u}\n")
+    print(f"Optimized control inputs (u = cos(theta)):\n{formatted_u}\n")
     
     formatted_angles = np.array2string(opt_info['angles_deg'], formatter={'float_kind': lambda x: f"{x:.3f}"})
-    print(f"Actual Magnet Angles (θ) in degrees:\n{formatted_angles}\n")
+    print(f"Actual Magnet Angles (theta) in degrees:\n{formatted_angles}\n")
     
+    eq_positions = opt_info.get('equilibrium_positions') or [opt_info.get('desired_pos')]
+    eq_forces = opt_info.get('equilibrium_net_forces') or [opt_info['net_force']]
+
+    for idx, (eq_pos, nf) in enumerate(zip(eq_positions, eq_forces), start=1):
+        force_mag = np.linalg.norm(nf)
+        force_angle_deg = np.degrees(np.arctan2(nf[1], nf[0]))
+        label = f" {idx}" if len(eq_positions) > 1 else ""
+        print(f"Equilibrium Point{label}:")
+        if eq_pos is not None:
+            print(f"  Position  = ({eq_pos[0]:.5f}, {eq_pos[1]:.5f}) m")
+        print(f"  Fx        = {nf[0]:.5e} N")
+        print(f"  Fy        = {nf[1]:.5e} N")
+        print(f"  Magnitude = {force_mag:.5e} N")
+        print(f"  Angle     = {force_angle_deg:.2f} deg\n")
+
+    center_info = opt_info.get('center_repulsion_info')
+    if center_info is not None:
+        center_pos = center_info['position']
+        center_force = center_info['force']
+        print("Center Detraction Point:")
+        print(f"  Position            = ({center_pos[0]:.5f}, {center_pos[1]:.5f}) m")
+        print(f"  Force Magnitude     = {np.linalg.norm(center_force):.5e} N")
+        if 'trace' in center_info and 'determinant' in center_info:
+            print(f"  Hessian Trace       = {center_info['trace']:.5e}")
+            print(f"  Hessian Determinant = {center_info['determinant']:.5e}")
+        if 'eigenvalues' in center_info:
+            center_evals = center_info['eigenvalues']
+            print(f"  Hessian Eigenvalues = [{center_evals[0]:.5e},  {center_evals[1]:.5e}]")
+        print(f"  Line Curvature      = {center_info['line_curvature']:.5e}")
+        print(f"  Line Repulsion      = {-center_info['line_curvature']:.5e}\n")
+
+    print("Stability Constraints (Potential Hessian):")
+    print(f"  Trace       = {opt_info['H_trace']:.5e}")
+    print(f"  Determinant = {opt_info['H_det']:.5e}")
+    evals = opt_info['eigenvalues']
+    print(f"  Eigenvalues = [{evals[0]:.5e},  {evals[1]:.5e}]")
+    print("="*45 + "\n")
+    return
+
     nf = opt_info['net_force']
     print("Net Force at equilibrium point:")
     print(f"  Fx        = {nf[0]:.5e} N")
@@ -202,6 +261,7 @@ def plot_mode_1(X, Y, Fx, Fy, source_positions,  opt_info,
     
     F_mag = np.sqrt(Fx**2 + Fy**2)
     desired_pos = opt_info['desired_pos']
+    equilibrium_positions = opt_info.get('equilibrium_positions') or [desired_pos]
     
     if draw_contour:
         finite_vals = F_mag[np.isfinite(F_mag)]
@@ -241,7 +301,9 @@ def plot_mode_1(X, Y, Fx, Fy, source_positions,  opt_info,
     plot_ax.plot(source_positions[:, 0], source_positions[:, 1], 'r.', markersize=15, label='Magnets')
     
     if draw_desired_point:
-        plot_ax.plot(desired_pos[0], desired_pos[1], 'rx', markersize=15, markeredgewidth=2, label='Equilibrium Point')
+        for idx, eq_pos in enumerate(equilibrium_positions):
+            label = 'Equilibrium Point' if idx == 0 else None
+            plot_ax.plot(eq_pos[0], eq_pos[1], 'rx', markersize=15, markeredgewidth=2, label=label)
     
     if plot_microrobots and opt_info.get('microrobot_positions') is not None:
         # bots = opt_info['microrobot_positions']
@@ -296,7 +358,13 @@ def plot_mode_1(X, Y, Fx, Fy, source_positions,  opt_info,
     for i, angle in enumerate(opt_info['angles_rad']):
         psai_text += f"Magnet {i+1}: {angle:.3f} rad ({opt_info['angles_deg'][i]:.1f}°)\n"
         
-    eq_text = f"\nEquilibrium Positions:\n({desired_pos[0]:.3f}, {desired_pos[1]:.3f})\n" if desired_pos is not None else ""
+    eq_text = "\nEquilibrium Positions:\n"
+    if equilibrium_positions:
+        for idx, eq_pos in enumerate(equilibrium_positions, start=1):
+            label = f"{idx}: " if len(equilibrium_positions) > 1 else ""
+            eq_text += f"{label}({eq_pos[0]:.3f}, {eq_pos[1]:.3f})\n"
+    else:
+        eq_text = ""
     
     stability_text = "\nStability Analysis:\n"
     evals = opt_info['eigenvalues']
