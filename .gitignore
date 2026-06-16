@@ -1,6 +1,7 @@
 *.gif
 outputs/*.mp4
 outputs/*.txt
+outputs/temp_plots/*.png
 *.rar
 *.pdf
 

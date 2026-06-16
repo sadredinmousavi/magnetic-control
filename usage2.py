@@ -208,8 +208,9 @@ def main():
     with open(output_filename, "w", encoding="utf-8") as f:
         f.write("# angles | wait | zero\n")
         
-        for start_time, target_pos, target_eig_ratio, target_eig_angle, u_target in target_controls:
-            angles = np.degrees(u_target)
+        for (start_time, target_pos, target_eig_ratio, target_eig_angle, u_target,), opt_info in zip(target_controls, opt_infos):
+            # angles = np.degrees(u_target)
+            angles = opt_info["angles_deg"]
             wait = 2
             zero = 180
             

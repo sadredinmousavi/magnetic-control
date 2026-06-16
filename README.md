@@ -54,11 +54,19 @@ python usage3.py
 python usage4.py
 ```
 
+
+usage1 --> gives the angles and plot static
+usage2 --> gives the target points and calculate and save into sequence
+usage3 --> gives the target points and calculate and plot
+usage4 --> gives the target points and calculate and simulate and make animation
+
 Run a specific case:
 
 ```powershell
-python usage3.py case_payload_baseline
-python usage4.py case_payload_baseline
+python usage1.py case_001_cond_001 outputs/case_001_test_001.txt
+python usage2.py case_001_cond_001
+python usage3.py case_001_cond_001
+python usage4.py case_001_cond_001
 ```
 
 Example with another future case:

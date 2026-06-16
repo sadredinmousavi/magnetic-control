@@ -5,6 +5,8 @@ import matplotlib.ticker as ticker
 import matplotlib.animation as animation
 from matplotlib.colors import LogNorm
 from time import perf_counter
+from pathlib import Path
+
 
 from functions_main import *
 
@@ -480,6 +482,24 @@ def plot_mode_3(X, Y, Fx, Fy, Bx, By, source_positions, desired_pos, draw_desire
     
     plt.tight_layout()
     plt.show()
+
+
+
+def save_temp_plot(fig, idx, base_dir="outputs", folder_name="temp_plots", dpi=200):
+    """Save a Matplotlib figure into a temporary plots folder."""
+    if fig is None:
+        raise ValueError("save_temp_plot received fig=None. Check that plot_mode_1 returns fig.")
+
+    temp_plot_dir = (Path.cwd() / base_dir / folder_name).resolve()
+    temp_plot_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_filename = temp_plot_dir / f"plot_{idx:03d}.png"
+    fig.savefig(plot_filename, dpi=dpi, bbox_inches="tight")
+
+    print(f"Saved plot: {plot_filename}")
+    return plot_filename
+
+
 
 
 # def animate_trajectories(t_eval, trajectories, source_positions, target_schedule, grid_min, grid_max, save_video=False):
