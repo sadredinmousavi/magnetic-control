@@ -651,7 +651,7 @@ def find_two_stable_equilibrium_inputs(
     source_positions,
     C_F,
     target_effort=2.0,
-    ratio_weight=10.0,
+    ratio_weight=1.0, #ratio_weight=10.0,
     trace_margin=1e-8,
     det_margin=1e-14
 ):
@@ -724,23 +724,21 @@ def find_two_stable_equilibrium_inputs(
         {'type': 'ineq', 'fun': stability_det_1},
         {'type': 'ineq', 'fun': stability_det_2},
     ]
-    bounds = [(-1.0, 1.0) for _ in range(num_sources)]
+    bounds = [(0, 1.0) for _ in range(num_sources)]
 
     base = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
     base = np.clip(base, 0.1, 0.9)
 
-    initial_guesses = []
-    for sign in (1.0, -1.0):
-        guess = sign * base.copy()
-        initial_guesses.append(guess)
-
-        alternating_guess = guess.copy()
-        alternating_guess[1::2] *= -1.0
-        initial_guesses.append(alternating_guess)
+    initial_guesses = [
+        base,
+        np.ones(num_sources) * 0.1,
+        np.ones(num_sources) * 0.5,
+        np.ones(num_sources) * 0.9,
+    ]
 
     rng = np.random.default_rng(7)
     for _ in range(12):
-        initial_guesses.append(rng.uniform(-0.9, 0.9, num_sources))
+        initial_guesses.append(rng.uniform(0.05, 0.95, num_sources))
 
     best_result = None
     for u0 in initial_guesses:

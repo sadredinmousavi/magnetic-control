@@ -42,7 +42,9 @@ PARAMS = {
         (8 * SHAPE_DURATION, *two_equilibrium_points([0.00, 0.00], np.deg2rad(360.0))),
         (9 * SHAPE_DURATION, *two_equilibrium_points([0.001, 0.00], np.deg2rad(80.0))),
     ],
-    "TWO_EQUILIBRIUM_SOLVER": "plain",
+    "TWO_EQUILIBRIUM_SOLVER": "stable",#plain
+    "STABILITY_TRACE_MARGIN" : 1e-8,
+    "STABILITY_DET_MARGIN" : 1e-14,
 
     # --- Magnetic Properties ---
     "SOURCE_MAGNETIZATION": 1000e3,

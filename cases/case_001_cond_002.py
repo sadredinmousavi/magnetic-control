@@ -36,7 +36,7 @@ PARAMS = {
     #   (start_time, target_pos_1, target_pos_2)
     # Write the angle by hand in degrees and convert inline with np.deg2rad(...).
     "TARGET_SCHEDULE": [
-        (0.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(80.0))),
+        # (0.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(80.0))),
         (6.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(0.0))),
         (12.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(45.0))),
         (18.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(90.0))),
@@ -46,7 +46,7 @@ PARAMS = {
         (42.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(270.0))),
         (48.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(315.0))),
         (54.0, *two_equilibrium_points([0.00, 0.00], np.deg2rad(360.0))),
-        (60.0, *two_equilibrium_points([0.001, 0.00], np.deg2rad(80.0))),
+        # (60.0, *two_equilibrium_points([0.001, 0.00], np.deg2rad(80.0))),
     ],
 
     # --- Magnetic Properties ---
