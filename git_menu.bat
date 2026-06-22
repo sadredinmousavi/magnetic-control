@@ -33,10 +33,11 @@ echo ==============================
 echo          GITHUB
 echo ==============================
 echo 1^) Stage + Commit
-echo 2^) Push To Main
-echo 3^) Pull
-echo 4^) Fetch + Reset
-echo 5^) Exit
+echo 2^) Push
+echo 3^) Push To Main
+echo 4^) Pull
+echo 5^) Fetch + Reset
+echo 6^) Exit
 echo ==============================
 echo Help:
 echo  Stage + Commit: runs git add --all and commits with message "update".
@@ -49,9 +50,10 @@ set /p opt=Choose option:
 
 if "%opt%"=="1" goto stage_commit_github
 if "%opt%"=="2" goto push_github
-if "%opt%"=="3" goto pull
-if "%opt%"=="4" goto reset
-if "%opt%"=="5" goto menu
+if "%opt%"=="3" goto push_github_main
+if "%opt%"=="4" goto pull
+if "%opt%"=="5" goto reset
+if "%opt%"=="6" goto menu
 goto github_menu
 
 :vps_menu
@@ -120,6 +122,12 @@ pause
 goto github_menu
 
 :push_github
+git push
+echo.
+pause
+goto github_menu
+
+:push_github_main
 git push github main
 echo.
 pause
