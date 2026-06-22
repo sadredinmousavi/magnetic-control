@@ -6,8 +6,10 @@ import matplotlib.pyplot as plt
 
 from case_loader import (
     build_common_config,
+    get_case_name_from_argv,
     load_case,
     require_keys,
+    select_file_from_dialog,
 )
 from functions_main import (
     generate_circular_source_positions,
@@ -27,14 +29,27 @@ PLOT_MODE_1_DISPLAY_SECONDS = 1.5
 
 
 def parse_args():
-    if len(sys.argv) != 3:
+    if len(sys.argv) > 3:
         raise SystemExit(
             "Usage: python usage001.py <case_name> <input_angles_file>\n"
             "Example: python usage001.py case_payload_baseline outputs/case_payload_baseline.txt"
         )
 
-    case_name = sys.argv[1]
-    input_filename = Path(sys.argv[2])
+    case_name = get_case_name_from_argv("case_payload_baseline")
+
+    if len(sys.argv) > 2:
+        input_filename = Path(sys.argv[2])
+    else:
+        input_filename = select_file_from_dialog(
+            initial_dir=Path.cwd() / "outputs",
+            title="Select angle input file",
+            filetypes=[
+                ("Text files", "*.txt"),
+                ("All files", "*.*"),
+            ],
+            default_path=Path.cwd() / "outputs" / f"{case_name}.txt",
+            cancel_message="No angle input file selected.",
+        )
 
     return case_name, input_filename
 
@@ -191,7 +206,7 @@ def main():
             display_seconds=PLOT_MODE_1_DISPLAY_SECONDS,
             reuse_window=True,
         )
-        save_temp_plot(fig, row_index)
+        save_temp_plot(fig, row_index, folder_name=case_name)
         # plt.close(fig)
 
     plt.show()

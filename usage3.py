@@ -21,6 +21,7 @@ from functions_utility import (
     extract_optimization_info,
     plot_mode_1,
     print_optimization_results,
+    save_temp_plot,
 )
 
 # =========================================================================
@@ -51,6 +52,7 @@ require_keys(
 
 CFG = build_common_config(PARAMS)
 PLOT_MODE_1_DISPLAY_SECONDS = 1.5
+SAVE_PLOTS = True
 
 
 # =========================================================================
@@ -199,8 +201,8 @@ def main():
 
         print_optimization_results(opt_info)
 
-    for opt_info, field in zip(opt_infos, field_data):
-        plot_mode_1(
+    for plot_index, (opt_info, field) in enumerate(zip(opt_infos, field_data), start=1):
+        fig = plot_mode_1(
             field["X"],
             field["Y"],
             field["Fx"],
@@ -213,8 +215,11 @@ def main():
             plot_trajectories=False,
             block=False,
             display_seconds=PLOT_MODE_1_DISPLAY_SECONDS,
-            reuse_window=True
+            reuse_window=True,
         )
+
+        if SAVE_PLOTS:
+            save_temp_plot(fig, plot_index, folder_name=CASE_NAME)
 
     plt.show()
 

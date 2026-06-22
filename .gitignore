@@ -1,7 +1,8 @@
 *.gif
-outputs/*.mp4
-outputs/*.txt
-outputs/temp_plots/*.png
+# outputs/*.mp4
+# outputs/*.txt
+# outputs/temp_plots/*.png
+outputs/*
 *.rar
 *.pdf
 

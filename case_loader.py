@@ -1,18 +1,81 @@
 import importlib
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 from scipy.constants import mu_0
 
 
+def select_file_from_dialog(
+    initial_dir,
+    title,
+    filetypes,
+    default_path=None,
+    cancel_message=None
+):
+    """Return a selected file path, or a default path when the dialog is unavailable."""
+    initial_dir = Path(initial_dir).resolve()
+
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.update()
+
+        selected_file = filedialog.askopenfilename(
+            title=title,
+            initialdir=initial_dir,
+            filetypes=filetypes,
+        )
+        root.destroy()
+
+        if selected_file:
+            return Path(selected_file)
+    except Exception as exc:
+        if default_path is not None:
+            print(f"Could not open file dialog ({exc}). Using default: {default_path}")
+            return Path(default_path)
+
+        raise RuntimeError(f"Could not open file dialog: {exc}") from exc
+
+    if default_path is not None:
+        print(f"{cancel_message or 'No file selected.'} Using default: {default_path}")
+        return Path(default_path)
+
+    raise SystemExit(cancel_message or "No file selected.")
+
+
+def select_case_name_from_dialog(default_case_name):
+    case_path = select_file_from_dialog(
+        initial_dir=Path.cwd() / "cases",
+        title="Select case file",
+        filetypes=[
+            ("Case files", "case_*.py"),
+            ("Python files", "*.py"),
+            ("All files", "*.*"),
+        ],
+        default_path=Path.cwd() / "cases" / f"{default_case_name}.py",
+        cancel_message="No case file selected.",
+    )
+
+    if case_path.name == "__init__.py":
+        raise ValueError("__init__.py is not a runnable case file.")
+
+    return case_path.stem
+
+
 def get_case_name_from_argv(default_case_name):
     if len(sys.argv) > 1:
-        return sys.argv[1]
-    return default_case_name
+        return Path(sys.argv[1]).stem
+
+    return select_case_name_from_dialog(default_case_name)
 
 
 def load_case(case_name):
+    case_name = Path(case_name).stem
     module = importlib.import_module(f"cases.{case_name}")
 
     if not hasattr(module, "PARAMS"):

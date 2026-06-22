@@ -334,7 +334,7 @@ def main():
     # Show/Save the Animation!
     output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
-    video_filename = output_dir / f"{CASE_NAME}_simulation.mp4"
+    video_filename = output_dir / f"{CASE_NAME}.mp4"
 
     animate_trajectories(
         CFG.T_EVAL,
