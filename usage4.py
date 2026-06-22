@@ -4,6 +4,7 @@ from pathlib import Path
 
 from case_loader import (
     build_common_config,
+    case_output_path,
     get_case_name_from_argv,
     load_case,
     require_keys,
@@ -332,9 +333,8 @@ def main():
     # )
 
     # Show/Save the Animation!
-    output_dir = Path("outputs")
-    output_dir.mkdir(exist_ok=True)
-    video_filename = output_dir / f"{CASE_NAME}.mp4"
+    video_filename = Path("outputs") / case_output_path(CASE_NAME).with_suffix(".mp4")
+    video_filename.parent.mkdir(parents=True, exist_ok=True)
 
     animate_trajectories(
         CFG.T_EVAL,

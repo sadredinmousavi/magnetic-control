@@ -6,6 +6,8 @@ cls
 echo ==============================
 echo        GIT ACTIONS
 echo ==============================
+call :show_project_info
+echo ==============================
 echo 1^) GitHub
 echo 2^) VPS
 echo 3^) Setup
@@ -26,6 +28,51 @@ if "%opt%"=="3" goto setup_menu
 if "%opt%"=="4" goto status
 if "%opt%"=="5" goto end
 goto menu
+
+:show_project_info
+for %%d in ("%CD%") do echo Folder: %%~nxd
+echo Path: %CD%
+
+if defined VIRTUAL_ENV (
+    echo Venv: active - %VIRTUAL_ENV%
+) else if exist ".venv\Scripts\python.exe" (
+    echo Venv: .venv
+) else if exist "venv\Scripts\python.exe" (
+    echo Venv: venv
+) else if exist "env\Scripts\python.exe" (
+    echo Venv: env
+) else (
+    echo Venv: none found
+)
+
+git rev-parse --is-inside-work-tree >nul 2>nul
+if errorlevel 1 (
+    echo Git: none found
+    exit /b
+)
+
+set "git_branch="
+set "git_remote="
+set "git_worktree_status="
+set "git_index_status="
+
+for /f "delims=" %%b in ('git branch --show-current 2^>nul') do set "git_branch=%%b"
+if not defined git_branch set "git_branch=detached HEAD"
+
+for /f "delims=" %%r in ('git remote get-url origin 2^>nul') do set "git_remote=%%r"
+if not defined git_remote set "git_remote=no origin remote"
+
+git diff --quiet --ignore-submodules -- 2>nul
+set "git_worktree_status=clean"
+if errorlevel 1 set "git_worktree_status=modified"
+
+git diff --cached --quiet --ignore-submodules -- 2>nul
+set "git_index_status=clean"
+if errorlevel 1 set "git_index_status=staged"
+
+echo Git: %git_branch% ^| %git_worktree_status% ^| %git_index_status%
+echo Remote: %git_remote%
+exit /b
 
 :github_menu
 cls

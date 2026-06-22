@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 
 from case_loader import (
     build_common_config,
+    case_output_path,
     get_case_name_from_argv,
     load_case,
     require_keys,
@@ -219,7 +220,7 @@ def main():
         )
 
         if SAVE_PLOTS:
-            save_temp_plot(fig, plot_index, folder_name=CASE_NAME)
+            save_temp_plot(fig, plot_index, folder_name=case_output_path(CASE_NAME))
 
     plt.show()
 

@@ -41,11 +41,40 @@ def select_file_from_dialog(
 
         raise RuntimeError(f"Could not open file dialog: {exc}") from exc
 
-    if default_path is not None:
-        print(f"{cancel_message or 'No file selected.'} Using default: {default_path}")
-        return Path(default_path)
-
     raise SystemExit(cancel_message or "No file selected.")
+
+
+def normalize_case_name(case_name):
+    case_text = str(case_name).strip()
+    case_text = case_text.replace("\\", "/")
+
+    if case_text.endswith(".py"):
+        path = Path(case_text)
+        parts = path.with_suffix("").parts
+
+        if "cases" in parts:
+            case_parts = parts[parts.index("cases") + 1:]
+            return ".".join(case_parts)
+
+        if len(parts) >= 2:
+            return ".".join(parts[-2:])
+
+        return path.stem
+
+    case_text = case_text.replace("/", ".")
+
+    if "." in case_text:
+        return case_text
+
+    return case_text
+
+
+def case_output_path(case_name):
+    return Path(case_output_name(case_name))
+
+
+def case_output_name(case_name):
+    return "_".join(normalize_case_name(case_name).split("."))
 
 
 def select_case_name_from_dialog(default_case_name):
@@ -53,7 +82,7 @@ def select_case_name_from_dialog(default_case_name):
         initial_dir=Path.cwd() / "cases",
         title="Select case file",
         filetypes=[
-            ("Case files", "case_*.py"),
+            ("Case files", "*.py"),
             ("Python files", "*.py"),
             ("All files", "*.*"),
         ],
@@ -64,24 +93,40 @@ def select_case_name_from_dialog(default_case_name):
     if case_path.name == "__init__.py":
         raise ValueError("__init__.py is not a runnable case file.")
 
-    return case_path.stem
+    relative_path = case_path.resolve().relative_to((Path.cwd() / "cases").resolve())
+    return normalize_case_name(relative_path)
 
 
 def get_case_name_from_argv(default_case_name):
     if len(sys.argv) > 1:
-        return Path(sys.argv[1]).stem
+        return normalize_case_name(sys.argv[1])
 
     return select_case_name_from_dialog(default_case_name)
 
 
 def load_case(case_name):
-    case_name = Path(case_name).stem
+    case_name = normalize_case_name(case_name)
     module = importlib.import_module(f"cases.{case_name}")
 
     if not hasattr(module, "PARAMS"):
         raise ValueError(f"Case module 'cases.{case_name}' must define PARAMS.")
 
-    return module.PARAMS
+    params = dict(module.PARAMS)
+
+    if "." in case_name:
+        base_module_name = ".".join(case_name.split(".")[:-1] + ["case"])
+        base_module = importlib.import_module(f"cases.{base_module_name}")
+
+        if not hasattr(base_module, "PARAMS"):
+            raise ValueError(
+                f"Base case module 'cases.{base_module_name}' must define PARAMS."
+            )
+
+        merged_params = dict(base_module.PARAMS)
+        merged_params.update(params)
+        return merged_params
+
+    return params
 
 
 def require_keys(params, required_keys, case_name):

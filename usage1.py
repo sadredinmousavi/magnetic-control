@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 
 from case_loader import (
     build_common_config,
+    case_output_path,
     get_case_name_from_argv,
     load_case,
     require_keys,
@@ -47,7 +48,7 @@ def parse_args():
                 ("Text files", "*.txt"),
                 ("All files", "*.*"),
             ],
-            default_path=Path.cwd() / "outputs" / f"{case_name}.txt",
+            default_path=Path.cwd() / "outputs" / case_output_path(case_name).with_suffix(".txt"),
             cancel_message="No angle input file selected.",
         )
 
@@ -206,7 +207,7 @@ def main():
             display_seconds=PLOT_MODE_1_DISPLAY_SECONDS,
             reuse_window=True,
         )
-        save_temp_plot(fig, row_index, folder_name=case_name)
+        save_temp_plot(fig, row_index, folder_name=case_output_path(case_name))
         # plt.close(fig)
 
     plt.show()

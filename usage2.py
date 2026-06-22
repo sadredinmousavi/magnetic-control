@@ -5,6 +5,7 @@ from pathlib import Path
 
 from case_loader import (
     build_common_config,
+    case_output_path,
     get_case_name_from_argv,
     load_case,
     require_keys,
@@ -201,9 +202,8 @@ def main():
 
         print_optimization_results(opt_info)
 
-    output_dir = Path("outputs")
-    output_dir.mkdir(exist_ok=True)
-    output_filename = output_dir / f"{CASE_NAME}.txt"
+    output_filename = Path("outputs") / case_output_path(CASE_NAME).with_suffix(".txt")
+    output_filename.parent.mkdir(parents=True, exist_ok=True)
     
     with open(output_filename, "w", encoding="utf-8") as f:
         f.write("# angles | wait | zero\n")

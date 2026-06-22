@@ -676,13 +676,25 @@ def find_two_stable_equilibrium_inputs(
     A1 = build_actuation_matrix(desired_pos_1, source_positions, C_F)
     A2 = build_actuation_matrix(desired_pos_2, source_positions, C_F)
     force_scale = max(np.max(np.abs(A1)), np.max(np.abs(A2)), 1e-30)
+    hessian_cache = {}
 
     def hessian_metrics(pos, u):
-        H = calculate_potential_hessian(pos, source_positions, C_F, u)
-        trace = H[0, 0] + H[1, 1]
-        det = H[0, 0] * H[1, 1] - H[0, 1] * H[1, 0]
-        delta = trace * trace - 4.0 * det
-        return trace, det, delta
+        cache_key = id(pos)
+        cached = hessian_cache.get(cache_key)
+        if cached is None or not np.array_equal(cached["u"], u):
+            H = calculate_potential_hessian(pos, source_positions, C_F, u)
+            trace = H[0, 0] + H[1, 1]
+            det = H[0, 0] * H[1, 1] - H[0, 1] * H[1, 0]
+            delta = trace * trace - 4.0 * det
+            cached = {
+                "u": np.array(u, copy=True),
+                "trace": trace,
+                "det": det,
+                "delta": delta,
+            }
+            hessian_cache[cache_key] = cached
+
+        return cached["trace"], cached["det"], cached["delta"]
 
     def anisotropy_penalty(pos, u):
         trace, _, delta = hessian_metrics(pos, u)
@@ -769,7 +781,8 @@ def find_stable_equilibrium_inputs(
     ratio=1.0,
     eig_angle_rad=None,
     trace_margin=1e-6,
-    det_margin=1e-12
+    det_margin=1e-12,
+    weights=None
 ):
     """
     Finds permanent magnets inputs (u) to create a stable trap at target_pos.
@@ -805,6 +818,33 @@ def find_stable_equilibrium_inputs(
     A = build_actuation_matrix(desired_pos, source_positions, C_F)
     force_scale = max(np.max(np.abs(A)), 1e-30)
     hessian_scale = max(trace_margin, 1e-30)
+    hessian_cache = {"u": None, "H": None}
+
+    def hessian_at_input(u):
+        if (
+            hessian_cache["u"] is None
+            or not np.array_equal(hessian_cache["u"], u)
+        ):
+            hessian_cache["u"] = np.array(u, copy=True)
+            hessian_cache["H"] = calculate_potential_hessian(
+                desired_pos,
+                source_positions,
+                C_F,
+                u
+            )
+
+        return hessian_cache["H"]
+
+    def hessian_trace_det_delta(u):
+        J = hessian_at_input(u)
+        a = J[0, 0]
+        b = J[0, 1]
+        c = J[1, 0]
+        d = J[1, 1]
+        trace = a + d
+        det = a * d - b * c
+        delta = trace * trace - 4 * det
+        return J, trace, det, delta
     
     def objective(u):
         return (np.sum(u**2) - target_effort)**2
@@ -822,13 +862,11 @@ def find_stable_equilibrium_inputs(
     # ------------------------------------------------------------------
     
     def stability_trace_constraint(u):
-        J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
-        trace = J[0, 0] + J[1, 1]
+        _, trace, _, _ = hessian_trace_det_delta(u)
         return (trace / trace_margin) - 1.0
         
     def stability_det_constraint(u):
-        J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
-        det = (J[0, 0] * J[1, 1]) - (J[0, 1]**2)
+        _, _, det, _ = hessian_trace_det_delta(u)
         return (det / det_margin) - 1.0
         
     # ------------------------------------------------------------------
@@ -843,23 +881,14 @@ def find_stable_equilibrium_inputs(
     #   (λ1/λ2 = ratio)  →  trace^2 (1 - r)^2  -  Delta (1 + r)^2  = 0
     # ------------------------------------------------------------------
     def eigen_ratio_constraint(u):
-        J = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
-        
-        a = J[0, 0]
-        b = J[0, 1]
-        c = J[1, 0]
-        d = J[1, 1]
-        
-        trace = a + d
-        det = a * d - b * c
-        Delta = trace * trace - 4 * det
+        _, trace, _, delta = hessian_trace_det_delta(u)
         
         r = ratio
-        ratio_error = trace * trace * (1 - r) ** 2 - Delta * (1 + r) ** 2
+        ratio_error = trace * trace * (1 - r) ** 2 - delta * (1 + r) ** 2
         return ratio_error / (hessian_scale * hessian_scale)
 
     def eigen_angle_constraint(u):
-        H = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
+        H = hessian_at_input(u)
 
         hxx = H[0, 0]
         hxy = H[0, 1]
@@ -878,8 +907,9 @@ def find_stable_equilibrium_inputs(
         {'type': 'ineq', 'fun': stability_det_constraint},
     ]
 
-    if not np.isclose(ratio, 1.0):
-        constraints.append({'type': 'eq', 'fun': eigen_ratio_constraint})
+    # if not np.isclose(ratio, 1.0):
+    #     constraints.append({'type': 'eq', 'fun': eigen_ratio_constraint})
+    constraints.append({'type': 'eq', 'fun': eigen_ratio_constraint})
 
     if eig_angle_rad is not None and not np.isclose(ratio, 1.0):
         constraints.append({'type': 'eq', 'fun': eigen_angle_constraint})

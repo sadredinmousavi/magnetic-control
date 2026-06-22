@@ -26,6 +26,38 @@ Current example case:
 
 - `cases/case_payload_baseline.py`
 
+Cases can also be organized as folders when several conditions share the same
+physical/simulation parameters:
+
+```text
+cases/
+  case_001/
+    case.py       # shared parameters
+    cond_001.py   # TARGET_SCHEDULE + INITIAL_ROBOT_POSITIONS
+    cond_002.py
+  case_002/
+    case.py
+    cond_001.py
+  case_003/
+    case.py
+    cond_001.py
+```
+
+Run a folder condition with:
+
+```powershell
+python usage3.py cases/case_003/cond_001.py
+python usage4.py cases/case_003/cond_002.py
+```
+
+Folder-style cases save with flat output names, for example:
+
+```text
+outputs/case_003_cond_002.txt
+outputs/case_003_cond_002.mp4
+outputs/case_003_cond_002/plot_001.png
+```
+
 Recommended naming pattern:
 
 - `case_payload_baseline.py`
