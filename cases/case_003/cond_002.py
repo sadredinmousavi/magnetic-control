@@ -3,14 +3,12 @@ import numpy as np
 
 PARAMS = {
     "TARGET_SCHEDULE": [
-        (6.0, np.array([-0.0, -0.00]), 1, np.deg2rad(0.0)),
-        (12.0, np.array([-0.07, -0.05]), 1, np.deg2rad(0.0)),
-        (18.0, np.array([+0.07, +0.05]), 1, np.deg2rad(0.0)),
-        (24.0, np.array([0.00, 0.00]), 1, np.deg2rad(0.0)),
-        (30.0, np.array([-0.04, 0.04]), 1, np.deg2rad(0.0)),
-        (36.0, np.array([0.04, 0.04]), 1, np.deg2rad(0.0)),
-        (42.0, np.array([0.04, -0.04]), 1, np.deg2rad(0.0)),
-        (48.0, np.array([-0.04, 0.04]), 1, np.deg2rad(0.0)),
+        (6.0,  np.array([0.00, 0.00]), 1, np.deg2rad(0.0)),
+        (12.0, np.array([0.05, 0.00]), 1, np.deg2rad(0.0)),
+        (18.0, np.array([0.00, 0.05]), 1, np.deg2rad(0.0)),
+        (24.0, np.array([-0.05, 0.00]), 1, np.deg2rad(0.0)),
+        (30.0, np.array([0.00, -0.05]), 1, np.deg2rad(0.0)),
+        (36.0, np.array([0.05, 0.00]), 1, np.deg2rad(0.0)),
     ],
     "INITIAL_ROBOT_POSITIONS": np.array([
         [-0.08, 0.04], [-0.05, 0.06], [-0.02, 0.08],
