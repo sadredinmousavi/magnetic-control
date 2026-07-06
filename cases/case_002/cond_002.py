@@ -44,4 +44,6 @@ PARAMS = {
 
     # --- Time / Solver Parameters ---
     "T_SPAN": (0, 13 * SHAPE_DURATION),
+    "T_EVAL_POINTS": 300,
+    "SOLVER_PROGRESS_INTERVAL": 0.5,
 }

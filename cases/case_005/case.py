@@ -37,10 +37,7 @@ PARAMS = {
     "CAPILLARY_SIN_C": 0.01,
     "GAMMA": 0.072,
 
-    # --- Time / Solver Parameters ---
-    "T_SPAN": (0, 180.0),
-    "T_EVAL_POINTS": 700,
-    "SOLVER_PROGRESS_INTERVAL": 0.5,
+    # --- Dynamics / Solver Parameters ---
     "USE_OVERDAMPED_DYNAMICS": False,
     "DYNAMICS_SPEEDUP": 1.0,
     "SOLVER_RTOL": 1e-4,

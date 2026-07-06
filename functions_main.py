@@ -441,90 +441,23 @@ def calculate_potential_hessian(target_pos, source_positions, C_F, u):
     return H
 
 
-# def find_equilibrium_inputs(desired_pos, source_positions, C_F):
-#     """
-#     Finds the control inputs (u) that make the desired position an equilibrium point (Fx=0, Fy=0).
-#     """
-#     N = len(source_positions)
-#     desired_pos = np.array(desired_pos)
-    
-#     # 1. Calculate the Actuation Matrix A at the desired position
-#     A = build_actuation_matrix(desired_pos, source_positions, C_F)
-    
-#     # 2. Define the objective function: Minimize ||u||^2
-#     def objective(u):
-#         return np.sum(u**2)
-    
-#     # 3. Define the Equality constraint: A * u = 0
-#     def force_constraint(u):
-#         return A @ u  # This must return an array of zeros [fx, fy]
-    
-#     constraints = [{'type': 'eq', 'fun': force_constraint}]
-    
-#     # 4. Define the bounds: -1 <= u_i <= 1
-#     bounds = [(-1.0, 1.0) for _ in range(N)]
-    
-#     # 5. Initial guess: start with all inputs at 0
-#     u0 = np.zeros(N)
-    
-#     # 6. Run the optimization
-#     result = minimize(
-#         objective, 
-#         u0, 
-#         method='SLSQP', 
-#         bounds=bounds, 
-#         constraints=constraints
-#     )
-    
-#     if result.success:
-#         return result.x  # The optimized control inputs u
-#     else:
-#         raise ValueError(f"Optimization failed: {result.message}")
 
 
-def find_equilibrium_inputs(desired_pos, source_positions, C_F, target_effort=2.0):
-    """
-    Finds u to get zero force, but forces the magnets to be active.
-    target_effort controls how 'strong' the field is around the zero point.
-    """
-    num_sources = len(source_positions)
-    desired_pos = np.array(desired_pos)
-    
-    A = build_actuation_matrix(desired_pos, source_positions, C_F)
-    force_scale = max(np.max(np.abs(A)), 1e-30)
-    
-    def objective(u):
-        effort_error = (np.sum(u**2) - target_effort)**2
 
-        if np.isclose(ratio, 1.0):
-            H = calculate_potential_hessian(desired_pos, source_positions, C_F, u)
-            trace = H[0, 0] + H[1, 1]
-            det = H[0, 0] * H[1, 1] - H[0, 1] * H[1, 0]
-            delta = trace * trace - 4.0 * det
 
-            if abs(trace) < 1e-30:
-                return effort_error + 1e6
+# =============================================================================
+# OPTIMIZERS
+# =============================================================================
 
-            return effort_error + delta / (trace * trace)
 
-        return effort_error
-        
-    def force_constraint(u):
-        return (A @ u) / force_scale
-        
-    constraints = [{'type': 'eq', 'fun': force_constraint}]
-    bounds = [(0.0, 1.0) for _ in range(num_sources)]
-    
-    # Initialize inside the valid bounds
-    u0 = np.random.uniform(0.1, 0.9, num_sources)
-    
-    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
-    
-    if result.success:
-        return result.x
-    else:
-        print("Optimization failed:", result.message)
-        return np.zeros(num_sources)
+
+
+
+
+
+def default_target_effort(num_sources):
+    """Use average u^2 = 0.25 so effort scales with the number of magnets."""
+    return num_sources * 0.25
 
 
 def find_two_equilibrium_inputs(
@@ -532,7 +465,7 @@ def find_two_equilibrium_inputs(
     desired_pos_2,
     source_positions,
     C_F,
-    target_effort=2.0
+    target_effort=None
 ):
     """
     Finds u that makes two desired positions equilibrium points.
@@ -544,6 +477,8 @@ def find_two_equilibrium_inputs(
     It does not constrain stability, eigenvalue ratio, or eigenvector angle.
     """
     num_sources = len(source_positions)
+    if target_effort is None:
+        target_effort = default_target_effort(num_sources)
     desired_pos_1 = np.array(desired_pos_1)
     desired_pos_2 = np.array(desired_pos_2)
 
@@ -575,7 +510,7 @@ def find_two_equilibrium_with_center_repulsion_inputs(
     desired_pos_2,
     source_positions,
     C_F,
-    target_effort=2.0,
+    target_effort=None,
     center_line_repulsion_margin=1e-7,
     repulsion_weight=1e9
 ):
@@ -597,6 +532,8 @@ def find_two_equilibrium_with_center_repulsion_inputs(
     plain two-equilibrium solver stays unchanged.
     """
     num_sources = len(source_positions)
+    if target_effort is None:
+        target_effort = default_target_effort(num_sources)
     desired_pos_1 = np.array(desired_pos_1)
     desired_pos_2 = np.array(desired_pos_2)
     center_pos = 0.5 * (desired_pos_1 + desired_pos_2)
@@ -650,7 +587,7 @@ def find_two_stable_equilibrium_inputs(
     desired_pos_2,
     source_positions,
     C_F,
-    target_effort=2.0,
+    target_effort=None,
     ratio_weight=1.0, #ratio_weight=10.0,
     trace_margin=1e-8,
     det_margin=1e-14
@@ -670,6 +607,8 @@ def find_two_stable_equilibrium_inputs(
     unstable in some cases.
     """
     num_sources = len(source_positions)
+    if target_effort is None:
+        target_effort = default_target_effort(num_sources)
     desired_pos_1 = np.array(desired_pos_1)
     desired_pos_2 = np.array(desired_pos_2)
 
@@ -777,12 +716,11 @@ def find_stable_equilibrium_inputs(
     desired_pos,
     source_positions,
     C_F,
-    target_effort=2.0,
+    target_effort=None,
     ratio=1.0,
     eig_angle_rad=None,
     trace_margin=1e-6,
     det_margin=1e-12,
-    weights=None
 ):
     """
     Finds permanent magnets inputs (u) to create a stable trap at target_pos.
@@ -813,6 +751,8 @@ def find_stable_equilibrium_inputs(
       modulo pi using cos(2*(phi - phi_target)).
     """
     num_sources = len(source_positions)
+    if target_effort is None:
+        target_effort = default_target_effort(num_sources)
     desired_pos = np.array(desired_pos)
     
     A = build_actuation_matrix(desired_pos, source_positions, C_F)

@@ -30,6 +30,11 @@ PARAMS = {
         [0.00, -0.09],
     ]),
 
+    # --- Time Parameters ---
+    "T_SPAN": (0, 66.0),
+    "T_EVAL_POINTS": 300,
+    "SOLVER_PROGRESS_INTERVAL": 0.5,
+
     # --- Payload Initial State ---
     "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
     "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),

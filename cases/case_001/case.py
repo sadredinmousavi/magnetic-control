@@ -38,11 +38,6 @@ PARAMS = {
     "CAPILLARY_SIN_C": 0.1,
     "GAMMA": 0.072,
 
-    # --- Time / Solver Parameters ---
-    "T_SPAN": (0, 66.0),
-    "T_EVAL_POINTS": 300,
-    "SOLVER_PROGRESS_INTERVAL": 0.5,
-
     # --- Payload Parameters ---
     # Disabled for this case: kept only to satisfy usage4.py's required keys.
     "PAYLOAD_RADIUS": 1e-12,

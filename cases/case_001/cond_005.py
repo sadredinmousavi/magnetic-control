@@ -29,6 +29,7 @@ PARAMS = {
     # --- Time / Solver Parameters ---
     "T_SPAN": (0, 180.0),
     "T_EVAL_POINTS": 700,
+    "SOLVER_PROGRESS_INTERVAL": 0.5,
     "USE_OVERDAMPED_DYNAMICS": False,
     "DYNAMICS_SPEEDUP": 1.0,
     "SOLVER_RTOL": 1e-4,
