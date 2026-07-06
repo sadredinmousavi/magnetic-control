@@ -147,7 +147,15 @@ def unpack_target_schedule_entry(entry):
 
     Two-equilibrium entry:
         (start_time, target_pos_1, target_pos_2)
+
+    Four-equilibrium entry:
+        (start_time, target_pos_1, target_pos_2, target_pos_3, target_pos_4)
     """
+    if len(entry) == 5:
+        start_time, target_pos_1, target_pos_2, target_pos_3, target_pos_4 = entry
+        additional_positions = [target_pos_2, target_pos_3, target_pos_4]
+        return start_time, target_pos_1, additional_positions, None, None
+
     if len(entry) == 4:
         start_time, target_pos, eig_ratio, eigvec_angle_rad = entry
         return start_time, target_pos, None, eig_ratio, eigvec_angle_rad
@@ -159,7 +167,8 @@ def unpack_target_schedule_entry(entry):
     raise ValueError(
         "TARGET_SCHEDULE entries must be either "
         "(start_time, target_pos, eig_ratio, eigvec_angle_rad) or "
-        "(start_time, target_pos_1, target_pos_2)."
+        "(start_time, target_pos_1, target_pos_2) or "
+        "(start_time, target_pos_1, target_pos_2, target_pos_3, target_pos_4)."
     )
 
 

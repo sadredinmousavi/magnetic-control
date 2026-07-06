@@ -13,6 +13,8 @@ from case_loader import (
 from functions_main import (
     calculate_potential_hessian,
     calculate_total_force_from_sources,
+    find_four_stable_equilibrium_inputs,
+    find_two_equilibrium_with_center_repulsion_inputs,
     find_two_stable_equilibrium_inputs,
     find_two_equilibrium_inputs,
     find_stable_equilibrium_inputs,
@@ -122,7 +124,13 @@ def main():
         ) = unpack_target_schedule_entry(target_entry)
 
         print("\n" + "=" * 70)
-        if second_equilibrium_pos is None:
+        additional_equilibrium_positions = []
+        if isinstance(second_equilibrium_pos, list):
+            additional_equilibrium_positions = second_equilibrium_pos
+        elif second_equilibrium_pos is not None:
+            additional_equilibrium_positions = [second_equilibrium_pos]
+
+        if not additional_equilibrium_positions:
             print(
                 f"Finding control inputs for target {target_pos} "
                 f"starting at t={start_time} with eig_ratio={target_eig_ratio} "
@@ -130,12 +138,12 @@ def main():
             )
         else:
             print(
-                f"Finding control inputs for equilibrium points {target_pos} "
-                f"and {second_equilibrium_pos} starting at t={start_time}"
+                f"Finding control inputs for {1 + len(additional_equilibrium_positions)} "
+                f"equilibrium points starting at t={start_time}"
             )
         print("=" * 70)
         
-        if second_equilibrium_pos is None:
+        if not additional_equilibrium_positions:
             u_target = find_stable_equilibrium_inputs(
                 target_pos,
                 source_positions,
@@ -145,15 +153,25 @@ def main():
                 trace_margin=CFG.STABILITY_TRACE_MARGIN,
                 det_margin=CFG.STABILITY_DET_MARGIN
             )
-        else:
-            if PARAMS.get("TWO_EQUILIBRIUM_SOLVER") == "plain":
+        elif len(additional_equilibrium_positions) == 1:
+            second_equilibrium_pos = additional_equilibrium_positions[0]
+            two_equilibrium_solver = PARAMS.get("TWO_EQUILIBRIUM_SOLVER", "stable")
+
+            if two_equilibrium_solver == "plain":
                 u_target = find_two_equilibrium_inputs(
                     target_pos,
                     second_equilibrium_pos,
                     source_positions,
                     CFG.C_F
                 )
-            else:
+            elif two_equilibrium_solver == "center_repulsion":
+                u_target = find_two_equilibrium_with_center_repulsion_inputs(
+                    target_pos,
+                    second_equilibrium_pos,
+                    source_positions,
+                    CFG.C_F
+                )
+            elif two_equilibrium_solver == "stable":
                 u_target = find_two_stable_equilibrium_inputs(
                     target_pos,
                     second_equilibrium_pos,
@@ -162,6 +180,19 @@ def main():
                     trace_margin=CFG.STABILITY_TRACE_MARGIN,
                     det_margin=CFG.STABILITY_DET_MARGIN
                 )
+            else:
+                raise ValueError(
+                    "TWO_EQUILIBRIUM_SOLVER must be 'stable', 'plain', "
+                    "or 'center_repulsion'."
+                )
+        elif len(additional_equilibrium_positions) == 3:
+            u_target = find_four_stable_equilibrium_inputs(
+                [target_pos] + additional_equilibrium_positions,
+                source_positions,
+                CFG.C_F
+            )
+        else:
+            raise ValueError("Only one, two, or four equilibrium targets are supported.")
         
         target_controls.append(
             (start_time, target_pos, target_eig_ratio, target_eig_angle, u_target)
@@ -178,25 +209,38 @@ def main():
         equilibrium_positions = [target_pos]
         equilibrium_net_forces = [net_force]
 
-        if second_equilibrium_pos is not None:
+        for eq_pos in additional_equilibrium_positions:
             net_force_2 = calculate_total_force_from_sources(
                 source_positions,
                 u_target,
-                second_equilibrium_pos,
+                eq_pos,
                 CFG.M_SOURCE_MAGNITUDE,
                 CFG.M_ROBOT_MAGNITUDE
             )
-            equilibrium_positions.append(second_equilibrium_pos)
+            equilibrium_positions.append(eq_pos)
             equilibrium_net_forces.append(net_force_2)
         
-        H = calculate_potential_hessian(
-            target_pos,
-            source_positions,
-            CFG.C_F,
-            u_target
-        )
+        equilibrium_stability = []
+        for eq_pos in equilibrium_positions:
+            eq_H = calculate_potential_hessian(
+                eq_pos,
+                source_positions,
+                CFG.C_F,
+                u_target
+            )
+            eq_eigenvalues, eq_eigenvectors = np.linalg.eig(eq_H)
+            equilibrium_stability.append({
+                "position": eq_pos,
+                "H": eq_H,
+                "trace": np.trace(eq_H),
+                "determinant": np.linalg.det(eq_H),
+                "eigenvalues": eq_eigenvalues,
+                "eigenvectors": eq_eigenvectors,
+            })
 
-        eigenvalues, eigenvectors = np.linalg.eig(H)
+        H = equilibrium_stability[0]["H"]
+        eigenvalues = equilibrium_stability[0]["eigenvalues"]
+        eigenvectors = equilibrium_stability[0]["eigenvectors"]
         
         opt_info = extract_optimization_info(
             control_inputs_u=u_target,
@@ -207,6 +251,7 @@ def main():
             desired_pos=target_pos,
             equilibrium_positions=equilibrium_positions,
             equilibrium_net_forces=equilibrium_net_forces,
+            equilibrium_stability=equilibrium_stability,
             microrobot_positions=CFG.INITIAL_ROBOT_POSITIONS
         )
         

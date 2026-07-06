@@ -512,28 +512,28 @@ def find_two_equilibrium_with_center_repulsion_inputs(
     C_F,
     target_effort=None,
     center_line_repulsion_margin=1e-7,
-    repulsion_weight=1e9
+    repulsion_weight=1e6,
+    stability_weight=1e5,  # Added: Weight to penalize instability at target points
+    stability_margin=1e-5  # Added: Minimum curvature required to be considered a stable "bowl"
 ):
     """
-    Finds u for two equilibrium points with a strong repelling midpoint.
+    Finds u for two stable equilibrium points with a soft repelling midpoint, 
+    allowing negative inputs.
 
     Constraints:
         1. F(desired_pos_1) = 0
         2. F(desired_pos_2) = 0
         3. F(center) = 0
-        4. The center has negative potential curvature along the line between
-           the two desired points, so force dynamics repel away from center
-           toward one of the two equilibrium points.
 
-    The line repulsion condition is:
-        -line_unit.T @ H(center) @ line_unit >= center_line_repulsion_margin
-
-    This is intentionally separate from find_two_equilibrium_inputs so the
-    plain two-equilibrium solver stays unchanged.
+    Soft Objective:
+        - Minimizes effort.
+        - Penalizes positive curvature at the center (encourages saddle/repulsion).
+        - Penalizes flat/negative curvature at the desired points (forces stable bowls).
     """
     num_sources = len(source_positions)
     if target_effort is None:
-        target_effort = default_target_effort(num_sources)
+        target_effort = default_target_effort(num_sources) # Assuming defined in your scope
+        
     desired_pos_1 = np.array(desired_pos_1)
     desired_pos_2 = np.array(desired_pos_2)
     center_pos = 0.5 * (desired_pos_1 + desired_pos_2)
@@ -542,35 +542,78 @@ def find_two_equilibrium_with_center_repulsion_inputs(
     line_len = np.linalg.norm(line_vec)
     if line_len == 0:
         raise ValueError("The two equilibrium points must be different.")
+    
     line_unit = line_vec / line_len
+    
+    # Calculate orthogonal vector for 2D stability checks
+    if len(line_unit) == 2:
+        ortho_unit = np.array([-line_unit[1], line_unit[0]])
+    else:
+        # Dummy orthogonal vector if you are working in 3D (will need a real cross product later)
+        ortho_unit = np.zeros_like(line_unit) 
 
+    # Build actuation matrices
     A1 = build_actuation_matrix(desired_pos_1, source_positions, C_F)
     A2 = build_actuation_matrix(desired_pos_2, source_positions, C_F)
-    force_scale = max(np.max(np.abs(A1)), np.max(np.abs(A2)), 1e-30)
     A_center = build_actuation_matrix(center_pos, source_positions, C_F)
 
     def center_line_curvature(u):
         H_center = calculate_potential_hessian(center_pos, source_positions, C_F, u)
         return line_unit @ H_center @ line_unit
 
+    def calculate_instability_violation(u, pos):
+        """
+        Calculates how far the point is from being a stable 'bowl'.
+        We check the curvature along the line and orthogonal to it.
+        Both should be strictly positive (greater than stability_margin).
+        """
+        H = calculate_potential_hessian(pos, source_positions, C_F, u)
+        
+        curv_line = line_unit @ H @ line_unit
+        curv_ortho = ortho_unit @ H @ ortho_unit
+        
+        violation_line = np.maximum(0.0, stability_margin - curv_line)
+        violation_ortho = np.maximum(0.0, stability_margin - curv_ortho)
+        
+        return violation_line**2 + violation_ortho**2
+
     def objective(u):
-        line_repulsion = -center_line_curvature(u)
+        # 1. Effort minimization (works perfectly with negative inputs)
         effort_error = (np.sum(u**2) - target_effort)**2
-        return effort_error - repulsion_weight * line_repulsion
+        
+        # 2. Soft Penalty for Curvature at Center (Saddle creation)
+        curvature_center = center_line_curvature(u)
+        center_violation = np.maximum(0.0, curvature_center + center_line_repulsion_margin)
+        center_penalty = repulsion_weight * (center_violation ** 2)
+        reward = curvature_center * 1.0 
+        
+        # 3. Target Points Stability Penalty (Bowl creation)
+        instability_1 = calculate_instability_violation(u, desired_pos_1)
+        instability_2 = calculate_instability_violation(u, desired_pos_2)
+        target_stability_penalty = stability_weight * (instability_1 + instability_2)
+
+        return effort_error + center_penalty + reward + target_stability_penalty
 
     def force_constraint(u):
+        # Ensure zero force at targets and center
         return np.concatenate((A1 @ u, A2 @ u, A_center @ u))
 
-    def center_line_repulsion_constraint(u):
-        return -center_line_curvature(u) - center_line_repulsion_margin
-
     constraints = [
-        {'type': 'eq', 'fun': force_constraint},
-        {'type': 'ineq', 'fun': center_line_repulsion_constraint}
+        {'type': 'eq', 'fun': force_constraint}
     ]
+    
+    # Allow negative inputs
     bounds = [(-1.0, 1.0) for _ in range(num_sources)]
-    u0 = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
-    u0[1::2] *= -1.0
+    
+    # Calculate base magnitude for initial guess
+    base_u0 = np.sqrt(target_effort / num_sources)
+    
+    # Randomly assign signs so the solver explores positive and negative space equally
+    np.random.seed(42) # Remove or change seed if you want different initializations
+    signs = np.random.choice([-1.0, 1.0], size=num_sources)
+    u0 = np.ones(num_sources) * base_u0 * signs
+    
+    # Clip to keep solver slightly away from extreme edges on start
     u0 = np.clip(u0, -0.9, 0.9)
 
     result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
@@ -588,7 +631,8 @@ def find_two_stable_equilibrium_inputs(
     source_positions,
     C_F,
     target_effort=None,
-    ratio_weight=1.0, #ratio_weight=10.0,
+    target_ratio=1.0,
+    ratio_weight=10.0,
     trace_margin=1e-8,
     det_margin=1e-14
 ):
@@ -636,10 +680,17 @@ def find_two_stable_equilibrium_inputs(
         return cached["trace"], cached["det"], cached["delta"]
 
     def anisotropy_penalty(pos, u):
-        trace, _, delta = hessian_metrics(pos, u)
-        if trace == 0:
+        trace, det, delta = hessian_metrics(pos, u)
+        if trace == 0 or det <= 0:
             return np.inf
-        return delta / (trace * trace)
+        
+        # General formula for any target ratio r:
+        # Penalizes deviation from the expected relationship between trace^2 and det
+        r = target_ratio
+        expected_ratio = ((r + 1)**2) / r
+        actual_ratio = (trace * trace) / det
+        
+        return (actual_ratio - expected_ratio)**2
 
     def objective(u):
         effort_error = (np.sum(u**2) - target_effort)**2
@@ -889,3 +940,81 @@ def find_stable_equilibrium_inputs(
 
     print("Stable optimization failed:", best_result.message)
     return best_result.x
+
+
+
+
+
+def find_four_stable_equilibrium_inputs(
+    desired_positions,
+    source_positions,
+    C_F,
+    target_effort=None,
+    stability_weight=1e5,
+    stability_margin=1e-5
+):
+    """
+    Finds positive inputs (0 to 1) for four stable equilibrium points.
+    No center repulsion is applied; it strictly minimizes effort while 
+    forcing a stable 'bowl' at each target position.
+    """
+    if len(desired_positions) != 4:
+        raise ValueError("This function requires exactly 4 desired equilibrium positions.")
+        
+    num_sources = len(source_positions)
+    if target_effort is None:
+        target_effort = default_target_effort(num_sources)
+        
+    desired_positions = [np.array(pos) for pos in desired_positions]
+    dim = desired_positions[0].shape[0]
+    
+    # Generate standard basis vectors dynamically (works for both 2D and 3D)
+    # e.g., for 2D: [1, 0] and [0, 1]
+    basis_vectors = np.eye(dim)
+
+    # Build actuation matrices for the 4 target positions
+    target_matrices = [build_actuation_matrix(pos, source_positions, C_F) for pos in desired_positions]
+
+    def calculate_instability_violation(u, pos):
+        """Forces positive curvature across all primary axes to guarantee a stable point."""
+        H = calculate_potential_hessian(pos, source_positions, C_F, u)
+        violation = 0.0
+        
+        # Check curvature along each dimension axis
+        for i in range(dim):
+            vec = basis_vectors[i]
+            curvature = vec @ H @ vec
+            violation += np.maximum(0.0, stability_margin - curvature)**2
+            
+        return violation
+
+    def objective(u):
+        # 1. Effort Minimization
+        effort_error = (np.sum(u**2) - target_effort)**2
+            
+        # 2. Stability Penalties (Deep bowls for all 4 targets)
+        target_stability_penalty = 0.0
+        for pos in desired_positions:
+            target_stability_penalty += calculate_instability_violation(u, pos)
+
+        return effort_error + (stability_weight * target_stability_penalty)
+
+    def force_constraint(u):
+        # Force must be zero at all 4 targets
+        return np.concatenate([A @ u for A in target_matrices])
+
+    # Constraints and positive bounds (0.0 to 1.0)
+    constraints = [{'type': 'eq', 'fun': force_constraint}]
+    bounds = [(0.0, 1.0) for _ in range(num_sources)]
+    
+    # Standard uniform initialization within positive bounds
+    u0 = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
+    u0 = np.clip(u0, 0.1, 0.9)
+
+    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
+
+    if result.success:
+        return result.x
+    else:
+        print("Four-equilibrium optimization failed:", result.message)
+        return np.zeros(num_sources)

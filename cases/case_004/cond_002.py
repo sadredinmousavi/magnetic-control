@@ -13,6 +13,8 @@ PARAMS = {
         # (42.0, np.array([ 0.0283, -0.0283]), np.array([-0.0283, -0.0283])),
         # (48.0, np.array([ 0.0400,  0.0000]), np.array([-0.0400,  0.0000])),
     ],
+    # Two-equilibrium solver options: "stable", "plain", "center_repulsion".
+    "TWO_EQUILIBRIUM_SOLVER": "center_repulsion",
 
     "INITIAL_ROBOT_POSITIONS": np.array([
         [-0.08, 0.04], [-0.05, 0.06], [-0.02, 0.08],
@@ -21,7 +23,7 @@ PARAMS = {
     ]),
 
     # --- Time Parameters ---
-    "T_SPAN": (0, 180.0),
+    "T_SPAN": (0, 50.0),
     "T_EVAL_POINTS": 700,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
 

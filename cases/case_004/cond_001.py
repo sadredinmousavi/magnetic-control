@@ -22,6 +22,8 @@ PARAMS = {
             [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 360.0]
         )
     ],
+    # Two-equilibrium solver options: "stable", "plain", "center_repulsion".
+    "TWO_EQUILIBRIUM_SOLVER": "stable",
 
     "INITIAL_ROBOT_POSITIONS": np.array([
         [-0.08, 0.04], [-0.05, 0.06], [-0.02, 0.08],

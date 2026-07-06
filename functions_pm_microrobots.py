@@ -13,6 +13,8 @@ from functions_utility import get_control_at_time, get_schedule_index
 
 
 def get_target_points_from_schedule_entry(entry):
+    if len(entry) == 5:
+        return np.array(entry[1:5])
     if len(entry) == 3:
         return np.array([entry[1], entry[2]])
     return np.array([entry[1]])

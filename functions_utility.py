@@ -115,6 +115,7 @@ def extract_optimization_info(
     desired_pos=None,
     equilibrium_positions=None,
     equilibrium_net_forces=None,
+    equilibrium_stability=None,
     center_repulsion_info=None,
     microrobot_positions=None
 ):
@@ -158,6 +159,7 @@ def extract_optimization_info(
         'desired_pos': desired_pos,
         'equilibrium_positions': equilibrium_positions,
         'equilibrium_net_forces': equilibrium_net_forces,
+        'equilibrium_stability': equilibrium_stability,
         'center_repulsion_info': center_repulsion_info,
         'microrobot_positions': microrobot_positions
     }
@@ -206,11 +208,21 @@ def print_optimization_results(opt_info):
         print(f"  Line Curvature      = {center_info['line_curvature']:.5e}")
         print(f"  Line Repulsion      = {-center_info['line_curvature']:.5e}\n")
 
-    print("Stability Constraints (Potential Hessian):")
-    print(f"  Trace       = {opt_info['H_trace']:.5e}")
-    print(f"  Determinant = {opt_info['H_det']:.5e}")
-    evals = opt_info['eigenvalues']
-    print(f"  Eigenvalues = [{evals[0]:.5e},  {evals[1]:.5e}]")
+    stability_entries = opt_info.get('equilibrium_stability')
+    if stability_entries is None:
+        stability_entries = [{
+            'trace': opt_info['H_trace'],
+            'determinant': opt_info['H_det'],
+            'eigenvalues': opt_info['eigenvalues'],
+        }]
+
+    for idx, stability in enumerate(stability_entries, start=1):
+        label = f" {idx}" if len(stability_entries) > 1 else ""
+        print(f"Stability Constraints{label} (Potential Hessian):")
+        print(f"  Trace       = {stability['trace']:.5e}")
+        print(f"  Determinant = {stability['determinant']:.5e}")
+        evals = stability['eigenvalues']
+        print(f"  Eigenvalues = [{evals[0]:.5e},  {evals[1]:.5e}]")
     print("="*45 + "\n")
     return
 
@@ -369,15 +381,25 @@ def plot_mode_1(X, Y, Fx, Fy, source_positions,  opt_info,
         eq_text = ""
     
     stability_text = "\nStability Analysis:\n"
-    evals = opt_info['eigenvalues']
-    evecs = opt_info['eigenvectors']
-    
-    if evals is not None and evecs is not None:
-        stability_text += f"  Eigenvalues:\n   [{evals[0]:.4e}, {evals[1]:.4e}]\n\n"
-        stability_text += f"  Eigenvectors:\n   v1: [{evecs[0,0]:.4f}, {evecs[1,0]:.4f}]\n"
-        stability_text += f"   v2: [{evecs[0,1]:.4f}, {evecs[1,1]:.4f}]\n"
-    else:
-        stability_text += "  [Data missing]\n"
+    stability_entries = opt_info.get('equilibrium_stability')
+    if stability_entries is None:
+        stability_entries = [{
+            'eigenvalues': opt_info.get('eigenvalues'),
+            'eigenvectors': opt_info.get('eigenvectors'),
+        }]
+
+    for idx, stability in enumerate(stability_entries, start=1):
+        evals = stability.get('eigenvalues')
+        evecs = stability.get('eigenvectors')
+        label = f"Eq {idx}: " if len(stability_entries) > 1 else ""
+
+        if evals is not None and evecs is not None:
+            stability_text += f"  {label}Eigenvalues:\n"
+            stability_text += f"   [{evals[0]:.4e}, {evals[1]:.4e}]\n"
+            stability_text += f"   v1: [{evecs[0,0]:.4f}, {evecs[1,0]:.4f}]\n"
+            stability_text += f"   v2: [{evecs[0,1]:.4f}, {evecs[1,1]:.4f}]\n"
+        else:
+            stability_text += f"  {label}[Data missing]\n"
     
     info_ax.text(0, 0.9, psai_text + eq_text + stability_text, fontfamily='monospace', 
                 fontsize=10, verticalalignment='top', horizontalalignment='left')
