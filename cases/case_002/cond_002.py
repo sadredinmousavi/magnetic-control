@@ -38,6 +38,10 @@ PARAMS = {
                 for y in np.linspace(-0.05, 0.05, 5)
     ]),  # 6x5=30
 
+    # --- Payload Initial State ---
+    "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
+    "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),
+
     # --- Time / Solver Parameters ---
     "T_SPAN": (0, 13 * SHAPE_DURATION),
 }

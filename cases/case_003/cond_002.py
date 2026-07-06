@@ -15,4 +15,8 @@ PARAMS = {
         [0.02, 0.08], [0.05, 0.06], [0.08, 0.04],
         [0.00, -0.09],
     ]),
+
+    # --- Payload Initial State ---
+    "PAYLOAD_INITIAL_POS": np.array([0.0, 0.0]),
+    "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),
 }

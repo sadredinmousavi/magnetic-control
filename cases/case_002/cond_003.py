@@ -28,6 +28,10 @@ PARAMS = {
                 for y in np.linspace(-0.065, -0.045, 5)
     ]),
 
+    # --- Payload Initial State ---
+    "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
+    "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),
+
     # --- Wall / Corridor Parameters ---
     # Soft wall segments form a compact corridor with open entrance/exit.
     # It is not a hard collision solver: walls repel robots when they approach.

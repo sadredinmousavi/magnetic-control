@@ -1,5 +1,3 @@
-import numpy as np
-
 # =============================================================================
 # NOMENCLATURE & UNITS REFERENCE
 # =============================================================================
@@ -62,6 +60,4 @@ PARAMS = {
     "CONTACT_DAMPING": 0.0,
     "PAYLOAD_CAPILLARY_GAIN": 0.0,
     "PAYLOAD_CAPILLARY_RANGE": 1.0,
-    "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
-    "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),
 }

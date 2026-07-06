@@ -14,10 +14,9 @@
 # eigenvalues           : N/m. Eigenvalues of Hessian (negative = stable restoring force).
 # =============================================================================
 
-
 PARAMS = {
     # --- System Geometry ---
-    "NUM_SOURCES": 8,
+    "NUM_SOURCES": 10,
     "RADIUS": 0.25,
 
     # --- Magnetic Properties ---
@@ -35,22 +34,25 @@ PARAMS = {
     "DENSITY_NDFEB": 7500,
     "FLUID_VISCOSITY": 0.001,
     "ALPHA": 0.3,
-    "CAPILLARY_SIN_C": 0.1,
+    "CAPILLARY_SIN_C": 0.01,
     "GAMMA": 0.072,
 
     # --- Time / Solver Parameters ---
-    "T_SPAN": (0, 66.0),
-    "T_EVAL_POINTS": 300,
+    "T_SPAN": (0, 180.0),
+    "T_EVAL_POINTS": 700,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
+    "USE_OVERDAMPED_DYNAMICS": False,
+    "DYNAMICS_SPEEDUP": 1.0,
+    "SOLVER_RTOL": 1e-4,
+    "SOLVER_ATOL": 1e-7,
 
     # --- Payload Parameters ---
-    # Disabled for this case: kept only to satisfy usage4.py's required keys.
-    "PAYLOAD_RADIUS": 1e-12,
-    "PAYLOAD_HEIGHT": 1.0,
-    "PAYLOAD_DENSITY": 1.0,
-    "PAYLOAD_DRAG_FACTOR": 0.0,
-    "CONTACT_STIFFNESS": 0.0,
-    "CONTACT_DAMPING": 0.0,
-    "PAYLOAD_CAPILLARY_GAIN": 0.0,
-    "PAYLOAD_CAPILLARY_RANGE": 1.0,
+    "PAYLOAD_RADIUS": 0.015,
+    "PAYLOAD_HEIGHT": 0.001,
+    "PAYLOAD_DENSITY": 50,
+    "PAYLOAD_DRAG_FACTOR": 50,
+    "CONTACT_STIFFNESS": 2e-5,
+    "CONTACT_DAMPING": 5e-5,
+    "PAYLOAD_CAPILLARY_GAIN": 5e-7,
+    "PAYLOAD_CAPILLARY_RANGE": 0.007,
 }
