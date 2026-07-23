@@ -1,5 +1,7 @@
 @echo off
 cd /d "%~dp0"
+call :find_bash
+
 
 :menu
 cls
@@ -110,18 +112,21 @@ echo            VPS
 echo ==============================
 echo 1^) Stage + Commit
 echo 2^) Push To Main
-echo 3^) Exit
+echo 3^) Push To Main With PuTTY
+echo 4^) Exit
 echo ==============================
 echo Help:
 echo  Stage + Commit: runs git add --all and commits with message "update".
 echo  Push To Main: pushes main branch to the remote named vps.
+echo  Push To Main With PuTTY: uses plink and VPS_PASSWORD from infra\.env.
 echo  Exit: return to the main menu.
 echo ==============================
 set /p opt=Choose option: 
 
 if "%opt%"=="1" goto stage_commit_vps
 if "%opt%"=="2" goto push_vps
-if "%opt%"=="3" goto menu
+if "%opt%"=="3" goto push_vps_putty
+if "%opt%"=="4" goto menu
 goto vps_menu
 
 :setup_menu
@@ -131,18 +136,21 @@ echo           SETUP
 echo ==============================
 echo 1^) Define Gits
 echo 2^) First Deploy
-echo 3^) Exit
+echo 3^) First Deploy With PuTTY
+echo 4^) Exit
 echo ==============================
 echo Help:
 echo  Define Gits: configures GitHub and VPS git remotes from infra/.env.
 echo  First Deploy: runs the first-time VPS setup and deploy script.
+echo  First Deploy With PuTTY: uses pscp, plink, and VPS_PASSWORD from infra/.env.
 echo  Exit: return to the main menu.
 echo ==============================
 set /p opt=Choose option: 
 
 if "%opt%"=="1" goto define_gits
 if "%opt%"=="2" goto first_deploy
-if "%opt%"=="3" goto menu
+if "%opt%"=="3" goto first_deploy_putty
+if "%opt%"=="4" goto menu
 goto setup_menu
 
 :stage_commit_github
@@ -193,17 +201,82 @@ echo.
 pause
 goto vps_menu
 
+:push_vps_putty
+set "VPS_PASSWORD="
+
+if not exist "infra\.env" (
+    echo ERROR: infra\.env was not found.
+    echo Copy infra\.env.main to infra\.env and set VPS_PASSWORD first.
+    echo.
+    pause
+    goto vps_menu
+)
+
+for /f "usebackq tokens=1,* delims==" %%A in ("infra\.env") do (
+    if /i "%%A"=="VPS_PASSWORD" set "VPS_PASSWORD=%%B"
+    if /i "%%A"=="PASSWORD" if not defined VPS_PASSWORD set "VPS_PASSWORD=%%B"
+)
+
+if not defined VPS_PASSWORD (
+    echo ERROR: VPS_PASSWORD was not found in infra\.env.
+    echo.
+    pause
+    goto vps_menu
+)
+
+where plink.exe >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: plink.exe was not found. Install PuTTY or add it to PATH.
+    set "VPS_PASSWORD="
+    echo.
+    pause
+    goto vps_menu
+)
+
+set "GIT_SSH_COMMAND=plink -ssh -batch -pw %VPS_PASSWORD%"
+git push vps main
+set "PUSH_RESULT=%errorlevel%"
+set "GIT_SSH_COMMAND="
+set "VPS_PASSWORD="
+
+if not "%PUSH_RESULT%"=="0" echo PuTTY push failed with exit code %PUSH_RESULT%.
+set "PUSH_RESULT="
+echo.
+pause
+goto vps_menu
+
 :define_gits
-bash infra/local/define-gits.sh
+call :run_bash infra/local/define-gits.sh
 echo.
 pause
 goto setup_menu
 
 :first_deploy
-bash infra/local/first-setup-vps.sh
+call :run_bash infra/local/first-setup-vps.sh
 echo.
 pause
 goto setup_menu
+
+:first_deploy_putty
+call infra\local\first-setup-vps-putty.bat
+echo.
+pause
+goto setup_menu
+
+:find_bash
+set "BASH_EXE="
+for /f "delims=" %%b in ('where bash.exe 2^>nul') do if not defined BASH_EXE set "BASH_EXE=%%b"
+if not defined BASH_EXE if exist "%ProgramFiles%\Git\bin\bash.exe" set "BASH_EXE=%ProgramFiles%\Git\bin\bash.exe"
+if not defined BASH_EXE if exist "%ProgramFiles%\Git\usr\bin\bash.exe" set "BASH_EXE=%ProgramFiles%\Git\usr\bin\bash.exe"
+exit /b
+
+:run_bash
+if not defined BASH_EXE (
+    echo ERROR: Git Bash was not found. Install Git for Windows with Git Bash.
+    exit /b 1
+)
+"%BASH_EXE%" "%~1"
+exit /b %errorlevel%
 
 :status
 git status

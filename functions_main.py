@@ -954,9 +954,12 @@ def find_four_stable_equilibrium_inputs(
     stability_margin=1e-5
 ):
     """
-    Finds positive inputs (0 to 1) for four stable equilibrium points.
-    No center repulsion is applied; it strictly minimizes effort while 
-    forcing a stable 'bowl' at each target position.
+    Finds signed inputs (-1 to 1) for four equilibrium points.
+
+    The four-point force constraints are often underdetermined but the
+    positive-only feasible region can collapse to u=0. Optimizing inside the
+    force-zero nullspace avoids the trivial solution while keeping all four
+    force constraints exactly satisfied.
     """
     if len(desired_positions) != 4:
         raise ValueError("This function requires exactly 4 desired equilibrium positions.")
@@ -974,6 +977,20 @@ def find_four_stable_equilibrium_inputs(
 
     # Build actuation matrices for the 4 target positions
     target_matrices = [build_actuation_matrix(pos, source_positions, C_F) for pos in desired_positions]
+    force_matrix = np.vstack(target_matrices)
+    force_scale = max(np.max(np.abs(force_matrix)), 1e-30)
+    force_matrix_scaled = force_matrix / force_scale
+    _, singular_values, vt = np.linalg.svd(force_matrix_scaled)
+    rank_tolerance = (
+        np.max(force_matrix_scaled.shape)
+        * np.finfo(float).eps
+        * singular_values[0]
+    )
+    rank = np.sum(singular_values > rank_tolerance)
+    nullspace = vt[rank:].T
+
+    if nullspace.shape[1] == 0:
+        raise ValueError("Four-equilibrium targets have no nonzero force-zero nullspace.")
 
     def calculate_instability_violation(u, pos):
         """Forces positive curvature across all primary axes to guarantee a stable point."""
@@ -988,7 +1005,7 @@ def find_four_stable_equilibrium_inputs(
             
         return violation
 
-    def objective(u):
+    def objective_from_u(u):
         # 1. Effort Minimization
         effort_error = (np.sum(u**2) - target_effort)**2
             
@@ -999,22 +1016,42 @@ def find_four_stable_equilibrium_inputs(
 
         return effort_error + (stability_weight * target_stability_penalty)
 
-    def force_constraint(u):
-        # Force must be zero at all 4 targets
-        return np.concatenate([A @ u for A in target_matrices])
+    def objective(z):
+        return objective_from_u(nullspace @ z)
 
-    # Constraints and positive bounds (0.0 to 1.0)
-    constraints = [{'type': 'eq', 'fun': force_constraint}]
-    bounds = [(0.0, 1.0) for _ in range(num_sources)]
-    
-    # Standard uniform initialization within positive bounds
-    u0 = np.ones(num_sources) * np.sqrt(target_effort / num_sources)
-    u0 = np.clip(u0, 0.1, 0.9)
+    def lower_bound_constraint(z):
+        return (nullspace @ z) + 1.0
 
-    result = minimize(objective, u0, method='SLSQP', bounds=bounds, constraints=constraints)
+    def upper_bound_constraint(z):
+        return 1.0 - (nullspace @ z)
 
-    if result.success:
-        return result.x
-    else:
-        print("Four-equilibrium optimization failed:", result.message)
-        return np.zeros(num_sources)
+    constraints = [
+        {'type': 'ineq', 'fun': lower_bound_constraint},
+        {'type': 'ineq', 'fun': upper_bound_constraint},
+    ]
+
+    rng = np.random.default_rng(42)
+    initial_guesses = [np.zeros(nullspace.shape[1])]
+
+    for _ in range(24):
+        trial_u = rng.uniform(-0.8, 0.8, num_sources)
+        initial_guesses.append(nullspace.T @ trial_u)
+
+    best_result = None
+    for z0 in initial_guesses:
+        result = minimize(
+            objective,
+            z0,
+            method='SLSQP',
+            constraints=constraints,
+            options={'maxiter': 1000}
+        )
+
+        if best_result is None or result.fun < best_result.fun:
+            best_result = result
+
+        if result.success and np.sum((nullspace @ result.x) ** 2) > 1e-8:
+            return nullspace @ result.x
+
+    print("Four-equilibrium optimization failed:", best_result.message)
+    return nullspace @ best_result.x

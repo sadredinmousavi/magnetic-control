@@ -125,7 +125,7 @@ def extract_optimization_info(
     from the raw optimization results.
     """
     # Calculate actual angles from u = cos(theta)
-    angles_rad = np.arccos(control_inputs_u)
+    angles_rad = np.arccos(np.clip(control_inputs_u, -1.0, 1.0))
     angles_deg = np.degrees(angles_rad)
     
     # Calculate force metrics
