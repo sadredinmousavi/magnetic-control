@@ -160,3 +160,38 @@ python usage4.py case_payload_light
 - The case loader imports from `cases.<case_name>`.
 - `usage3.py` needs only the control/field-related parameters.
 - `usage4.py` needs the full parameter set, including payload and solver-related values.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+---
+
+# Experimental
+```
+pip install -r ./experimental/requirements.txt
+```
+
+
+```
+python ./experimental/gui001.py
+```
