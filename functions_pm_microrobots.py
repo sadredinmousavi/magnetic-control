@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from scipy.constants import mu_0
 
+from case_loader import unpack_target_schedule_entry
+
 from functions_main import (
     calculate_capillary_force,
     calculate_dipole_interaction_force,
@@ -13,11 +15,12 @@ from functions_utility import get_control_at_time, get_schedule_index
 
 
 def get_target_points_from_schedule_entry(entry):
-    if len(entry) == 5:
-        return np.array(entry[1:5])
-    if len(entry) == 3:
-        return np.array([entry[1], entry[2]])
-    return np.array([entry[1]])
+    _, target, additional, _, _ = unpack_target_schedule_entry(entry)
+    if additional is None:
+        return np.array([target])
+    if isinstance(additional, list):
+        return np.array([target, *additional])
+    return np.array([target, additional])
 
 
 def calculate_external_forces_batch(
@@ -355,7 +358,11 @@ def animate_trajectories(
     wall_segments=None,
     contour_levels=20,
     save_video=False,
-    video_name="microrobots_simulation.mp4"
+    video_name="microrobots_simulation.mp4",
+    video_dpi=160,
+    video_fps=30,
+    video_crf=18,
+    figure_size=(8, 8),
 ):
     """
     Fast animation for time-varying target microrobot simulation.
@@ -364,9 +371,26 @@ def animate_trajectories(
     switched when the active target changes. This avoids redrawing contours
     every frame.
     """
+    if video_dpi <= 0 or video_fps <= 0:
+        raise ValueError("VIDEO_DPI and VIDEO_FPS must be positive.")
+    if not 0 <= video_crf <= 51:
+        raise ValueError("VIDEO_CRF must be between 0 and 51.")
+    if len(figure_size) != 2 or any(size <= 0 for size in figure_size):
+        raise ValueError("ANIMATION_FIGURE_SIZE must contain two positive values.")
+    pixel_size = tuple(round(size * video_dpi) for size in figure_size)
+    if any(pixels % 2 for pixels in pixel_size):
+        raise ValueError(
+            "ANIMATION_FIGURE_SIZE * VIDEO_DPI must produce even pixel dimensions "
+            "for H.264 yuv420p output."
+        )
+
     print("Generating animation...")
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig, ax = plt.subplots(figsize=figure_size)
+    # Keep the axes geometry identical between the interactive canvas and the
+    # encoded frames. Explicit margins also prevent legends/labels from making
+    # the saved axes box subtly narrower than it is on screen.
+    fig.subplots_adjust(left=0.11, right=0.96, bottom=0.09, top=0.93)
 
     ax.set_xlim(grid_min, grid_max)
     ax.set_ylim(grid_min, grid_max)
@@ -670,13 +694,28 @@ def animate_trajectories(
         fig,
         update,
         frames=len(t_eval),
-        interval=30,
-        blit=False
+        # Use the same nominal timing for the GUI preview and encoded file.
+        interval=1000.0 / video_fps,
+        blit=True,
+        cache_frame_data=False,
     )
 
     if save_video:
         print(f"Saving video to '{video_name}'...")
-        ani.save(video_name, writer="ffmpeg", fps=30)
+        writer = animation.FFMpegWriter(
+            fps=video_fps,
+            codec="libx264",
+            bitrate=-1,
+            extra_args=[
+                "-crf", str(video_crf),
+                "-preset", "slow",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+            ],
+            metadata={"title": "Microrobot Swarm Dynamics"},
+        )
+        ani.save(video_name, writer=writer, dpi=video_dpi)
         print("Video saved!")
 
     plt.show()
+    return ani

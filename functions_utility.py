@@ -1,14 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import matplotlib.ticker as ticker
-import matplotlib.animation as animation
 from matplotlib.colors import LogNorm
+from scipy.constants import mu_0
 from time import perf_counter
 from pathlib import Path
-
-
-from functions_main import *
 
 
 class SolveIVPProgress:
@@ -66,43 +62,52 @@ def get_schedule_index(t, schedule):
 
 def compute_grid_fields(source_positions, control_inputs_u, source_moment_vectors, 
                         grid_min, grid_max, resolution, M_SOURCE_MAGNITUDE, M_ROBOT_MAGNITUDE):
-    """Calculates the force field and potential energy across the observation grid."""
+    """Vectorized force, potential, and magnetic-field sampling on a 2D grid."""
+    source_positions = np.asarray(source_positions, dtype=float)
+    control_inputs_u = np.asarray(control_inputs_u, dtype=float)
+    source_moment_vectors = np.asarray(source_moment_vectors, dtype=float)
+    if source_positions.shape != source_moment_vectors.shape:
+        raise ValueError("source_positions and source_moment_vectors must have matching shapes.")
+    if len(source_positions) != len(control_inputs_u):
+        raise ValueError("Number of source positions must match control inputs.")
+
     x = np.linspace(grid_min, grid_max, resolution)
     y = np.linspace(grid_min, grid_max, resolution)
     X, Y = np.meshgrid(x, y)
-    
-    Fx = np.zeros_like(X)
-    Fy = np.zeros_like(Y)
-    Bx = np.zeros_like(X)
-    By = np.zeros_like(Y)
-    U_pot = np.zeros_like(X)
-    
-    # Robot moment aligned with the z-axis (planar approximation matching Abbott formulas)
-    robot_moment_vec = np.array([0.0, 0.0, M_ROBOT_MAGNITUDE]) 
-    
-    for i in range(resolution):
-        for j in range(resolution):
-            point_pos = np.array([X[i, j], Y[i, j]])
-            
-            # Total force at this point
-            force_vec = calculate_total_force_from_sources(
-                source_positions, control_inputs_u, point_pos, 
-                M_SOURCE_MAGNITUDE, M_ROBOT_MAGNITUDE
-            )
-            Fx[i, j] = force_vec[0]
-            Fy[i, j] = force_vec[1]
-            
-            # Total magnetic field at this point
-            field_vec = calculate_total_field(
-                source_positions, source_moment_vectors, point_pos
-            )
-            Bx[i, j] = field_vec[0]
-            By[i, j] = field_vec[1]
-            
-            # Potential Energy U = -B * m
-            B_3d = np.array([field_vec[0], field_vec[1], 0.0]) 
-            U_pot[i, j] = -np.dot(B_3d, robot_moment_vec)
-    
+
+    points = np.stack((X, Y), axis=-1)
+    displacement = points[:, :, None, :] - source_positions[None, None, :, :]
+    distance = np.linalg.norm(displacement, axis=-1)
+    safe = distance >= 1e-9
+
+    inv_r3 = np.zeros_like(distance)
+    inv_r5 = np.zeros_like(distance)
+    inv_r3[safe] = distance[safe] ** -3
+    inv_r5[safe] = distance[safe] ** -5
+
+    c_f = 3 * mu_0 * M_SOURCE_MAGNITUDE * M_ROBOT_MAGNITUDE / (4 * np.pi)
+    force = c_f * np.sum(
+        control_inputs_u[None, None, :, None] * displacement
+        * inv_r5[:, :, :, None],
+        axis=2,
+    )
+    Fx, Fy = force[:, :, 0], force[:, :, 1]
+
+    # This potential is analytically consistent with F = C_F*u*r/|r|^5:
+    # F = -grad(U), U = sum(C_F*u/(3|r|^3)).
+    U_pot = (c_f / 3.0) * np.sum(
+        control_inputs_u[None, None, :] * inv_r3, axis=2
+    )
+
+    moment_dot_r = np.sum(
+        source_moment_vectors[None, None, :, :] * displacement, axis=-1
+    )
+    field = (mu_0 / (4 * np.pi)) * np.sum(
+        3 * displacement * moment_dot_r[:, :, :, None] * inv_r5[:, :, :, None]
+        - source_moment_vectors[None, None, :, :] * inv_r3[:, :, :, None],
+        axis=2,
+    )
+    Bx, By = field[:, :, 0], field[:, :, 1]
     return X, Y, Fx, Fy, U_pot, Bx, By
 
 
@@ -458,7 +463,7 @@ def plot_mode_2(X, Y, Fx, Fy, U_pot, source_positions, desired_pos, draw_desired
     ax2.grid(True)
     
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
 def plot_mode_3(X, Y, Fx, Fy, Bx, By, source_positions, desired_pos, draw_desired_point=True):
@@ -503,14 +508,43 @@ def plot_mode_3(X, Y, Fx, Fy, Bx, By, source_positions, desired_pos, draw_desire
     ax2.set_aspect('equal')
     
     plt.tight_layout()
-    plt.show()
+    return fig
+
+
+def plot_field(plot_type, field, source_positions, opt_info, **options):
+    """Render a precomputed field using a consistent plotter contract."""
+    plot_type = str(plot_type).lower()
+    desired_pos = opt_info.get("desired_pos", field.get("target_pos"))
+
+    if plot_type in {"1", "force_info"}:
+        return plot_mode_1(
+            field["X"], field["Y"], field["Fx"], field["Fy"],
+            source_positions, opt_info, **options
+        )
+    if plot_type in {"2", "force_potential"}:
+        allowed = {"draw_desired_point"}
+        selected = {key: value for key, value in options.items() if key in allowed}
+        return plot_mode_2(
+            field["X"], field["Y"], field["Fx"], field["Fy"],
+            field["U_pot"], source_positions, desired_pos, **selected
+        )
+    if plot_type in {"3", "force_magnetic"}:
+        allowed = {"draw_desired_point"}
+        selected = {key: value for key, value in options.items() if key in allowed}
+        return plot_mode_3(
+            field["X"], field["Y"], field["Fx"], field["Fy"],
+            field["Bx"], field["By"], source_positions, desired_pos, **selected
+        )
+    raise ValueError(
+        "PLOT_TYPE must be 'force_info', 'force_potential', or 'force_magnetic'."
+    )
 
 
 
 def save_temp_plot(fig, idx, base_dir="outputs", folder_name="temp_plots", dpi=200):
     """Save a Matplotlib figure into a temporary plots folder."""
     if fig is None:
-        raise ValueError("save_temp_plot received fig=None. Check that plot_mode_1 returns fig.")
+        raise ValueError("save_temp_plot received fig=None. Plotters must return a figure.")
 
     temp_plot_dir = (Path.cwd() / base_dir / folder_name).resolve()
     temp_plot_dir.mkdir(parents=True, exist_ok=True)

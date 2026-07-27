@@ -1,6 +1,22 @@
 import numpy as np
+import warnings
 from scipy.constants import mu_0  # Magnetic constant (permeability of free space)
 from scipy.optimize import minimize
+
+
+def _optimization_failure(message, fallback, failure_mode):
+    """Either reject a failed solve or visibly continue with its best candidate."""
+    if failure_mode == "error":
+        raise RuntimeError(message)
+    if failure_mode != "warn":
+        raise ValueError("OPTIMIZATION_FAILURE_MODE must be 'warn' or 'error'.")
+    warnings.warn(
+        f"{message}. Continuing with the optimizer's best candidate; "
+        "review the reported force and stability residuals.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return fallback
 
 
 # =============================================================================
@@ -465,7 +481,8 @@ def find_two_equilibrium_inputs(
     desired_pos_2,
     source_positions,
     C_F,
-    target_effort=None
+    target_effort=None,
+    failure_mode="warn"
 ):
     """
     Finds u that makes two desired positions equilibrium points.
@@ -501,8 +518,11 @@ def find_two_equilibrium_inputs(
     if result.success:
         return result.x
     else:
-        print("Two-equilibrium optimization failed:", result.message)
-        return np.zeros(num_sources)
+        return _optimization_failure(
+            f"Two-equilibrium optimization failed: {result.message}",
+            result.x,
+            failure_mode,
+        )
 
 
 def find_two_equilibrium_with_center_repulsion_inputs(
@@ -514,7 +534,8 @@ def find_two_equilibrium_with_center_repulsion_inputs(
     center_line_repulsion_margin=1e-7,
     repulsion_weight=1e6,
     stability_weight=1e5,  # Added: Weight to penalize instability at target points
-    stability_margin=1e-5  # Added: Minimum curvature required to be considered a stable "bowl"
+    stability_margin=1e-5,  # Added: Minimum curvature required to be considered a stable "bowl"
+    failure_mode="warn"
 ):
     """
     Finds u for two stable equilibrium points with a soft repelling midpoint, 
@@ -621,8 +642,11 @@ def find_two_equilibrium_with_center_repulsion_inputs(
     if result.success:
         return result.x
     else:
-        print("Two-equilibrium center-repulsion optimization failed:", result.message)
-        return np.zeros(num_sources)
+        return _optimization_failure(
+            f"Two-equilibrium center-repulsion optimization failed: {result.message}",
+            result.x,
+            failure_mode,
+        )
 
 
 def find_two_stable_equilibrium_inputs(
@@ -634,7 +658,8 @@ def find_two_stable_equilibrium_inputs(
     target_ratio=1.0,
     ratio_weight=10.0,
     trace_margin=1e-8,
-    det_margin=1e-14
+    det_margin=1e-14,
+    failure_mode="warn"
 ):
     """
     Finds u for two stable equilibrium points with near-equal eigenvalues.
@@ -759,8 +784,11 @@ def find_two_stable_equilibrium_inputs(
         if result.success:
             return result.x
 
-    print("Two-stable-equilibrium optimization failed:", best_result.message)
-    return best_result.x
+    return _optimization_failure(
+        f"Two-stable-equilibrium optimization failed: {best_result.message}",
+        best_result.x,
+        failure_mode,
+    )
 
 
 def find_stable_equilibrium_inputs(
@@ -772,6 +800,7 @@ def find_stable_equilibrium_inputs(
     eig_angle_rad=None,
     trace_margin=1e-6,
     det_margin=1e-12,
+    failure_mode="warn",
 ):
     """
     Finds permanent magnets inputs (u) to create a stable trap at target_pos.
@@ -938,8 +967,11 @@ def find_stable_equilibrium_inputs(
         if result.success:
             return result.x
 
-    print("Stable optimization failed:", best_result.message)
-    return best_result.x
+    return _optimization_failure(
+        f"Stable optimization failed: {best_result.message}",
+        best_result.x,
+        failure_mode,
+    )
 
 
 
@@ -951,7 +983,8 @@ def find_four_stable_equilibrium_inputs(
     C_F,
     target_effort=None,
     stability_weight=1e5,
-    stability_margin=1e-5
+    stability_margin=1e-5,
+    failure_mode="warn"
 ):
     """
     Finds signed inputs (-1 to 1) for four equilibrium points.
@@ -1053,5 +1086,8 @@ def find_four_stable_equilibrium_inputs(
         if result.success and np.sum((nullspace @ result.x) ** 2) > 1e-8:
             return nullspace @ result.x
 
-    print("Four-equilibrium optimization failed:", best_result.message)
-    return nullspace @ best_result.x
+    return _optimization_failure(
+        f"Four-equilibrium optimization failed: {best_result.message}",
+        nullspace @ best_result.x,
+        failure_mode,
+    )

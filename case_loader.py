@@ -77,7 +77,7 @@ def case_output_name(case_name):
     return "_".join(normalize_case_name(case_name).split("."))
 
 
-def select_case_name_from_dialog(default_case_name):
+def select_case_name_from_dialog():
     case_path = select_file_from_dialog(
         initial_dir=Path.cwd() / "cases",
         title="Select case file",
@@ -86,7 +86,7 @@ def select_case_name_from_dialog(default_case_name):
             ("Python files", "*.py"),
             ("All files", "*.*"),
         ],
-        default_path=Path.cwd() / "cases" / f"{default_case_name}.py",
+        default_path=None,
         cancel_message="No case file selected.",
     )
 
@@ -97,11 +97,11 @@ def select_case_name_from_dialog(default_case_name):
     return normalize_case_name(relative_path)
 
 
-def get_case_name_from_argv(default_case_name):
+def get_case_name_from_argv():
     if len(sys.argv) > 1:
         return normalize_case_name(sys.argv[1])
 
-    return select_case_name_from_dialog(default_case_name)
+    return select_case_name_from_dialog()
 
 
 def load_case(case_name):
@@ -172,9 +172,38 @@ def unpack_target_schedule_entry(entry):
     )
 
 
+def validate_target_schedule(schedule):
+    """Validate supported entries and require increasing start times."""
+    if not schedule:
+        raise ValueError("TARGET_SCHEDULE must contain at least one entry.")
+
+    previous_start = None
+    for index, entry in enumerate(schedule):
+        start_time, target, additional, ratio, angle = unpack_target_schedule_entry(entry)
+        if previous_start is not None and start_time <= previous_start:
+            raise ValueError("TARGET_SCHEDULE start times must be strictly increasing.")
+        previous_start = start_time
+
+        positions = [target]
+        if additional is not None:
+            positions.extend(additional if isinstance(additional, list) else [additional])
+        for position in positions:
+            if np.asarray(position).shape != (2,):
+                raise ValueError(
+                    f"TARGET_SCHEDULE entry {index} contains a non-2D position."
+                )
+        if ratio is not None and ratio <= 0:
+            raise ValueError(f"TARGET_SCHEDULE entry {index} has a non-positive eig_ratio.")
+
+
 def build_common_config(params):
     num_sources = params["NUM_SOURCES"]
     radius = params["RADIUS"]
+
+    if not isinstance(num_sources, (int, np.integer)) or num_sources <= 0:
+        raise ValueError("NUM_SOURCES must be a positive integer.")
+    if radius <= 0:
+        raise ValueError("RADIUS must be positive.")
 
     target_schedule = params["TARGET_SCHEDULE"]
 
@@ -201,6 +230,10 @@ def build_common_config(params):
     grid_min = params["GRID_MIN"]
     grid_max = params["GRID_MAX"]
     resolution = params["RESOLUTION"]
+    if grid_min >= grid_max:
+        raise ValueError("GRID_MIN must be less than GRID_MAX.")
+    if not isinstance(resolution, (int, np.integer)) or resolution < 2:
+        raise ValueError("RESOLUTION must be an integer of at least 2.")
     initial_robot_positions = params["INITIAL_ROBOT_POSITIONS"]
 
     density_ndfeb = params.get("DENSITY_NDFEB")
@@ -228,6 +261,10 @@ def build_common_config(params):
     t_eval_points = params.get("T_EVAL_POINTS")
     t_eval = None
     if t_span is not None and t_eval_points is not None:
+        if len(t_span) != 2 or t_span[0] >= t_span[1]:
+            raise ValueError("T_SPAN must contain increasing start and end times.")
+        if not isinstance(t_eval_points, (int, np.integer)) or t_eval_points < 2:
+            raise ValueError("T_EVAL_POINTS must be an integer of at least 2.")
         t_eval = np.linspace(t_span[0], t_span[1], t_eval_points)
     solver_progress_interval = params.get("SOLVER_PROGRESS_INTERVAL")
 

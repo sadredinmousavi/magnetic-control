@@ -22,10 +22,6 @@ PARAMS = {
 }
 ```
 
-Current example case:
-
-- `cases/case_payload_baseline.py`
-
 Cases can also be organized as folders when several conditions share the same
 physical/simulation parameters:
 
@@ -58,28 +54,17 @@ outputs/case_003_cond_002.mp4
 outputs/case_003_cond_002/plot_001.png
 ```
 
-Recommended naming pattern:
-
-- `case_payload_baseline.py`
-- `case_payload_heavy.py`
-- `case_swarm_large_radius.py`
-- `case_target_shifted.py`
-
-
 ## How Case Loading Works
 
 Both `usage3.py` and `usage4.py` load a case by module name.
 
-If you do not pass a case name, they use the default:
-
-```text
-case_payload_baseline
-```
+There is no hard-coded default case. If no case is supplied, a file-selection
+dialog opens so an unintended case is not run silently.
 
 
 ## PowerShell Usage
 
-Run the default case:
+Select a case interactively:
 
 ```powershell
 python usage3.py
@@ -95,19 +80,11 @@ usage4 --> gives the target points and calculate and simulate and make animation
 Run a specific case:
 
 ```powershell
-python usage1.py case_001_cond_001 outputs/case_001_test_001.txt
-python usage2.py case_001_cond_001
-python usage3.py case_001_cond_001
-python usage4.py case_001_cond_001
+python usage1.py cases/case_001/cond_001.py outputs/case_001_test_001.txt
+python usage2.py cases/case_001/cond_001.py
+python usage3.py cases/case_001/cond_001.py
+python usage4.py cases/case_001/cond_001.py
 ```
-
-Example with another future case:
-
-```powershell
-python usage3.py case_payload_heavy
-python usage4.py case_payload_heavy
-```
-
 
 ## What Each Script Does
 
@@ -137,21 +114,74 @@ Use this when you want the full dynamics simulation.
 
 ## Adding a New Case
 
-1. Create a new file inside `cases/`.
-2. Give it a clear name, for example:
+1. Create a new folder inside `cases/`.
+2. Add shared and condition files, for example:
 
 ```text
-cases/case_payload_light.py
+cases/case_006/case.py
+cases/case_006/cond_001.py
 ```
 
-3. Copy the structure from `cases/case_payload_baseline.py`.
+3. Copy the structure from an existing `cases/case_*/case.py` and condition.
 4. Modify the values in `PARAMS`.
 5. Run one of the usage scripts with that case name:
 
 ```powershell
-python usage3.py case_payload_light
-python usage4.py case_payload_light
+python usage3.py case_006/cond_001.py
+python usage4.py case_006/cond_001.py
 ```
+
+
+## Selecting Static Plot Types
+
+Set `PLOT_TYPE` in a case or condition file:
+
+```python
+PARAMS = {
+    "PLOT_TYPE": "force_info",
+}
+```
+
+Supported values are `force_info`, `force_potential`, and `force_magnetic`.
+All plotters consume the same precomputed field result and return a Matplotlib
+figure. Changing the plot type does not repeat optimization or field sampling.
+
+When usage scripts are imported, no dialog, case loading, optimization, or
+plotting occurs. Callers can use `main(case_name=...)` programmatically.
+
+Optimization failures emit a visible warning and continue with the best
+candidate by default. To reject any optimizer-reported failure, set:
+
+```python
+PARAMS = {
+    "OPTIMIZATION_FAILURE_MODE": "error",
+}
+```
+
+
+## Animation Video Quality
+
+`usage4.py` saves a square H.264 video using explicit quality settings. The
+defaults produce a 1280 x 1280 video (`8 inches x 160 DPI`) with CRF 18. These
+can be changed per case:
+
+```python
+PARAMS = {
+    "ANIMATION_FIGURE_SIZE": (8, 8),
+    "VIDEO_DPI": 160,
+    "VIDEO_FPS": 30,
+    "VIDEO_CRF": 18,
+}
+```
+
+Lower `VIDEO_CRF` means higher quality and a larger file. Values from 16 to 23
+are normally useful. Keep both values in `ANIMATION_FIGURE_SIZE` equal to
+preserve a square video canvas.
+
+`VIDEO_FPS` controls both the interactive preview and the saved video, so their
+nominal playback speed is identical. If a computer cannot render a complex
+preview in real time, reduce `VIDEO_FPS` (for example to 20); the saved file will
+use the same rate.
 
 
 ## Important Notes

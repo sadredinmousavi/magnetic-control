@@ -17,7 +17,7 @@ from functions_main import (
 )
 from functions_utility import (
     compute_grid_fields,
-    plot_mode_1,
+    plot_field,
     save_temp_plot,
 )
 
@@ -32,11 +32,11 @@ PLOT_MODE_1_DISPLAY_SECONDS = 1.5
 def parse_args():
     if len(sys.argv) > 3:
         raise SystemExit(
-            "Usage: python usage001.py <case_name> <input_angles_file>\n"
-            "Example: python usage001.py case_payload_baseline outputs/case_payload_baseline.txt"
+            "Usage: python usage1.py <case_name> <input_angles_file>\n"
+            "Example: python usage1.py case_001.cond_001 outputs/case_001_cond_001.txt"
         )
 
-    case_name = get_case_name_from_argv("case_payload_baseline")
+    case_name = get_case_name_from_argv()
 
     if len(sys.argv) > 2:
         input_filename = Path(sys.argv[2])
@@ -119,8 +119,11 @@ def build_plot_opt_info(angles_deg, angles_rad, desired_pos=None):
 # 2. MAIN EXECUTION
 # =========================================================================
 
-def main():
-    case_name, input_filename = parse_args()
+def main(case_name=None, input_filename=None, plot_type=None):
+    if case_name is None and input_filename is None:
+        case_name, input_filename = parse_args()
+    elif case_name is None or input_filename is None:
+        raise ValueError("case_name and input_filename must be provided together.")
 
     params = load_case(case_name)
 
@@ -141,6 +144,7 @@ def main():
     )
 
     cfg = build_common_config(params)
+    plot_type = plot_type or params.get("PLOT_TYPE", "force_info")
     source_positions = generate_circular_source_positions(cfg.NUM_SOURCES, cfg.RADIUS)
 
     angle_rows, wait_values, zero_values = load_angle_rows(input_filename)
@@ -192,21 +196,20 @@ def main():
         print("control u:", np.array2string(u_target, precision=4))
         print("=" * 70)
 
-        fig = plot_mode_1(
-            X,
-            Y,
-            Fx,
-            Fy,
-            source_positions,
-            opt_info=opt_info,
-            draw_contour=True,
-            draw_desired_point=False,
-            plot_microrobots=False,
-            plot_trajectories=False,
-            block=False,
-            display_seconds=PLOT_MODE_1_DISPLAY_SECONDS,
-            reuse_window=True,
-        )
+        field = {
+            "X": X, "Y": Y, "Fx": Fx, "Fy": Fy,
+            "U_pot": U_pot, "Bx": Bx, "By": By,
+            "target_pos": opt_info["desired_pos"],
+        }
+        options = {"draw_desired_point": False}
+        if str(plot_type).lower() in {"1", "force_info"}:
+            options.update({
+                "draw_contour": True, "plot_microrobots": False,
+                "plot_trajectories": False, "block": False,
+                "display_seconds": PLOT_MODE_1_DISPLAY_SECONDS,
+                "reuse_window": True,
+            })
+        fig = plot_field(plot_type, field, source_positions, opt_info, **options)
         save_temp_plot(fig, row_index, folder_name=case_output_path(case_name))
         # plt.close(fig)
 
