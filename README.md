@@ -225,3 +225,17 @@ pip install -r ./experimental/requirements.txt
 ```
 python ./experimental/gui001.py
 ```
+
+
+
+
+
+
+#
+```
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests
+```
