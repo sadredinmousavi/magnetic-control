@@ -3,22 +3,23 @@
 import numpy as np
 
 
-NUM_ROBOTS = 20
+NUM_ROBOTS = 7
 PAYLOAD_CENTER = np.array([0.0, 0.0])
 PICKUP_DURATION = 24.0
-PATH_STEP_DURATION = 6.0
+PATH_STEP_DURATION = 8.0
 
-# Place all 20 robots around (but not overlapping) the circular payload.
+# Place all 20 robots on a ring away from the circular payload so the pickup
+# stage visibly gathers them toward the center.
 _robot_angles = np.linspace(0.0, 2.0 * np.pi, NUM_ROBOTS, endpoint=False)
 INITIAL_ROBOT_POSITIONS = np.column_stack((
-    0.022 * np.cos(_robot_angles),
-    0.022 * np.sin(_robot_angles),
+    0.040 * np.cos(_robot_angles),
+    0.040 * np.sin(_robot_angles),
 ))
 
 # Two-turn, center-out spiral. The first point is omitted from the movement
 # schedule because the pickup stage already holds the target at the center.
 _spiral_angles = np.linspace(0.0, 4.0 * np.pi, 21)
-_spiral_radii = np.linspace(0.0, 0.065, len(_spiral_angles))
+_spiral_radii = np.linspace(0.0, 0.080, len(_spiral_angles))
 SPIRAL_POINTS = np.column_stack((
     _spiral_radii * np.cos(_spiral_angles),
     _spiral_radii * np.sin(_spiral_angles),
@@ -61,9 +62,10 @@ PARAMS = {
     "SOLVER_RTOL": 1e-4,
     "SOLVER_ATOL": 1e-7,
 
-    "ANIMATION_DRAW_TRAJECTORIES": True,
+    "ANIMATION_DRAW_TRAJECTORIES": False,
+    "ANIMATION_DRAW_TARGET_TRAJECTORY": True,
 
-    "PAYLOAD_RADIUS": 0.015,
+    "PAYLOAD_RADIUS": 0.025,
     "PAYLOAD_HEIGHT": 0.001,
     "PAYLOAD_DENSITY": 50,
     "PAYLOAD_DRAG_FACTOR": 50,

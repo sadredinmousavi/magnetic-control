@@ -31,12 +31,26 @@ PARAMS = {
     "GRID_MAX": 0.3,
     "RESOLUTION": 50,
 
+    # --- Circular Petri-Dish Workspace ---
+    "DISH_CENTER": (0.0, 0.0),
+    "DISH_RADIUS": 0.15,
+    "PLOT_FIELD_INSIDE_DISH": True,
+    "DISH_OUTSIDE_FADE_ALPHA": 0.86,
+
+    # --- External-Magnet Moment Arrows ---
+    "SHOW_EXTERNAL_MAGNET_MOMENT_VECTORS": True,
+    "MAGNET_MOMENT_ARROW_LENGTH": 0.035,
+    "MAGNET_MOMENT_ARROW_COLOR": "#d1495b",
+
     # --- Microrobot Dynamics Parameters ---
     "DENSITY_NDFEB": 7500,
     "FLUID_VISCOSITY": 0.001,
     "ALPHA": 0.3,
     "CAPILLARY_SIN_C": 0.1,
     "GAMMA": 0.072,
+
+    # --- Animation Parameters ---
+    "ANIMATION_ROBOT_MARKER_SIZE": 8,
 
     # --- Payload Parameters ---
     # Disabled for this case: kept only to satisfy usage4.py's required keys.

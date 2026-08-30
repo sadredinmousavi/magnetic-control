@@ -27,7 +27,22 @@ def main(case_name=None, plot_type=None, save_plots=True):
     for index, (opt_info, field) in enumerate(
         zip(result.opt_infos, result.field_data), start=1
     ):
-        options = {"draw_desired_point": True}
+        options = {
+            "draw_desired_point": True,
+            "clip_field_to_dish": params.get("PLOT_FIELD_INSIDE_DISH", False),
+            "dish_center": params.get("DISH_CENTER", (0.0, 0.0)),
+            "dish_radius": params.get("DISH_RADIUS"),
+            "dish_outside_fade_alpha": params.get("DISH_OUTSIDE_FADE_ALPHA", 0.86),
+            "show_magnet_moment_vectors": params.get(
+                "SHOW_EXTERNAL_MAGNET_MOMENT_VECTORS", False
+            ),
+            "magnet_moment_arrow_length": params.get(
+                "MAGNET_MOMENT_ARROW_LENGTH", 0.035
+            ),
+            "magnet_moment_arrow_color": params.get(
+                "MAGNET_MOMENT_ARROW_COLOR", "#d1495b"
+            ),
+        }
         if str(plot_type).lower() in {"1", "force_info"}:
             options.update({
                 "draw_contour": True,

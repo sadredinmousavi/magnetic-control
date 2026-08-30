@@ -63,7 +63,7 @@ PARAMS = {
 
     # Make the written word visible in both the window and saved animation.
     "ANIMATION_DRAW_TRAJECTORIES": True,
-    "ANIMATION_DRAW_CONTOUR": False,
+    "ANIMATION_DRAW_CONTOUR": True,
     "ANIMATION_DRAW_STREAMLINES": False,
     "ANIMATION_DRAW_QUIVER": False,
     "VIDEO_DPI": 160,

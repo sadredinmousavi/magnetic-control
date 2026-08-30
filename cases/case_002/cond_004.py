@@ -8,11 +8,12 @@ PAYLOAD_CENTER = np.array([0.0, 0.0])
 PICKUP_DURATION = 24.0
 PATH_STEP_DURATION = 6.0
 
-# Place all 20 robots around (but not overlapping) the circular payload.
+# Place all 20 robots on a ring away from the circular payload so the pickup
+# stage visibly gathers them toward the center.
 _robot_angles = np.linspace(0.0, 2.0 * np.pi, NUM_ROBOTS, endpoint=False)
 INITIAL_ROBOT_POSITIONS = np.column_stack((
-    0.022 * np.cos(_robot_angles),
-    0.022 * np.sin(_robot_angles),
+    0.040 * np.cos(_robot_angles),
+    0.040 * np.sin(_robot_angles),
 ))
 
 # Two-turn, center-out spiral. The first point is omitted from the movement
@@ -63,7 +64,7 @@ PARAMS = {
 
     "ANIMATION_DRAW_TRAJECTORIES": True,
 
-    "PAYLOAD_RADIUS": 0.015,
+    "PAYLOAD_RADIUS": 0.025,
     "PAYLOAD_HEIGHT": 0.001,
     "PAYLOAD_DENSITY": 50,
     "PAYLOAD_DRAG_FACTOR": 50,

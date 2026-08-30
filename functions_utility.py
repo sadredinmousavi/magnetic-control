@@ -111,6 +111,86 @@ def compute_grid_fields(source_positions, control_inputs_u, source_moment_vector
     return X, Y, Fx, Fy, U_pot, Bx, By
 
 
+def magnet_moment_arrow_vectors(source_positions, control_inputs_u, center=(0.0, 0.0), length=0.035):
+    """Return display vectors rotated by arccos(u) from each outward radial axis."""
+    source_positions = np.asarray(source_positions, dtype=float)
+    control_inputs_u = np.asarray(control_inputs_u, dtype=float)
+    center = np.asarray(center, dtype=float)
+    if source_positions.ndim != 2 or source_positions.shape[1] != 2:
+        raise ValueError("source_positions must have shape (N, 2).")
+    if len(control_inputs_u) != len(source_positions):
+        raise ValueError("Number of magnet controls must match source positions.")
+    if center.shape != (2,):
+        raise ValueError("Moment-arrow center must be a 2D position.")
+    if length <= 0:
+        raise ValueError("MAGNET_MOMENT_ARROW_LENGTH must be positive.")
+
+    radial_angles = np.arctan2(
+        source_positions[:, 1] - center[1],
+        source_positions[:, 0] - center[0],
+    )
+    magnet_angles = np.arccos(np.clip(control_inputs_u, -1.0, 1.0))
+    display_angles = radial_angles + magnet_angles
+    return length * np.column_stack((
+        np.cos(display_angles),
+        np.sin(display_angles),
+    ))
+
+
+def draw_magnet_moment_references(
+    axis,
+    source_positions,
+    control_inputs_u,
+    center=(0.0, 0.0),
+    length=0.035,
+):
+    """Draw outward radial baselines and compact angle labels for moment arrows."""
+    source_positions = np.asarray(source_positions, dtype=float)
+    control_inputs_u = np.asarray(control_inputs_u, dtype=float)
+    center = np.asarray(center, dtype=float)
+    radial = source_positions - center
+    radial_norms = np.linalg.norm(radial, axis=1, keepdims=True)
+    if np.any(radial_norms <= 0):
+        raise ValueError("External magnets must not coincide with the arrow center.")
+    radial_units = radial / radial_norms
+    reference_ends = source_positions + length * radial_units
+    angles_deg = np.degrees(np.arccos(np.clip(control_inputs_u, -1.0, 1.0)))
+
+    artists = []
+    for source, reference_end, radial_unit, angle_deg in zip(
+        source_positions, reference_ends, radial_units, angles_deg
+    ):
+        line, = axis.plot(
+            [source[0], reference_end[0]],
+            [source[1], reference_end[1]],
+            color="#4f5964",
+            linewidth=1.25,
+            linestyle=(0, (2.0, 2.0)),
+            solid_capstyle="round",
+            zorder=9,
+        )
+        label = axis.annotate(
+            f"{angle_deg:.2f}°",
+            xy=source,
+            xytext=tuple(-19.0 * radial_unit),
+            textcoords="offset points",
+            ha="center",
+            va="center",
+            fontsize=7.5,
+            color="#28323c",
+            bbox={
+                "boxstyle": "round,pad=0.20",
+                "facecolor": "white",
+                "edgecolor": "#b8c0c8",
+                "linewidth": 0.65,
+                "alpha": 0.94,
+            },
+            zorder=11,
+        )
+        artists.extend((line, label))
+    return artists
+
+
 def extract_optimization_info(
     control_inputs_u,
     net_force,
@@ -283,11 +363,11 @@ def plot_mode_1(X, Y, Fx, Fy, source_positions,  opt_info,
     equilibrium_positions = opt_info.get('equilibrium_positions') or [desired_pos]
     
     if draw_contour:
-        finite_vals = F_mag[np.isfinite(F_mag)]
+        finite_vals = np.ma.compressed(np.ma.masked_invalid(F_mag))
         finite_vals = finite_vals[finite_vals > 0]
 
         custom_levels = None
-        F_mag_plot = np.array(F_mag, copy=True)
+        F_mag_plot = np.ma.masked_invalid(F_mag)
 
         if finite_vals.size > 0:
             min_val = max(np.min(finite_vals), 1e-12)
@@ -298,8 +378,7 @@ def plot_mode_1(X, Y, Fx, Fy, source_positions,  opt_info,
 
             if np.isfinite(max_val) and max_val > min_val:
                 custom_levels = np.logspace(np.log10(min_val), np.log10(max_val), num=20)
-                F_mag_plot = np.where(np.isfinite(F_mag_plot), F_mag_plot, max_val)
-                F_mag_plot = np.clip(F_mag_plot, min_val, max_val)
+                F_mag_plot = np.ma.clip(F_mag_plot, min_val, max_val)
 
         if custom_levels is not None:
             contours = plot_ax.contourf(
@@ -317,12 +396,18 @@ def plot_mode_1(X, Y, Fx, Fy, source_positions,  opt_info,
     # Streamlines
     plot_ax.streamplot(X, Y, Fx, Fy, color='black', linewidth=1.2, density=1.5, arrowstyle='->')
     
-    plot_ax.plot(source_positions[:, 0], source_positions[:, 1], 'r.', markersize=15, label='Magnets')
+    plot_ax.plot(
+        source_positions[:, 0], source_positions[:, 1], 'r.',
+        markersize=15, label='Magnets', zorder=6,
+    )
     
     if draw_desired_point:
         for idx, eq_pos in enumerate(equilibrium_positions):
             label = 'Equilibrium Point' if idx == 0 else None
-            plot_ax.plot(eq_pos[0], eq_pos[1], 'rx', markersize=15, markeredgewidth=2, label=label)
+            plot_ax.plot(
+                eq_pos[0], eq_pos[1], 'rx', markersize=15,
+                markeredgewidth=2, label=label, zorder=6,
+            )
     
     if plot_microrobots and opt_info.get('microrobot_positions') is not None:
         # bots = opt_info['microrobot_positions']
@@ -433,20 +518,27 @@ def plot_mode_2(X, Y, Fx, Fy, U_pot, source_positions, desired_pos, draw_desired
     step = 3 
     ax1.quiver(X[::step, ::step], Y[::step, ::step], Fx_norm[::step, ::step], Fy_norm[::step, ::step], 
                color='black', pivot='mid', scale=30)
-    ax1.plot(source_positions[:, 0], source_positions[:, 1], 'r.', markersize=15, label='Magnets')
+    ax1.plot(
+        source_positions[:, 0], source_positions[:, 1], 'r.',
+        markersize=15, label='Magnets', zorder=6,
+    )
     if draw_desired_point:
-        ax1.plot(desired_pos[0], desired_pos[1], 'rx', markersize=15, markeredgewidth=2)
+        ax1.plot(
+            desired_pos[0], desired_pos[1], 'rx',
+            markersize=15, markeredgewidth=2, zorder=6,
+        )
     ax1.set_title('Force Field Direction')
     ax1.set_aspect('equal')
     ax1.grid(True)
     
     # Right: Potential Energy (Clamped for better visibility)
     # Clamp the bottom 5% and top 80% to ignore the extreme singularities near magnets
-    U_min = np.nanpercentile(U_pot, 5)
-    U_max = np.nanpercentile(U_pot, 80)
+    U_values = np.ma.compressed(np.ma.masked_invalid(U_pot))
+    U_min = np.percentile(U_values, 5)
+    U_max = np.percentile(U_values, 80)
     if U_min >= U_max:
-        U_min = np.nanmin(U_pot)
-        U_max = np.nanmax(U_pot)
+        U_min = np.min(U_values)
+        U_max = np.max(U_values)
         # If it's still completely flat, artificially bump U_max to prevent the crash
         if U_min == U_max:
             U_max = U_min + 1e-9
@@ -455,9 +547,15 @@ def plot_mode_2(X, Y, Fx, Fy, U_pot, source_positions, desired_pos, draw_desired
     cp = ax2.contourf(X, Y, U_pot, levels=levels, cmap='viridis', extend='both')
     fig.colorbar(cp, ax=ax2, label='Potential Energy (J)')
     
-    ax2.plot(source_positions[:, 0], source_positions[:, 1], 'r.', markersize=15)
+    ax2.plot(
+        source_positions[:, 0], source_positions[:, 1], 'r.',
+        markersize=15, zorder=6,
+    )
     if draw_desired_point:
-        ax2.plot(desired_pos[0], desired_pos[1], 'rx', markersize=15, markeredgewidth=2)
+        ax2.plot(
+            desired_pos[0], desired_pos[1], 'rx',
+            markersize=15, markeredgewidth=2, zorder=6,
+        )
     ax2.set_title('Potential Energy Well (Focused)')
     ax2.set_aspect('equal')
     ax2.grid(True)
@@ -478,17 +576,24 @@ def plot_mode_3(X, Y, Fx, Fy, Bx, By, source_positions, desired_pos, draw_desire
     step = 3 
     ax1.quiver(X[::step, ::step], Y[::step, ::step], Fx_norm[::step, ::step], Fy_norm[::step, ::step], 
                color='black', pivot='mid', scale=30)
-    ax1.plot(source_positions[:, 0], source_positions[:, 1], 'r.', markersize=15)
+    ax1.plot(
+        source_positions[:, 0], source_positions[:, 1], 'r.',
+        markersize=15, zorder=6,
+    )
     if draw_desired_point:
-        ax1.plot(desired_pos[0], desired_pos[1], 'rx', markersize=15, markeredgewidth=2)
+        ax1.plot(
+            desired_pos[0], desired_pos[1], 'rx',
+            markersize=15, markeredgewidth=2, zorder=6,
+        )
     ax1.set_title('Force Field Direction')
     ax1.set_aspect('equal')
     ax1.grid(True)
     
     # Right: Magnetic Field Magnitude Heatmap + Streamlines
     B_mag = np.hypot(Bx, By)
-    B_min = max(np.min(B_mag), 1e-10)
-    B_max = np.percentile(B_mag, 95) # Cap max to avoid singularity blinding
+    B_values = np.ma.compressed(np.ma.masked_invalid(B_mag))
+    B_min = max(np.min(B_values), 1e-10)
+    B_max = np.percentile(B_values, 95) # Cap max to avoid singularity blinding
     
     # Create log-spaced levels for the background color
     levels = np.logspace(np.log10(B_min), np.log10(B_max), 50)
@@ -501,9 +606,15 @@ def plot_mode_3(X, Y, Fx, Fy, Bx, By, source_positions, desired_pos, draw_desire
     # Foreground: White streamlines showing direction
     ax2.streamplot(X, Y, Bx, By, color='white', linewidth=1.0, density=1.5, arrowstyle='->')
     
-    ax2.plot(source_positions[:, 0], source_positions[:, 1], 'k.', markersize=15) # Black dots for magnets over bright heatmap
+    ax2.plot(
+        source_positions[:, 0], source_positions[:, 1], 'k.',
+        markersize=15, zorder=6,
+    )  # Black dots for magnets over bright heatmap
     if draw_desired_point:
-        ax2.plot(desired_pos[0], desired_pos[1], 'wx', markersize=15, markeredgewidth=2) # White X
+        ax2.plot(
+            desired_pos[0], desired_pos[1], 'wx',
+            markersize=15, markeredgewidth=2, zorder=6,
+        )  # White X
     ax2.set_title('Magnetic Field: Magnitude & Direction')
     ax2.set_aspect('equal')
     
@@ -516,28 +627,103 @@ def plot_field(plot_type, field, source_positions, opt_info, **options):
     plot_type = str(plot_type).lower()
     desired_pos = opt_info.get("desired_pos", field.get("target_pos"))
 
+    clip_to_dish = options.pop("clip_field_to_dish", False)
+    dish_center = np.asarray(options.pop("dish_center", (0.0, 0.0)), dtype=float)
+    dish_radius = options.pop("dish_radius", None)
+    outside_fade_alpha = options.pop("dish_outside_fade_alpha", 0.86)
+    show_moment_vectors = options.pop("show_magnet_moment_vectors", False)
+    moment_arrow_length = options.pop("magnet_moment_arrow_length", 0.035)
+    moment_arrow_color = options.pop("magnet_moment_arrow_color", "#d1495b")
+    if clip_to_dish:
+        if dish_center.shape != (2,):
+            raise ValueError("DISH_CENTER must be a 2D position.")
+        if dish_radius is None or dish_radius <= 0:
+            raise ValueError("DISH_RADIUS must be positive when field clipping is enabled.")
+        if not 0.0 <= outside_fade_alpha <= 1.0:
+            raise ValueError("DISH_OUTSIDE_FADE_ALPHA must be between 0 and 1.")
+
     if plot_type in {"1", "force_info"}:
-        return plot_mode_1(
+        figure = plot_mode_1(
             field["X"], field["Y"], field["Fx"], field["Fy"],
             source_positions, opt_info, **options
         )
-    if plot_type in {"2", "force_potential"}:
+    elif plot_type in {"2", "force_potential"}:
         allowed = {"draw_desired_point"}
         selected = {key: value for key, value in options.items() if key in allowed}
-        return plot_mode_2(
+        figure = plot_mode_2(
             field["X"], field["Y"], field["Fx"], field["Fy"],
             field["U_pot"], source_positions, desired_pos, **selected
         )
-    if plot_type in {"3", "force_magnetic"}:
+    elif plot_type in {"3", "force_magnetic"}:
         allowed = {"draw_desired_point"}
         selected = {key: value for key, value in options.items() if key in allowed}
-        return plot_mode_3(
+        figure = plot_mode_3(
             field["X"], field["Y"], field["Fx"], field["Fy"],
             field["Bx"], field["By"], source_positions, desired_pos, **selected
         )
-    raise ValueError(
-        "PLOT_TYPE must be 'force_info', 'force_potential', or 'force_magnetic'."
-    )
+    else:
+        raise ValueError(
+            "PLOT_TYPE must be 'force_info', 'force_potential', or 'force_magnetic'."
+        )
+
+    if clip_to_dish:
+        for axis in figure.axes:
+            if axis.get_aspect() != "auto":
+                x_limits = axis.get_xlim()
+                y_limits = axis.get_ylim()
+                corner_distances = [
+                    np.hypot(x - dish_center[0], y - dish_center[1])
+                    for x in x_limits for y in y_limits
+                ]
+                outer_radius = max(corner_distances)
+                axis.add_patch(patches.Wedge(
+                    dish_center,
+                    outer_radius,
+                    0.0,
+                    360.0,
+                    width=max(outer_radius - dish_radius, 0.0),
+                    facecolor="white",
+                    edgecolor="none",
+                    alpha=outside_fade_alpha,
+                    zorder=2.25,
+                ))
+                axis.add_patch(patches.Circle(
+                    dish_center, dish_radius, fill=False, edgecolor="black",
+                    linewidth=1.5, linestyle="--", zorder=5,
+                ))
+    if show_moment_vectors:
+        moment_vectors = magnet_moment_arrow_vectors(
+            source_positions,
+            opt_info["u_values"],
+            center=dish_center,
+            length=moment_arrow_length,
+        )
+        for axis in figure.axes:
+            if axis.get_aspect() != "auto":
+                draw_magnet_moment_references(
+                    axis,
+                    source_positions,
+                    opt_info["u_values"],
+                    center=dish_center,
+                    length=moment_arrow_length,
+                )
+                axis.quiver(
+                    source_positions[:, 0],
+                    source_positions[:, 1],
+                    moment_vectors[:, 0],
+                    moment_vectors[:, 1],
+                    angles="xy",
+                    scale_units="xy",
+                    scale=1.0,
+                    color=moment_arrow_color,
+                    width=0.0042,
+                    headwidth=4.0,
+                    headlength=5.5,
+                    headaxislength=4.7,
+                    pivot="tail",
+                    zorder=10,
+                )
+    return figure
 
 
 

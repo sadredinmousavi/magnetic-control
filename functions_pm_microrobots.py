@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.patches as patches
 from scipy.constants import mu_0
 
 from case_loader import unpack_target_schedule_entry
@@ -11,7 +12,12 @@ from functions_main import (
     calculate_robot_payload_interaction_force,
     calculate_total_force_from_sources,
 )
-from functions_utility import get_control_at_time, get_schedule_index
+from functions_utility import (
+    get_control_at_time,
+    get_schedule_index,
+    draw_magnet_moment_references,
+    magnet_moment_arrow_vectors,
+)
 
 
 def get_target_points_from_schedule_entry(entry):
@@ -352,9 +358,18 @@ def animate_trajectories(
     draw_sources=True,
     draw_all_targets=True,
     draw_active_target=True,
+    draw_target_trajectory=False,
     plot_trajectories=True,
     plot_microrobots=True,
+    robot_marker_size=55,
     payload_radius=None,
+    clip_field_to_dish=False,
+    dish_center=(0.0, 0.0),
+    dish_radius=None,
+    dish_outside_fade_alpha=0.86,
+    show_magnet_moment_vectors=False,
+    magnet_moment_arrow_length=0.035,
+    magnet_moment_arrow_color="#d1495b",
     wall_segments=None,
     contour_levels=20,
     save_video=False,
@@ -373,6 +388,17 @@ def animate_trajectories(
     """
     if video_dpi <= 0 or video_fps <= 0:
         raise ValueError("VIDEO_DPI and VIDEO_FPS must be positive.")
+    if robot_marker_size <= 0:
+        raise ValueError("ANIMATION_ROBOT_MARKER_SIZE must be positive.")
+    dish_center = np.asarray(dish_center, dtype=float)
+    if dish_center.shape != (2,):
+        raise ValueError("DISH_CENTER must be a 2D position.")
+    if clip_field_to_dish and (dish_radius is None or dish_radius <= 0):
+        raise ValueError("DISH_RADIUS must be positive when field clipping is enabled.")
+    if not 0.0 <= dish_outside_fade_alpha <= 1.0:
+        raise ValueError("DISH_OUTSIDE_FADE_ALPHA must be between 0 and 1.")
+    if magnet_moment_arrow_length <= 0:
+        raise ValueError("MAGNET_MOMENT_ARROW_LENGTH must be positive.")
     if not 0 <= video_crf <= 51:
         raise ValueError("VIDEO_CRF must be between 0 and 51.")
     if len(figure_size) != 2 or any(size <= 0 for size in figure_size):
@@ -390,7 +416,7 @@ def animate_trajectories(
     # Keep the axes geometry identical between the interactive canvas and the
     # encoded frames. Explicit margins also prevent legends/labels from making
     # the saved axes box subtly narrower than it is on screen.
-    fig.subplots_adjust(left=0.11, right=0.96, bottom=0.09, top=0.93)
+    fig.subplots_adjust(left=0.11, right=0.96, bottom=0.28, top=0.93)
 
     ax.set_xlim(grid_min, grid_max)
     ax.set_ylim(grid_min, grid_max)
@@ -433,7 +459,7 @@ def animate_trajectories(
             if draw_contour:
                 F_mag = np.sqrt(Fx**2 + Fy**2)
 
-                finite_vals = F_mag[np.isfinite(F_mag)]
+                finite_vals = np.ma.compressed(np.ma.masked_invalid(F_mag))
                 finite_vals = finite_vals[finite_vals > 0]
 
                 if finite_vals.size == 0:
@@ -526,8 +552,45 @@ def animate_trajectories(
             s=100,
             marker="s",
             edgecolors="black",
-            label="Source magnets"
+            label="Source magnets",
+            zorder=8,
         )
+
+    moment_quiver = None
+    moment_angle_texts = []
+    if show_magnet_moment_vectors and field_data:
+        source_positions = np.asarray(source_positions, dtype=float)
+        initial_moment_vectors = magnet_moment_arrow_vectors(
+            source_positions,
+            field_data[0]["u"],
+            center=dish_center,
+            length=magnet_moment_arrow_length,
+        )
+        moment_quiver = ax.quiver(
+            source_positions[:, 0],
+            source_positions[:, 1],
+            initial_moment_vectors[:, 0],
+            initial_moment_vectors[:, 1],
+            angles="xy",
+            scale_units="xy",
+            scale=1.0,
+            color=magnet_moment_arrow_color,
+            width=0.0042,
+            headwidth=4.0,
+            headlength=5.5,
+            headaxislength=4.7,
+            pivot="tail",
+            label="Magnet moments",
+            zorder=10,
+        )
+        moment_reference_artists = draw_magnet_moment_references(
+            ax,
+            source_positions,
+            field_data[0]["u"],
+            center=dish_center,
+            length=magnet_moment_arrow_length,
+        )
+        moment_angle_texts = moment_reference_artists[1::2]
 
     if wall_segments:
         for idx, (wall_start, wall_end) in enumerate(wall_segments):
@@ -539,12 +602,57 @@ def animate_trajectories(
                 color="dimgray",
                 linewidth=4,
                 solid_capstyle="round",
-                label="Walls" if idx == 0 else None
+                label="Walls" if idx == 0 else None,
+                zorder=8,
             )
+
+    if clip_field_to_dish:
+        corner_distances = [
+            np.hypot(x - dish_center[0], y - dish_center[1])
+            for x in (grid_min, grid_max) for y in (grid_min, grid_max)
+        ]
+        outer_radius = max(corner_distances)
+        ax.add_patch(patches.Wedge(
+            dish_center,
+            outer_radius,
+            0.0,
+            360.0,
+            width=max(outer_radius - dish_radius, 0.0),
+            facecolor="white",
+            edgecolor="none",
+            alpha=dish_outside_fade_alpha,
+            zorder=2.25,
+        ))
+        ax.add_patch(plt.Circle(
+            dish_center,
+            dish_radius,
+            fill=False,
+            edgecolor="black",
+            linewidth=1.5,
+            linestyle="--",
+            label="Petri dish",
+            zorder=7,
+        ))
 
     # ---------------------------------------------------------
     # Scheduled targets
     # ---------------------------------------------------------
+    if draw_target_trajectory:
+        primary_targets = np.array([
+            get_target_points_from_schedule_entry(entry)[0]
+            for entry in target_schedule
+        ])
+        ax.plot(
+            primary_targets[:, 0],
+            primary_targets[:, 1],
+            color="#e07a2d",
+            linewidth=1.8,
+            linestyle=(0, (4.0, 2.5)),
+            alpha=0.9,
+            label="Target trajectory",
+            zorder=8,
+        )
+
     if draw_all_targets:
         all_targets = np.vstack([
             get_target_points_from_schedule_entry(entry)
@@ -557,7 +665,8 @@ def animate_trajectories(
             s=60,
             marker="x",
             alpha=0.5,
-            label="Scheduled targets"
+            label="Scheduled targets",
+            zorder=8,
         )
 
     # ---------------------------------------------------------
@@ -573,7 +682,8 @@ def animate_trajectories(
             s=180,
             marker="X",
             edgecolors="black",
-            label="Active target"
+            label="Active target",
+            zorder=8,
         )
 
     # ---------------------------------------------------------
@@ -585,10 +695,11 @@ def animate_trajectories(
             [],
             [],
             c="blue",
-            s=55,
+            s=robot_marker_size,
             marker="o",
             edgecolors="black",
-            label="Microrobots"
+            label="Microrobots",
+            zorder=8,
         )
 
     # ---------------------------------------------------------
@@ -618,7 +729,8 @@ def animate_trajectories(
                 [],
                 [],
                 linewidth=1.5,
-                alpha=0.8
+                alpha=0.8,
+                zorder=8,
             )
             trajectory_lines.append(line)
 
@@ -632,10 +744,24 @@ def animate_trajectories(
         transform=ax.transAxes,
         fontsize=12,
         verticalalignment="top",
-        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85)
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
+        zorder=9,
     )
 
-    ax.legend(loc="upper right")
+    ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(0.02, -0.24, 0.96, 0.10),
+        mode="expand",
+        ncol=3,
+        fontsize=9.0,
+        framealpha=0.95,
+        fancybox=True,
+        borderpad=0.9,
+        labelspacing=0.8,
+        columnspacing=1.8,
+        handlelength=2.4,
+        handletextpad=0.8,
+    )
 
     # ---------------------------------------------------------
     # Update function
@@ -672,6 +798,24 @@ def animate_trajectories(
             active_targets = get_target_points_from_schedule_entry(target_schedule[active_idx])
             active_target_scat.set_offsets(active_targets)
             artists.append(active_target_scat)
+
+        if moment_quiver is not None:
+            active_moment_vectors = magnet_moment_arrow_vectors(
+                source_positions,
+                field_data[active_idx]["u"],
+                center=dish_center,
+                length=magnet_moment_arrow_length,
+            )
+            moment_quiver.set_UVC(
+                active_moment_vectors[:, 0], active_moment_vectors[:, 1]
+            )
+            artists.append(moment_quiver)
+            active_angles_deg = np.degrees(np.arccos(np.clip(
+                field_data[active_idx]["u"], -1.0, 1.0
+            )))
+            for label, angle_deg in zip(moment_angle_texts, active_angles_deg):
+                label.set_text(f"{angle_deg:.2f}°")
+                artists.append(label)
         
         if has_payload and payload_patch is not None:
             payload_idx = num_robots * 4
