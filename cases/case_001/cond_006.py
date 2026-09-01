@@ -1,71 +1,81 @@
-"""One microrobot tracing the lowercase word ``micro``."""
+"""Seven microrobots tracing the text ``MNLab`` together."""
 
 import numpy as np
 
 
 # Letter strokes in a small normalized drawing coordinate system. Consecutive
-# letters are connected because the simulation has one continuously moving
-# robot (there is no pen-up state).
-_WORD_POINTS = np.array([
-    # m
-    [0.00, 0.00], [0.00, 0.75], [0.00, 0.15],
-    [0.18, 0.65], [0.36, 0.15], [0.54, 0.65], [0.72, 0.00],
-    # i (including its dot)
-    [0.92, 0.00], [0.92, 0.65], [0.92, 0.00],
-    [0.92, 0.92], [0.92, 0.82], [0.92, 0.00],
-    # c
-    [1.72, 0.55], [1.58, 0.68], [1.38, 0.65], [1.25, 0.48],
-    [1.22, 0.25], [1.34, 0.07], [1.55, 0.02], [1.72, 0.15],
-    # r
-    [1.92, 0.00], [1.92, 0.65], [1.92, 0.15],
-    [2.10, 0.60], [2.30, 0.62],
-    # o
-    [2.78, 0.02], [2.58, 0.02], [2.43, 0.18], [2.40, 0.42],
-    [2.52, 0.62], [2.72, 0.68], [2.90, 0.55], [2.96, 0.32],
-    [2.90, 0.12], [2.78, 0.02],
+# letters are connected because the simulation has continuously moving
+# robots (there is no pen-up state).
+_TEXT_POINTS = np.array([
+    # M
+    [0.00, 0.00], [0.00, 1.00], [0.28, 0.45],
+    [0.56, 1.00], [0.56, 0.00],
+    # N
+    [0.78, 0.00], [0.78, 1.00], [1.34, 0.00], [1.34, 1.00],
+    # L
+    [1.56, 1.00], [1.56, 0.00], [2.12, 0.00],
+    # a
+    [2.34, 0.05], [2.34, 0.52], [2.50, 0.70], [2.75, 0.70],
+    [2.92, 0.52], [2.92, 0.05], [2.92, 0.52], [2.75, 0.70],
+    [2.50, 0.70], [2.34, 0.52], [2.34, 0.25], [2.48, 0.05],
+    [2.72, 0.05], [2.92, 0.22],
+    # b
+    [3.16, 0.00], [3.16, 1.00], [3.16, 0.55], [3.38, 0.72],
+    [3.65, 0.67], [3.80, 0.48], [3.78, 0.25], [3.62, 0.08],
+    [3.38, 0.05], [3.16, 0.25], [3.16, 0.00],
 ])
 
 
-def _scale_word(points):
-    """Scale the word to exactly x=[-0.07, 0.07] and a 0.04 m height."""
+def _scale_text(points):
+    """Scale the text to exactly x=[-0.08, 0.08] and a 0.048 m height."""
     scaled = np.asarray(points, dtype=float).copy()
-    scaled[:, 0] = -0.07 + 0.14 * (
+    scaled[:, 0] = -0.08 + 0.16 * (
         (scaled[:, 0] - scaled[:, 0].min())
         / (scaled[:, 0].max() - scaled[:, 0].min())
     )
-    scaled[:, 1] = -0.02 + 0.04 * (
+    scaled[:, 1] = -0.024 + 0.048 * (
         (scaled[:, 1] - scaled[:, 1].min())
         / (scaled[:, 1].max() - scaled[:, 1].min())
     )
     return scaled
 
 
-WORD_POINTS = _scale_word(_WORD_POINTS)
+TEXT_POINTS = _scale_text(_TEXT_POINTS)
 SECONDS_PER_POINT = 3.0
+NUM_ROBOTS = 7
+
+# Start the robots on a small ring around the first writing point. Keeping the
+# positions distinct avoids overlapping robots while preserving a compact group.
+_robot_angles = np.linspace(0.0, 2.0 * np.pi, NUM_ROBOTS, endpoint=False)
+INITIAL_ROBOT_POSITIONS = TEXT_POINTS[0] + np.column_stack((
+    0.006 * np.cos(_robot_angles),
+    0.006 * np.sin(_robot_angles),
+))
 
 
 PARAMS = {
     "TARGET_SCHEDULE": [
         (index * SECONDS_PER_POINT, point, 1.0, np.deg2rad(0.0))
-        for index, point in enumerate(WORD_POINTS)
+        for index, point in enumerate(TEXT_POINTS)
     ],
 
-    # Exactly one microrobot, initially located at the first point of the word.
-    "INITIAL_ROBOT_POSITIONS": np.array([WORD_POINTS[0]]),
+    "INITIAL_ROBOT_POSITIONS": INITIAL_ROBOT_POSITIONS,
 
-    "T_SPAN": (0.0, len(WORD_POINTS) * SECONDS_PER_POINT),
-    "T_EVAL_POINTS": len(WORD_POINTS) * 15,
+    "T_SPAN": (0.0, len(TEXT_POINTS) * SECONDS_PER_POINT),
+    "T_EVAL_POINTS": len(TEXT_POINTS) * 15,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
     "USE_OVERDAMPED_DYNAMICS": True,
     "DYNAMICS_SPEEDUP": 1.0,
     "SOLVER_RTOL": 1e-5,
     "SOLVER_ATOL": 1e-8,
 
-    # Make the written word visible in both the window and saved animation.
-    "ANIMATION_DRAW_TRAJECTORIES": True,
+    # Draw the equilibrium-point path without drawing individual robot paths.
+    "ANIMATION_DRAW_TRAJECTORIES": False,
+    "ANIMATION_DRAW_TARGET_TRAJECTORY": True,
     "ANIMATION_DRAW_CONTOUR": True,
     "ANIMATION_DRAW_STREAMLINES": False,
     "ANIMATION_DRAW_QUIVER": False,
+    "ANIMATION_TITLE": "Equilibrium-Point Manipulation",
     "VIDEO_DPI": 160,
     "VIDEO_FPS": 30,
     "VIDEO_CRF": 18,

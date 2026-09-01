@@ -247,6 +247,7 @@ def build_common_config(params):
     wall_stiffness = params.get("WALL_STIFFNESS", 0.0)
     wall_damping = params.get("WALL_DAMPING", 0.0)
     wall_interaction_range = params.get("WALL_INTERACTION_RANGE", 0.0)
+    wall_recovery_depth = params.get("WALL_RECOVERY_DEPTH", 0.0)
 
     robot_volume = l_robot**3
     robot_radius = l_robot / 2
@@ -325,6 +326,7 @@ def build_common_config(params):
         WALL_STIFFNESS=wall_stiffness,
         WALL_DAMPING=wall_damping,
         WALL_INTERACTION_RANGE=wall_interaction_range,
+        WALL_RECOVERY_DEPTH=wall_recovery_depth,
         ROBOT_VOLUME=robot_volume,
         ROBOT_RADIUS=robot_radius,
         ROBOT_MASS=robot_mass,

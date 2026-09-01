@@ -9,6 +9,7 @@ matplotlib.use("Agg")
 from case_loader import validate_target_schedule
 from functions_main import calculate_total_field, calculate_total_force_from_sources
 from functions_main import _optimization_failure
+from functions_pm_microrobots import calculate_wall_forces_batch
 from functions_utility import compute_grid_fields, extract_optimization_info, plot_field
 
 
@@ -66,6 +67,47 @@ class RefactorTests(unittest.TestCase):
             options = {"block": False} if plot_type == "force_info" else {}
             figure = plot_field(plot_type, field, sources, info, **options)
             self.assertIsNotNone(figure)
+
+    def test_one_sided_wall_pushes_crossed_robot_back_inside(self):
+        wall = (
+            np.array([0.0, -1.0]),
+            np.array([0.0, 1.0]),
+            np.array([1.0, 0.0]),
+        )
+        forces = calculate_wall_forces_batch(
+            robot_positions=np.array([
+                [0.1, 0.0],
+                [-0.005, 0.0],
+                [-0.1, 0.0],
+            ]),
+            robot_velocities=np.zeros((3, 2)),
+            wall_segments=[wall],
+            robot_radius=0.01,
+            wall_stiffness=1.0,
+            wall_damping=0.0,
+            wall_interaction_range=0.0,
+            wall_recovery_depth=0.01,
+        )
+        self.assertTrue(np.allclose(forces[0], 0.0))
+        self.assertGreater(forces[1, 0], 0.0)
+        self.assertAlmostEqual(forces[1, 1], 0.0)
+        # A distant segment must not behave like an infinite half-plane in a
+        # winding/concave maze; tunnelling is handled by the solver step cap.
+        self.assertTrue(np.allclose(forces[2], 0.0))
+
+    def test_legacy_wall_remains_two_sided(self):
+        wall = (np.array([0.0, -1.0]), np.array([0.0, 1.0]))
+        forces = calculate_wall_forces_batch(
+            robot_positions=np.array([[0.005, 0.0], [-0.005, 0.0]]),
+            robot_velocities=np.zeros((2, 2)),
+            wall_segments=[wall],
+            robot_radius=0.01,
+            wall_stiffness=1.0,
+            wall_damping=0.0,
+            wall_interaction_range=0.0,
+        )
+        self.assertGreater(forces[0, 0], 0.0)
+        self.assertLess(forces[1, 0], 0.0)
 
 
 if __name__ == "__main__":

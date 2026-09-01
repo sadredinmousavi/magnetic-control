@@ -1,7 +1,7 @@
 import numpy as np
 
 
-SHAPE_DURATION = 15.0
+SHAPE_DURATION = 25.0
 
 
 PARAMS = {
@@ -40,6 +40,10 @@ PARAMS = {
     "T_SPAN": (0, 11 * SHAPE_DURATION),
     "T_EVAL_POINTS": 300,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
+
+    "ANIMATION_TITLE": (
+        "Controlling the Ratio and Directions of Equilibrium-Point Eigenvalues"
+    ),
 
     # --- Payload Initial State ---
     "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),

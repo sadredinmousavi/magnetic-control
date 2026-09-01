@@ -35,6 +35,10 @@ PARAMS = {
     "T_EVAL_POINTS": 300,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
 
+    "ANIMATION_TITLE": (
+        "Controlling the Ratio and Directions of Equilibrium-Point Eigenvalues"
+    ),
+
     # --- Payload Initial State ---
     "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
     "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),

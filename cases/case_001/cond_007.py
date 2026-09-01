@@ -6,7 +6,7 @@ import numpy as np
 NUM_ROBOTS = 7
 PAYLOAD_CENTER = np.array([0.0, 0.0])
 PICKUP_DURATION = 24.0
-PATH_STEP_DURATION = 8.0
+PATH_STEP_DURATION = 10.0
 
 # Place all 20 robots on a ring away from the circular payload so the pickup
 # stage visibly gathers them toward the center.
@@ -62,6 +62,7 @@ PARAMS = {
     "SOLVER_RTOL": 1e-4,
     "SOLVER_ATOL": 1e-7,
 
+    "ANIMATION_TITLE": "Payload Manipulation",
     "ANIMATION_DRAW_TRAJECTORIES": False,
     "ANIMATION_DRAW_TARGET_TRAJECTORY": True,
 

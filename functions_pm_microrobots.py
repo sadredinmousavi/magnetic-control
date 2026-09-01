@@ -82,50 +82,123 @@ def calculate_wall_forces_batch(
     robot_radius,
     wall_stiffness,
     wall_damping,
-    wall_interaction_range
+    wall_interaction_range,
+    wall_recovery_depth=0.0,
 ):
+    """Calculate compliant contact forces between robots and wall segments.
+
+    A wall may be ``(start, end)`` for legacy two-sided contact or
+    ``(start, end, inward_normal)`` for a one-sided boundary. One-sided walls
+    always push toward their allowed side, even after a small numerical
+    crossing, which prevents the force direction from flipping after contact.
+    Robot/wall pairs are evaluated together to keep the dynamics callback fast.
+    """
     if not wall_segments or wall_stiffness <= 0:
         return np.zeros_like(robot_positions)
 
-    wall_forces = np.zeros_like(robot_positions)
+    starts = []
+    ends = []
+    inward_normals = []
+    one_sided = []
+    for wall in wall_segments:
+        if len(wall) not in (2, 3):
+            raise ValueError(
+                "Each wall must be (start, end) or "
+                "(start, end, inward_normal)."
+            )
+        start = np.asarray(wall[0], dtype=float)
+        end = np.asarray(wall[1], dtype=float)
+        segment = end - start
+        segment_length = np.linalg.norm(segment)
+        if segment_length <= 1e-9:
+            continue
+
+        starts.append(start)
+        ends.append(end)
+        if len(wall) == 3:
+            normal = np.asarray(wall[2], dtype=float)
+            normal_length = np.linalg.norm(normal)
+            if normal_length <= 1e-12:
+                raise ValueError("A wall inward normal cannot be zero.")
+            inward_normals.append(normal / normal_length)
+            one_sided.append(True)
+        else:
+            inward_normals.append(np.zeros(2))
+            one_sided.append(False)
+
+    if not starts:
+        return np.zeros_like(robot_positions)
+
+    starts = np.asarray(starts)
+    segments = np.asarray(ends) - starts
+    segment_len_sq = np.sum(segments * segments, axis=1)
+    segment_lengths = np.sqrt(segment_len_sq)
+    inward_normals = np.asarray(inward_normals)
+    one_sided = np.asarray(one_sided, dtype=bool)
+
+    # Shapes below are (robot, wall, coordinate), allowing all contact pairs
+    # to be evaluated without a Python loop over walls.
+    rel = robot_positions[:, None, :] - starts[None, :, :]
+    raw_t = np.sum(rel * segments[None, :, :], axis=2) / segment_len_sq
+    t = np.clip(raw_t, 0.0, 1.0)
+    closest = starts[None, :, :] + t[:, :, None] * segments[None, :, :]
+    offset = robot_positions[:, None, :] - closest
+    distances = np.linalg.norm(offset, axis=2)
     activation_distance = robot_radius + wall_interaction_range
 
-    for wall_start, wall_end in wall_segments:
-        start = np.asarray(wall_start, dtype=float)
-        end = np.asarray(wall_end, dtype=float)
-        segment = end - start
-        segment_len_sq = np.dot(segment, segment)
+    normals = np.zeros_like(offset)
+    safe = distances > 1e-12
+    normals[safe] = offset[safe] / distances[safe, None]
 
-        if segment_len_sq <= 1e-18:
-            continue
+    # A deterministic fallback is needed for a robot exactly on a legacy wall.
+    fallback_normals = np.column_stack((
+        -segments[:, 1] / segment_lengths,
+        segments[:, 0] / segment_lengths,
+    ))
+    normals = np.where(
+        safe[:, :, None],
+        normals,
+        fallback_normals[None, :, :],
+    )
 
-        rel = robot_positions - start
-        t = np.clip((rel @ segment) / segment_len_sq, 0.0, 1.0)
-        closest = start + t[:, None] * segment
-        offset = robot_positions - closest
-        dist = np.linalg.norm(offset, axis=1)
-        active = dist < activation_distance
+    effective_distances = distances.copy()
+    if np.any(one_sided):
+        normals[:, one_sided, :] = inward_normals[None, one_sided, :]
+        effective_distances[:, one_sided] = np.sum(
+            offset[:, one_sided, :] * inward_normals[None, one_sided, :],
+            axis=2,
+        )
 
-        if not np.any(active):
-            continue
+    # Do not extend one-sided barriers infinitely beyond their endpoints. A
+    # small tangential margin closes numerical gaps where adjacent segments meet.
+    endpoint_margin = activation_distance / segment_lengths
+    within_segment = (
+        (raw_t >= -endpoint_margin[None, :])
+        & (raw_t <= 1.0 + endpoint_margin[None, :])
+    )
+    active = effective_distances < activation_distance
+    if np.any(one_sided):
+        # A one-sided segment is a local boundary, not an infinite half-plane.
+        # The recovery band catches small solver crossings without allowing a
+        # distant segment to interfere with another part of a concave maze.
+        recovery_band = activation_distance + max(wall_recovery_depth, 0.0)
+        active[:, one_sided] &= (
+            within_segment[:, one_sided]
+            & (distances[:, one_sided] < recovery_band)
+        )
 
-        normals = np.zeros_like(offset)
-        safe = active & (dist > 1e-12)
-        normals[safe] = offset[safe] / dist[safe, None]
-
-        degenerate = active & ~safe
-        if np.any(degenerate):
-            tangent = segment / np.sqrt(segment_len_sq)
-            fallback_normal = np.array([-tangent[1], tangent[0]])
-            normals[degenerate] = fallback_normal
-
-        penetration = activation_distance - dist[active]
-        normal_velocity = np.sum(robot_velocities[active] * normals[active], axis=1)
-        damping_force = -wall_damping * np.minimum(normal_velocity, 0.0)
-        force_magnitude = wall_stiffness * penetration + damping_force
-        wall_forces[active] += force_magnitude[:, None] * normals[active]
-
-    return wall_forces
+    penetration = np.maximum(activation_distance - effective_distances, 0.0)
+    normal_velocity = np.sum(
+        robot_velocities[:, None, :] * normals,
+        axis=2,
+    )
+    damping_force = -wall_damping * np.minimum(normal_velocity, 0.0)
+    force_magnitude = np.where(
+        active,
+        wall_stiffness * penetration + damping_force,
+        0.0,
+    )
+    return np.sum(force_magnitude[:, :, None] * normals, axis=1)
 
 
 def microrobot_payload_dynamics(
@@ -152,7 +225,8 @@ def microrobot_payload_dynamics(
     wall_segments=None,
     wall_stiffness=0.0,
     wall_damping=0.0,
-    wall_interaction_range=0.0
+    wall_interaction_range=0.0,
+    wall_recovery_depth=0.0,
 ):
     """
     State layout:
@@ -198,7 +272,8 @@ def microrobot_payload_dynamics(
         robot_radius,
         wall_stiffness,
         wall_damping,
-        wall_interaction_range
+        wall_interaction_range,
+        wall_recovery_depth,
     )
 
     for i in range(N):
@@ -378,6 +453,7 @@ def animate_trajectories(
     video_fps=30,
     video_crf=18,
     figure_size=(8, 8),
+    animation_title="Microrobot Swarm Dynamics",
 ):
     """
     Fast animation for time-varying target microrobot simulation.
@@ -422,7 +498,7 @@ def animate_trajectories(
     ax.set_ylim(grid_min, grid_max)
     ax.set_aspect("equal")
     ax.grid(True, linestyle="--", alpha=0.4)
-    ax.set_title("Microrobot Swarm Dynamics")
+    ax.set_title(animation_title)
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
 
@@ -593,7 +669,8 @@ def animate_trajectories(
         moment_angle_texts = moment_reference_artists[1::2]
 
     if wall_segments:
-        for idx, (wall_start, wall_end) in enumerate(wall_segments):
+        for idx, wall in enumerate(wall_segments):
+            wall_start, wall_end = wall[:2]
             wall_start = np.asarray(wall_start)
             wall_end = np.asarray(wall_end)
             ax.plot(

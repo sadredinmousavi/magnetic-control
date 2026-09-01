@@ -54,7 +54,7 @@ def main(case_name=None):
             cfg.PAYLOAD_CAPILLARY_RANGE, cfg.PAYLOAD_CAPILLARY_CUTOFF,
             cfg.USE_OVERDAMPED_DYNAMICS, cfg.DYNAMICS_SPEEDUP,
             cfg.WALL_SEGMENTS, cfg.WALL_STIFFNESS, cfg.WALL_DAMPING,
-            cfg.WALL_INTERACTION_RANGE,
+            cfg.WALL_INTERACTION_RANGE, cfg.WALL_RECOVERY_DEPTH,
         )
 
     solution = solve_ivp(
@@ -62,6 +62,7 @@ def main(case_name=None):
         method=params.get("SOLVER_METHOD", "RK45"),
         rtol=params.get("SOLVER_RTOL", 1e-5),
         atol=params.get("SOLVER_ATOL", 1e-8),
+        max_step=params.get("SOLVER_MAX_STEP", np.inf),
     )
     progress.finish(solution.message)
     if not solution.success:
@@ -96,6 +97,9 @@ def main(case_name=None):
         video_fps=params.get("VIDEO_FPS", 30),
         video_crf=params.get("VIDEO_CRF", 18),
         figure_size=params.get("ANIMATION_FIGURE_SIZE", (8, 8)),
+        animation_title=params.get(
+            "ANIMATION_TITLE", "Microrobot Swarm Dynamics"
+        ),
     )
     return solution
 
