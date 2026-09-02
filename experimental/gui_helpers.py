@@ -16,7 +16,8 @@ class BaseServoGUI:
 
         self.port = None
 
-    def build_connection(self, default_port="/dev/ttyS0", default_baud="1000000"):
+    # Linux default: /dev/ttyS0
+    def build_connection(self, default_port="COM3", default_baud="1000000"):
         frame = tk.LabelFrame(self.root, text="Connection", padx=10, pady=10)
         frame.pack(fill="x", padx=10, pady=5)
 
