@@ -39,21 +39,23 @@ def main():
 
     try:
         while True:
-            port.break_condition = False
             print(f"TX idle HIGH for {args.seconds:g} seconds")
             time.sleep(args.seconds)
 
-            port.break_condition = True
-            print(f"TX forced LOW for {args.seconds:g} seconds")
-            time.sleep(args.seconds)
-
-            port.break_condition = False
-            print(f"Sending 0x55 UART pattern for {args.seconds:g} seconds")
-            deadline = time.monotonic() + args.seconds
-            block = bytes([0x55]) * 4096
-            while time.monotonic() < deadline:
-                port.write(block)
-            port.flush()
+            for value, description in (
+                (0x00, "mostly LOW (expect about 10% of logic voltage)"),
+                (0xFF, "mostly HIGH (expect about 90% of logic voltage)"),
+                (0x55, "alternating bits (expect about 50% of logic voltage)"),
+            ):
+                print(
+                    f"Sending 0x{value:02X}, {description}, "
+                    f"for {args.seconds:g} seconds"
+                )
+                deadline = time.monotonic() + args.seconds
+                block = bytes([value]) * 4096
+                while time.monotonic() < deadline:
+                    port.write(block)
+                port.flush()
 
             port.reset_input_buffer()
             message = b"RX_TX_LOOPBACK_TEST\r\n"
@@ -71,7 +73,6 @@ def main():
     except KeyboardInterrupt:
         print("\nTest stopped.")
     finally:
-        port.break_condition = False
         port.close()
 
 
