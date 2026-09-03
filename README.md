@@ -217,16 +217,69 @@ use the same rate.
 ---
 
 # Experimental
-```
-pip install -r ./experimental/requirements.txt
+
+Run these commands from the project root. Change `COM5` if the adapter uses a
+different port.
+
+### Setup and GUIs (PowerShell)
+
+```powershell
+python -m pip install -r .\experimental\requirements.txt
+python .\experimental\gui001.py
+python .\experimental\gui002.py
+python .\experimental\gui003.py
 ```
 
+### Serial adapter tests (PowerShell)
 
+```powershell
+# TX voltage/scope test: disconnect the servo first
+python .\experimental\test_serial_tx.py --port COM5 --baud 1000000 --seconds 3
+
+# TX/RX loopback test: disconnect the servo and connect TX directly to RX
+python .\experimental\test_serial_loopback.py --port COM5 --baud 1000000 --cycles 20
+
+# Blink every connected Protocol 1.0 servo LED
+python .\experimental\test_servo_led_broadcast.py --port COM5 --baud 1000000 --cycles 5 --delay 1
+
+# Read servo IDs 1 through 8 without changing their settings
+python .\experimental\test_u2d2_read.py --port COM5 --baud 1000000 --ids 1 2 3 4 5 6 7 8
+
+# Try the MX-12W factory-default baud rate if no servo responds
+python .\experimental\test_u2d2_read.py --port COM5 --baud 57600 --ids 1 2 3 4 5 6 7 8
 ```
-python ./experimental/gui001.py
-python ./experimental/gui002.py
-python ./experimental/gui003.py
-python .\experimental\test_servo_led_broadcast.py --port COM5
+
+Show all available options for a test:
+
+```powershell
+python .\experimental\test_serial_tx.py --help
+python .\experimental\test_serial_loopback.py --help
+python .\experimental\test_servo_led_broadcast.py --help
+python .\experimental\test_u2d2_read.py --help
+```
+
+### Automated project tests (PowerShell)
+
+```powershell
+python -m unittest discover -s tests
+```
+
+### Raspberry Pi hardware scripts
+
+These scripts currently use `/dev/ttyS0` or `/dev/serial0` in their source.
+
+```bash
+# Scan Dynamixel IDs 0-20 at common baud rates and both protocols
+python ./experimental/scan_dynamixel.py
+
+# Move servo ID 4 to approximately 90 degrees
+python ./experimental/newmain.py
+
+# Run the predefined multi-servo movement sequence
+python ./experimental/main001.py
+
+# Run the SDK helper example (LED and movement commands)
+python ./experimental/main002.py
 ```
 
 
