@@ -235,7 +235,8 @@ GUI001 and GUI002 start maximized, and their connection bars include controls
 to connect or close the serial connection. GUI001 also includes an IP Webcam
 viewer. Start the server in the Android IP Webcam app, keep the phone and
 computer on the same network, click `IP Camera`, and enter the MJPEG URL shown
-by the app. A typical URL is `http://PHONE_IP:8080/video`.
+by the app. A typical URL is `http://PHONE_IP:8080/video`. If authentication is
+enabled in IP Webcam, enter its username and password in the popup as well.
 
 ### Serial adapter tests (PowerShell)
 

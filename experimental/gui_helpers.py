@@ -4,7 +4,14 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 from urllib.parse import urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import (
+    HTTPBasicAuthHandler,
+    HTTPDigestAuthHandler,
+    HTTPPasswordMgrWithDefaultRealm,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 try:
     from PIL import Image, ImageTk
@@ -147,17 +154,28 @@ class BaseServoGUI:
 
         controls = tk.Frame(self.camera_window, padx=10, pady=10)
         controls.pack(fill="x")
+        controls.columnconfigure(1, weight=1)
 
-        tk.Label(controls, text="Camera URL").pack(side="left")
+        tk.Label(controls, text="Camera URL").grid(row=0, column=0, sticky="w")
         self.camera_url_entry = tk.Entry(controls)
         self.camera_url_entry.insert(0, "http://10.233.73.201:8080/video")
-        self.camera_url_entry.pack(side="left", fill="x", expand=True, padx=8)
-
-        tk.Button(controls, text="Connect", command=self.connect_camera).pack(
-            side="left", padx=4
+        self.camera_url_entry.grid(
+            row=0, column=1, columnspan=4, sticky="ew", padx=8, pady=4
         )
-        tk.Button(controls, text="Disconnect", command=self.disconnect_camera).pack(
-            side="left", padx=4
+
+        tk.Label(controls, text="Username").grid(row=1, column=0, sticky="w")
+        self.camera_username_entry = tk.Entry(controls, width=24)
+        self.camera_username_entry.grid(row=1, column=1, sticky="w", padx=8, pady=4)
+
+        tk.Label(controls, text="Password").grid(row=1, column=2, sticky="e")
+        self.camera_password_entry = tk.Entry(controls, width=24, show="*")
+        self.camera_password_entry.grid(row=1, column=3, sticky="w", padx=8, pady=4)
+
+        tk.Button(controls, text="Connect", command=self.connect_camera).grid(
+            row=1, column=4, padx=4
+        )
+        tk.Button(controls, text="Disconnect", command=self.disconnect_camera).grid(
+            row=1, column=5, padx=4
         )
 
         self.camera_status_label = tk.Label(
@@ -177,6 +195,8 @@ class BaseServoGUI:
 
     def connect_camera(self):
         url = self.camera_url_entry.get().strip()
+        username = self.camera_username_entry.get().strip()
+        password = self.camera_password_entry.get()
         parsed_url = urlparse(url)
         if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
             messagebox.showerror(
@@ -197,17 +217,27 @@ class BaseServoGUI:
         self.set_camera_status("Connecting to camera...", "blue")
         threading.Thread(
             target=self.camera_read_loop,
-            args=(url, stop_event),
+            args=(url, username, password, stop_event),
             daemon=True,
         ).start()
 
-    def camera_read_loop(self, url, stop_event):
+    def camera_read_loop(self, url, username, password, stop_event):
         response = None
         try:
             request = Request(url, headers={"User-Agent": "Magnetic-Control-GUI"})
             # LAN camera streams should connect directly. Windows proxy settings can
             # otherwise route private IP addresses through a blocked proxy socket.
-            direct_opener = build_opener(ProxyHandler({}))
+            handlers = [ProxyHandler({})]
+            if username:
+                password_manager = HTTPPasswordMgrWithDefaultRealm()
+                password_manager.add_password(None, url, username, password)
+                handlers.extend(
+                    [
+                        HTTPDigestAuthHandler(password_manager),
+                        HTTPBasicAuthHandler(password_manager),
+                    ]
+                )
+            direct_opener = build_opener(*handlers)
             response = direct_opener.open(request, timeout=10)
             if stop_event.is_set() or stop_event is not self.camera_stop:
                 return
