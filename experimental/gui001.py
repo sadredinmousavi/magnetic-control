@@ -10,12 +10,13 @@ from helpers import moveArray
 class PoseGUI(BaseServoGUI):
     def __init__(self, root):
         super().__init__(root, title="Servo Defined Poses", geometry="760x680")
+        self.maximize_window()
 
         self.pose_rows = []
         self.abort_requested = False
         self.is_running_all = False
 
-        self.build_connection()
+        self.build_connection(show_disconnect=True, show_camera=True)
         self.build_pose_area()
         self.build_status()
 

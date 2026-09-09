@@ -9,12 +9,13 @@ from helpers import move, moveArray, setID, setLedStatus, factoryReset
 class ServoTestGUI(BaseServoGUI):
     def __init__(self, root):
         super().__init__(root, title="Servo Test GUI", geometry="760x760")
+        self.maximize_window()
         self.root.minsize(760, 760)
         self.root.resizable(True, True)
 
         self.shared_servo_id = tk.IntVar(value=1)
 
-        self.build_connection()
+        self.build_connection(show_disconnect=True)
         self.build_shared_servo_id()
         self.build_custom_move()
         self.build_led()
