@@ -236,7 +236,10 @@ to connect or close the serial connection. GUI001 also includes an IP Webcam
 viewer. Start the server in the Android IP Webcam app, keep the phone and
 computer on the same network, click `IP Camera`, and enter the MJPEG URL shown
 by the app. A typical URL is `http://PHONE_IP:8080/video`. If authentication is
-enabled in IP Webcam, enter its username and password in the popup as well.
+enabled in IP Webcam, enter its username and password in the popup as well. The
+viewer can overlay OpenCV detections for a selected robot color, `DICT_4X4_50`
+ArUco IDs, or both. `Min area` filters small color noise; increase it when small
+false detections appear.
 
 ### Serial adapter tests (PowerShell)
 
