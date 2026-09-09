@@ -191,10 +191,11 @@ class PoseGUI(BaseServoGUI):
 
     def open_sequence_file(self):
         script_folder = os.path.dirname(os.path.abspath(__file__))
+        sequence_folder = os.path.join(script_folder, "sequences")
 
         file_path = filedialog.askopenfilename(
             title="Open Sequence File",
-            initialdir=script_folder,
+            initialdir=sequence_folder,
             filetypes=[
                 ("Text files", "*.txt"),
                 ("Sequence files", "*.seq"),
