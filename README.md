@@ -73,7 +73,8 @@ python usage4.py
 
 
 usage1 --> gives the angles and plot static
-usage2 --> gives the target points and calculate and save into sequence
+usage2 --> gives the target points, calculates, and saves the sequence in both
+`outputs/` and `experimental/sequences/`
 usage3 --> gives the target points and calculate and plot
 usage4 --> gives the target points and calculate and simulate and make animation
 

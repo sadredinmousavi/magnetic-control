@@ -1,6 +1,7 @@
 """Optimize scheduled targets and write magnet angles to a sequence file."""
 
 from pathlib import Path
+from shutil import copyfile
 
 from case_loader import build_common_config, case_output_path, get_case_name_from_argv, load_case, require_keys
 from control_workflow import run_control_workflow
@@ -35,7 +36,16 @@ def main(case_name=None):
             ) + "]"
             output.write(f"{angle_text} | 2 | 180\n")
 
+    sequence_filename = (
+        Path("experimental")
+        / "sequences"
+        / case_output_path(case_name).with_suffix(".txt")
+    )
+    sequence_filename.parent.mkdir(parents=True, exist_ok=True)
+    copyfile(output_filename, sequence_filename)
+
     print(f"Wrote {output_filename}")
+    print(f"Wrote {sequence_filename}")
     return output_filename
 
 
