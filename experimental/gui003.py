@@ -24,7 +24,7 @@ class ArduinoSerialGUI(BaseServoGUI):
             "z": tk.IntVar(value=0),
         }
 
-        self.build_connection(default_port="COM3", default_baud="115200")
+        self.build_connection(default_port="COM5", default_baud="115200")
         self.build_axis_controls()
         self.build_manual_controls()
         self.build_status()
