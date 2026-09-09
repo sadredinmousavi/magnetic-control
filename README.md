@@ -304,3 +304,21 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests
 ```
+
+### Installing requirements through a mirror
+
+If the default PyPI server is slow or unavailable, pass a mirror URL to pip
+with `--index-url` (or its short form, `-i`):
+
+```powershell
+python -m pip install -r requirements.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+For the experimental tools, use the same option with their requirements file:
+
+```powershell
+python -m pip install -r .\experimental\requirements.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+Replace the example URL with the HTTPS URL of your preferred PyPI-compatible
+mirror.

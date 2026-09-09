@@ -20,6 +20,16 @@ except ImportError:
     ImageTk = None
 
 try:
+    import cv2
+    import numpy as np
+
+    from robot_vision import RobotDetector
+except ImportError:
+    cv2 = None
+    np = None
+    RobotDetector = None
+
+try:
     import serial
 except ImportError:
     serial = None
@@ -39,6 +49,11 @@ class BaseServoGUI:
         self.camera_stop = None
         self.camera_frames = queue.Queue(maxsize=1)
         self.camera_photo = None
+        self.camera_detection_label = None
+        self.camera_detection_mode = "Off"
+        self.camera_detection_color = "Red"
+        self.camera_detection_minimum_area = 150.0
+        self.robot_detector = RobotDetector() if RobotDetector is not None else None
 
     def maximize_window(self):
         try:
@@ -178,6 +193,46 @@ class BaseServoGUI:
             row=1, column=5, padx=4
         )
 
+        tk.Label(controls, text="Detection").grid(row=2, column=0, sticky="w")
+        self.camera_detection_mode_var = tk.StringVar(
+            value=self.camera_detection_mode
+        )
+        detection_menu = tk.OptionMenu(
+            controls,
+            self.camera_detection_mode_var,
+            "Off",
+            "Color blobs",
+            "ArUco markers",
+            "Color + ArUco",
+            command=lambda _value: self.update_camera_detection_settings(),
+        )
+        detection_menu.grid(row=2, column=1, sticky="w", padx=8, pady=4)
+
+        tk.Label(controls, text="Target color").grid(row=2, column=2, sticky="e")
+        self.camera_detection_color_var = tk.StringVar(
+            value=self.camera_detection_color
+        )
+        color_menu = tk.OptionMenu(
+            controls,
+            self.camera_detection_color_var,
+            *RobotDetector.COLOR_RANGES.keys() if RobotDetector is not None else ["Red"],
+            command=lambda _value: self.update_camera_detection_settings(),
+        )
+        color_menu.grid(row=2, column=3, sticky="w", padx=8, pady=4)
+
+        tk.Label(controls, text="Min area").grid(row=2, column=4, sticky="e")
+        self.camera_detection_area_entry = tk.Entry(controls, width=8)
+        self.camera_detection_area_entry.insert(
+            0, str(int(self.camera_detection_minimum_area))
+        )
+        self.camera_detection_area_entry.grid(row=2, column=5, padx=4, pady=4)
+        self.camera_detection_area_entry.bind(
+            "<KeyRelease>", lambda _event: self.update_camera_detection_settings()
+        )
+
+        if self.robot_detector is None:
+            detection_menu.config(state="disabled")
+
         self.camera_status_label = tk.Label(
             self.camera_window,
             text="Enter the phone's IP Webcam video URL, then press Connect.",
@@ -187,11 +242,34 @@ class BaseServoGUI:
         )
         self.camera_status_label.pack(fill="x")
 
+        self.camera_detection_label = tk.Label(
+            self.camera_window,
+            text=(
+                "Detected robots: 0"
+                if self.robot_detector is not None
+                else "OpenCV is not installed; detection is unavailable."
+            ),
+            fg="purple",
+            anchor="w",
+            padx=10,
+        )
+        self.camera_detection_label.pack(fill="x")
+
         self.camera_canvas = tk.Canvas(
             self.camera_window, background="black", highlightthickness=0
         )
         self.camera_canvas.pack(fill="both", expand=True, padx=10, pady=10)
         self.camera_window.after(50, self.poll_camera_frames)
+
+    def update_camera_detection_settings(self):
+        self.camera_detection_mode = self.camera_detection_mode_var.get()
+        self.camera_detection_color = self.camera_detection_color_var.get()
+        try:
+            value = float(self.camera_detection_area_entry.get().strip())
+            if value > 0:
+                self.camera_detection_minimum_area = value
+        except ValueError:
+            pass
 
     def connect_camera(self):
         url = self.camera_url_entry.get().strip()
@@ -257,10 +335,9 @@ class BaseServoGUI:
                 if start >= 0 and end >= 0:
                     jpeg = data[start : end + 2]
                     data = data[end + 2 :]
-                    frame = Image.open(io.BytesIO(jpeg))
-                    frame.load()
-                    frame = frame.convert("RGB")
-                    self.put_latest_camera_frame(frame)
+                    frame, summary = self.process_camera_jpeg(jpeg)
+                    if frame is not None:
+                        self.put_latest_camera_frame(frame, summary)
                 elif len(data) > 4_000_000:
                     data = data[-1_000_000:]
 
@@ -276,6 +353,26 @@ class BaseServoGUI:
             if self.camera_response is response:
                 self.camera_response = None
 
+    def process_camera_jpeg(self, jpeg):
+        if cv2 is None or np is None or self.robot_detector is None:
+            frame = Image.open(io.BytesIO(jpeg))
+            frame.load()
+            return frame.convert("RGB"), "OpenCV detection unavailable"
+
+        encoded_frame = np.frombuffer(jpeg, dtype=np.uint8)
+        frame_bgr = cv2.imdecode(encoded_frame, cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            return None, "Could not decode camera frame"
+
+        annotated, detections = self.robot_detector.process(
+            frame_bgr,
+            mode=self.camera_detection_mode,
+            color=self.camera_detection_color,
+            minimum_area=self.camera_detection_minimum_area,
+        )
+        frame_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(frame_rgb), self.robot_detector.summarize(detections)
+
     @staticmethod
     def camera_error_message(error):
         reason = getattr(error, "reason", error)
@@ -289,16 +386,16 @@ class BaseServoGUI:
             )
         return f"Camera connection failed: {error}"
 
-    def put_latest_camera_frame(self, frame):
+    def put_latest_camera_frame(self, frame, summary=""):
         try:
-            self.camera_frames.put_nowait(frame)
+            self.camera_frames.put_nowait((frame, summary))
         except queue.Full:
             try:
                 self.camera_frames.get_nowait()
             except queue.Empty:
                 pass
             try:
-                self.camera_frames.put_nowait(frame)
+                self.camera_frames.put_nowait((frame, summary))
             except queue.Full:
                 pass
 
@@ -306,14 +403,15 @@ class BaseServoGUI:
         if not self.camera_window or not self.camera_window.winfo_exists():
             return
 
-        frame = None
+        frame_item = None
         while not self.camera_frames.empty():
             try:
-                frame = self.camera_frames.get_nowait()
+                frame_item = self.camera_frames.get_nowait()
             except queue.Empty:
                 break
 
-        if frame is not None and self.camera_canvas.winfo_exists():
+        if frame_item is not None and self.camera_canvas.winfo_exists():
+            frame, summary = frame_item
             width = max(self.camera_canvas.winfo_width(), 1)
             height = max(self.camera_canvas.winfo_height(), 1)
             frame.thumbnail((width, height), Image.Resampling.LANCZOS)
@@ -326,6 +424,8 @@ class BaseServoGUI:
                 anchor="center",
                 tags="camera_frame",
             )
+            if self.camera_detection_label.winfo_exists():
+                self.camera_detection_label.config(text=summary)
 
         self.camera_window.after(50, self.poll_camera_frames)
 
@@ -351,6 +451,7 @@ class BaseServoGUI:
         self.camera_window = None
         self.camera_canvas = None
         self.camera_status_label = None
+        self.camera_detection_label = None
         self.camera_photo = None
 
     def set_camera_status(self, text, color="black"):
