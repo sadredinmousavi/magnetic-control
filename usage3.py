@@ -20,6 +20,7 @@ def main(case_name=None, plot_type=None, save_plots=True):
     require_keys(params, REQUIRED_KEYS, case_name)
     cfg = build_common_config(params)
     plot_type = plot_type or params.get("PLOT_TYPE", "force_info")
+    target_path = [entry[1] for entry in cfg.TARGET_SCHEDULE]
 
     print(f"Loaded case: {case_name}")
     result = run_control_workflow(cfg, params, report=print_optimization_results)
@@ -43,6 +44,10 @@ def main(case_name=None, plot_type=None, save_plots=True):
                 "MAGNET_MOMENT_ARROW_COLOR", "#d1495b"
             ),
         }
+        if params.get("PLOT_DRAW_TARGET_PATH", True) and len(target_path) > 1:
+            options["target_path"] = target_path
+        if cfg.WALL_SEGMENTS:
+            options["wall_segments"] = cfg.WALL_SEGMENTS
         if str(plot_type).lower() in {"1", "force_info"}:
             options.update({
                 "draw_contour": True,

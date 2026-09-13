@@ -1,219 +1,138 @@
-import sys
+"""Plot the complete scheduled target trajectory without computing a field."""
+
 from pathlib import Path
 
-import numpy as np
+import matplotlib.patches as patches
 import matplotlib.pyplot as plt
+import numpy as np
 
 from case_loader import (
-    build_common_config,
     case_output_path,
     get_case_name_from_argv,
     load_case,
     require_keys,
-    select_file_from_dialog,
+    unpack_target_schedule_entry,
+    validate_target_schedule,
 )
-from functions_main import (
-    generate_circular_source_positions,
-)
-from functions_utility import (
-    compute_grid_fields,
-    plot_field,
-    save_temp_plot,
-)
+from functions_main import generate_circular_source_positions
 
 
-# =========================================================================
-# 1. SYSTEM PARAMETERS & CONSTANTS
-# =========================================================================
-
-PLOT_MODE_1_DISPLAY_SECONDS = 1.5
+REQUIRED_KEYS = ["NUM_SOURCES", "RADIUS", "TARGET_SCHEDULE", "GRID_MIN", "GRID_MAX"]
 
 
-def parse_args():
-    if len(sys.argv) > 3:
-        raise SystemExit(
-            "Usage: python usage1.py <case_name> <input_angles_file>\n"
-            "Example: python usage1.py case_001.cond_001 outputs/case_001_cond_001.txt"
-        )
-
-    case_name = get_case_name_from_argv()
-
-    if len(sys.argv) > 2:
-        input_filename = Path(sys.argv[2])
-    else:
-        input_filename = select_file_from_dialog(
-            initial_dir=Path.cwd() / "outputs",
-            title="Select angle input file",
-            filetypes=[
-                ("Text files", "*.txt"),
-                ("All files", "*.*"),
-            ],
-            default_path=Path.cwd() / "outputs" / case_output_path(case_name).with_suffix(".txt"),
-            cancel_message="No angle input file selected.",
-        )
-
-    return case_name, input_filename
+def _target_groups(schedule):
+    """Return every scheduled set of one, two, or four target positions."""
+    groups = []
+    for entry in schedule:
+        _, primary, additional, _, _ = unpack_target_schedule_entry(entry)
+        positions = [primary]
+        if additional is not None:
+            positions.extend(additional if isinstance(additional, list) else [additional])
+        groups.append(np.asarray(positions, dtype=float))
+    return groups
 
 
+def create_target_trajectory_figure(params):
+    """Create a field-free overview of target tracks and workspace geometry."""
+    schedule = params["TARGET_SCHEDULE"]
+    validate_target_schedule(schedule)
+    groups = _target_groups(schedule)
 
-def load_angle_rows(input_filename):
-    angle_rows = []
-    wait_values = []
-    zero_values = []
+    figure_size = params.get("ANIMATION_FIGURE_SIZE", (8, 8))
+    fig, ax = plt.subplots(figsize=figure_size)
+    fig.subplots_adjust(left=0.11, right=0.96, bottom=0.12, top=0.93)
 
-    with open(input_filename, "r", encoding="utf-8") as f:
-        for line_number, line in enumerate(f, start=1):
-            line = line.strip()
+    ax.set_xlim(params["GRID_MIN"], params["GRID_MAX"])
+    ax.set_ylim(params["GRID_MIN"], params["GRID_MAX"])
+    ax.set_aspect("equal")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_title(params.get("TARGET_TRAJECTORY_TITLE", "Scheduled Target Trajectory"))
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
 
-            if not line or line.startswith("#"):
-                continue
-
-            parts = [part.strip() for part in line.split("|")]
-
-            if len(parts) < 1:
-                continue
-
-            angle_text = parts[0]
-
-            if not angle_text.startswith("[") or not angle_text.endswith("]"):
-                raise ValueError(
-                    f"Invalid angle format at line {line_number}: {line}"
-                )
-
-            angles_deg = np.array(
-                [float(value.strip()) for value in angle_text[1:-1].split(",")],
-                dtype=float,
-            )
-
-            wait = float(parts[1]) if len(parts) > 1 else None
-            zero = float(parts[2]) if len(parts) > 2 else None
-
-            angle_rows.append(angles_deg)
-            wait_values.append(wait)
-            zero_values.append(zero)
-
-    return angle_rows, wait_values, zero_values
-
-
-def angles_deg_to_control_inputs(angles_deg):
-    angles_rad = np.radians(angles_deg)
-    return np.cos(angles_rad)
-
-
-def build_plot_opt_info(angles_deg, angles_rad, desired_pos=None):
-    if desired_pos is None:
-        desired_pos = np.array([0.0, 0.0])
-
-    return {
-        "angles_rad": angles_rad,
-        "angles_deg": angles_deg,
-        "desired_pos": desired_pos,
-        "equilibrium_positions": [],
-        "eigenvalues": None,
-        "eigenvectors": None,
-        "microrobot_positions": None,
-    }
-
-
-# =========================================================================
-# 2. MAIN EXECUTION
-# =========================================================================
-
-def main(case_name=None, input_filename=None, plot_type=None):
-    if case_name is None and input_filename is None:
-        case_name, input_filename = parse_args()
-    elif case_name is None or input_filename is None:
-        raise ValueError("case_name and input_filename must be provided together.")
-
-    params = load_case(case_name)
-
-    require_keys(
-        params,
-        [
-            "NUM_SOURCES",
-            "RADIUS",
-            "SOURCE_MAGNETIZATION",
-            "ROBOT_MAGNETIZATION",
-            "L_SOURCE",
-            "L_ROBOT",
-            "GRID_MIN",
-            "GRID_MAX",
-            "RESOLUTION",
-        ],
-        case_name,
+    source_positions = generate_circular_source_positions(
+        params["NUM_SOURCES"], params["RADIUS"]
+    )
+    ax.scatter(
+        source_positions[:, 0], source_positions[:, 1],
+        c="gray", s=100, marker="s", edgecolors="black",
+        label="Source magnets", zorder=8,
     )
 
-    cfg = build_common_config(params)
-    plot_type = plot_type or params.get("PLOT_TYPE", "force_info")
-    source_positions = generate_circular_source_positions(cfg.NUM_SOURCES, cfg.RADIUS)
+    for index, wall in enumerate(params.get("WALL_SEGMENTS", [])):
+        start = np.asarray(wall[0], dtype=float)
+        end = np.asarray(wall[1], dtype=float)
+        ax.plot(
+            [start[0], end[0]], [start[1], end[1]],
+            color="dimgray", linewidth=4, solid_capstyle="round",
+            label="Walls" if index == 0 else None, zorder=6,
+        )
 
-    angle_rows, wait_values, zero_values = load_angle_rows(input_filename)
+    dish_radius = params.get("DISH_RADIUS")
+    if dish_radius is not None:
+        dish_center = np.asarray(params.get("DISH_CENTER", (0.0, 0.0)), dtype=float)
+        ax.add_patch(patches.Circle(
+            dish_center, dish_radius, fill=False, edgecolor="black",
+            linewidth=2.0, label="Petri dish", zorder=7,
+        ))
 
-    if not angle_rows:
-        raise ValueError(f"No angle rows found in {input_filename}")
+    max_targets = max(len(group) for group in groups)
+    colors = ["#e07a2d"] + [
+        plt.cm.tab10(index) for index in range(1, max_targets)
+    ]
+    for target_index in range(max_targets):
+        track = np.asarray([
+            group[target_index] for group in groups if target_index < len(group)
+        ])
+        label = (
+            "Target trajectory"
+            if target_index == 0
+            else f"Target {target_index + 1} trajectory"
+        )
+        ax.plot(
+            track[:, 0], track[:, 1], color=colors[target_index],
+            linewidth=1.8, linestyle=(0, (4.0, 2.5)),
+            alpha=0.9, label=label, zorder=8,
+        )
+        ax.scatter(
+            track[:, 0], track[:, 1], color=colors[target_index],
+            s=24, edgecolors="black", linewidths=0.5, zorder=9,
+        )
+
+    primary_track = np.asarray([group[0] for group in groups])
+    ax.scatter(
+        primary_track[0, 0], primary_track[0, 1],
+        c="#2a9d55", s=90, marker="o", edgecolors="black",
+        label="Start", zorder=10,
+    )
+    ax.scatter(
+        primary_track[-1, 0], primary_track[-1, 1],
+        c="red", s=180, marker="X", edgecolors="black",
+        label="End", zorder=10,
+    )
+
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.10), ncol=3)
+    return fig
+
+
+def main(case_name=None, save_plot=True):
+    case_name = case_name or get_case_name_from_argv()
+    params = load_case(case_name)
+    require_keys(params, REQUIRED_KEYS, case_name)
 
     print(f"Loaded case: {case_name}")
-    print(f"Loaded angle input file: {input_filename}")
-    print(f"Found {len(angle_rows)} angle rows")
+    fig = create_target_trajectory_figure(params)
 
-    for row_index, angles_deg in enumerate(angle_rows, start=1):
-        if len(angles_deg) != cfg.NUM_SOURCES:
-            raise ValueError(
-                f"Angle row {row_index} has {len(angles_deg)} angles, "
-                f"but NUM_SOURCES={cfg.NUM_SOURCES}"
-            )
-
-        angles_rad = np.radians(angles_deg)
-        u_target = angles_deg_to_control_inputs(angles_deg)
-
-        source_moment_vectors = np.zeros_like(source_positions)
-        for i, pos in enumerate(source_positions):
-            radial_unit_vector = pos / np.linalg.norm(pos)
-            source_moment_vectors[i] = (
-                u_target[i] * cfg.M_SOURCE_MAGNITUDE * radial_unit_vector
-            )
-
-        X, Y, Fx, Fy, U_pot, Bx, By = compute_grid_fields(
-            source_positions,
-            u_target,
-            source_moment_vectors,
-            cfg.GRID_MIN,
-            cfg.GRID_MAX,
-            cfg.RESOLUTION,
-            cfg.M_SOURCE_MAGNITUDE,
-            cfg.M_ROBOT_MAGNITUDE,
-        )
-
-        opt_info = build_plot_opt_info(
-            angles_deg=angles_deg,
-            angles_rad=angles_rad,
-        )
-
-        print("\n" + "=" * 70)
-        print(f"Plotting input row {row_index}")
-        print(f"wait={wait_values[row_index - 1]}, zero={zero_values[row_index - 1]}")
-        print("angles_deg:", np.array2string(angles_deg, precision=2))
-        print("control u:", np.array2string(u_target, precision=4))
-        print("=" * 70)
-
-        field = {
-            "X": X, "Y": Y, "Fx": Fx, "Fy": Fy,
-            "U_pot": U_pot, "Bx": Bx, "By": By,
-            "target_pos": opt_info["desired_pos"],
-        }
-        options = {"draw_desired_point": False}
-        if str(plot_type).lower() in {"1", "force_info"}:
-            options.update({
-                "draw_contour": True, "plot_microrobots": False,
-                "plot_trajectories": False, "block": False,
-                "display_seconds": PLOT_MODE_1_DISPLAY_SECONDS,
-                "reuse_window": True,
-            })
-        fig = plot_field(plot_type, field, source_positions, opt_info, **options)
-        save_temp_plot(fig, row_index, folder_name=case_output_path(case_name))
-        # plt.close(fig)
+    output_path = Path("outputs") / case_output_path(case_name) / "target_trajectory.png"
+    if save_plot:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200, bbox_inches="tight")
+        print(f"Saved target trajectory: {output_path.resolve()}")
 
     plt.show()
+    return fig, output_path
 
 
 if __name__ == "__main__":

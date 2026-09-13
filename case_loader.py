@@ -241,6 +241,9 @@ def build_common_config(params):
     alpha = params.get("ALPHA")
     capillary_sin_c = params.get("CAPILLARY_SIN_C")
     gamma = params.get("GAMMA")
+    robot_interaction_scale = params.get("ROBOT_INTERACTION_SCALE", 1.0)
+    if robot_interaction_scale < 0:
+        raise ValueError("ROBOT_INTERACTION_SCALE must be non-negative.")
     use_overdamped_dynamics = params.get("USE_OVERDAMPED_DYNAMICS", False)
     dynamics_speedup = params.get("DYNAMICS_SPEEDUP", 1.0)
     wall_segments = params.get("WALL_SEGMENTS", [])
@@ -320,6 +323,7 @@ def build_common_config(params):
         ALPHA=alpha,
         CAPILLARY_SIN_C=capillary_sin_c,
         GAMMA=gamma,
+        ROBOT_INTERACTION_SCALE=robot_interaction_scale,
         USE_OVERDAMPED_DYNAMICS=use_overdamped_dynamics,
         DYNAMICS_SPEEDUP=dynamics_speedup,
         WALL_SEGMENTS=wall_segments,

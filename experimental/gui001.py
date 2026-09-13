@@ -293,14 +293,22 @@ class PoseGUI(BaseServoGUI):
             messagebox.showerror("Input Error", str(e))
             return
 
+        total_lines = len(self.pose_rows)
+
         def worker():
             try:
-                self.set_status_safe(f"Running line {index + 1}...", "blue")
+                self.set_status_safe(
+                    f"Running line {index + 1}/{total_lines}...", "blue"
+                )
                 moveArray(self.port, angles, wait, zero)
-                self.set_status_safe(f"Line {index + 1} done", "green")
+                self.set_status_safe(
+                    f"Line {index + 1}/{total_lines} done", "green"
+                )
 
             except Exception as e:
-                self.set_status_safe(f"Line {index + 1} failed", "red")
+                self.set_status_safe(
+                    f"Line {index + 1}/{total_lines} failed", "red"
+                )
                 self.show_error("Error", str(e))
 
         self.run_thread(worker)
@@ -320,6 +328,7 @@ class PoseGUI(BaseServoGUI):
 
         self.abort_requested = False
         self.set_run_all_state(True)
+        total_lines = len(sequence)
 
         def worker():
             try:
@@ -328,17 +337,21 @@ class PoseGUI(BaseServoGUI):
                 for i, row in enumerate(sequence):
                     if self.abort_requested:
                         self.set_status_safe(
-                            f"Run aborted before line {i + 1}", "red"
+                            f"Run aborted before line {i + 1}/{total_lines}", "red"
                         )
                         return
 
-                    self.set_status_safe(f"Running line {i + 1}...", "blue")
+                    self.set_status_safe(
+                        f"Running line {i + 1}/{total_lines}...", "blue"
+                    )
                     moveArray(self.port, row["angles"], row["wait"], row["zero"])
 
                 if self.abort_requested:
                     self.set_status_safe("Run aborted", "red")
                 else:
-                    self.set_status_safe("All lines done", "green")
+                    self.set_status_safe(
+                        f"All {total_lines} lines done", "green"
+                    )
 
             except Exception as e:
                 self.set_status_safe("Run all failed", "red")

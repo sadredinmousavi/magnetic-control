@@ -52,6 +52,9 @@ PARAMS = {
     "ALPHA": 0.3,
     "CAPILLARY_SIN_C": 0.01,
     "GAMMA": 0.072,
+    # Retain 25% of robot-robot magnetic/capillary interaction so the swarm
+    # can form a tighter cluster without weakening external-magnet control.
+    "ROBOT_INTERACTION_SCALE": 1.0, # for testing purpose
 
     # --- Animation Parameters ---
     "ANIMATION_ROBOT_MARKER_SIZE": 8,

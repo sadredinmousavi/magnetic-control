@@ -227,6 +227,7 @@ def microrobot_payload_dynamics(
     wall_damping=0.0,
     wall_interaction_range=0.0,
     wall_recovery_depth=0.0,
+    robot_interaction_scale=1.0,
 ):
     """
     State layout:
@@ -264,7 +265,7 @@ def microrobot_payload_dynamics(
         robot_radius,
         gamma,
         capillary_sin_C
-    )
+    ) * robot_interaction_scale
     wall_forces = calculate_wall_forces_batch(
         robot_positions,
         robot_velocities,
@@ -434,6 +435,7 @@ def animate_trajectories(
     draw_all_targets=True,
     draw_active_target=True,
     draw_target_trajectory=False,
+    draw_target_points=False,
     plot_trajectories=True,
     plot_microrobots=True,
     robot_marker_size=55,
@@ -730,6 +732,22 @@ def animate_trajectories(
             zorder=8,
         )
 
+    if draw_target_points:
+        primary_targets = np.array([
+            get_target_points_from_schedule_entry(entry)[0]
+            for entry in target_schedule
+        ])
+        ax.scatter(
+            primary_targets[:, 0],
+            primary_targets[:, 1],
+            color="#e07a2d",
+            s=24,
+            edgecolors="black",
+            linewidths=0.5,
+            label="Target points",
+            zorder=9,
+        )
+
     if draw_all_targets:
         all_targets = np.vstack([
             get_target_points_from_schedule_entry(entry)
@@ -760,7 +778,7 @@ def animate_trajectories(
             marker="X",
             edgecolors="black",
             label="Active target",
-            zorder=8,
+            zorder=10,
         )
 
     # ---------------------------------------------------------

@@ -43,6 +43,17 @@ class SolveIVPProgress:
             flush=True
         )
 
+    def stop(self, t, status="stopped by user"):
+        span = self.t_end - self.t_start
+        percent = 100.0 if span <= 0 else 100.0 * np.clip(
+            (float(t) - self.t_start) / span, 0.0, 1.0
+        )
+        print(
+            f"\rsolve_ivp progress: {percent:6.2f}% | status = {status} "
+            f"| rhs calls = {self.call_count}",
+            flush=True,
+        )
+
 
 def get_schedule_index(t, schedule):
     """
@@ -634,6 +645,8 @@ def plot_field(plot_type, field, source_positions, opt_info, **options):
     show_moment_vectors = options.pop("show_magnet_moment_vectors", False)
     moment_arrow_length = options.pop("magnet_moment_arrow_length", 0.035)
     moment_arrow_color = options.pop("magnet_moment_arrow_color", "#d1495b")
+    target_path = options.pop("target_path", None)
+    wall_segments = options.pop("wall_segments", None)
     if clip_to_dish:
         if dish_center.shape != (2,):
             raise ValueError("DISH_CENTER must be a 2D position.")
@@ -665,6 +678,67 @@ def plot_field(plot_type, field, source_positions, opt_info, **options):
         raise ValueError(
             "PLOT_TYPE must be 'force_info', 'force_potential', or 'force_magnetic'."
         )
+
+    if target_path is not None:
+        target_path = np.asarray(target_path, dtype=float)
+        if target_path.ndim != 2 or target_path.shape[1] != 2:
+            raise ValueError("target_path must contain 2D positions.")
+        if len(target_path) > 1:
+            for axis in figure.axes:
+                if axis.get_aspect() != "auto":
+                    axis.plot(
+                        target_path[:, 0],
+                        target_path[:, 1],
+                        color="#00bcd4",
+                        linestyle="--",
+                        linewidth=2.0,
+                        marker="o",
+                        markersize=3.5,
+                        label="Target path",
+                        zorder=4.5,
+                    )
+                    axis.plot(
+                        target_path[0, 0],
+                        target_path[0, 1],
+                        marker="s",
+                        color="#2ca02c",
+                        markersize=7,
+                        linestyle="none",
+                        zorder=5,
+                    )
+                    axis.plot(
+                        target_path[-1, 0],
+                        target_path[-1, 1],
+                        marker="*",
+                        color="#ff7f0e",
+                        markersize=10,
+                        linestyle="none",
+                        zorder=5,
+                    )
+
+    if wall_segments:
+        for axis in figure.axes:
+            if axis.get_aspect() == "auto":
+                continue
+            for index, wall in enumerate(wall_segments):
+                if len(wall) not in (2, 3):
+                    raise ValueError(
+                        "Each wall segment must be (start, end) or "
+                        "(start, end, inward_normal)."
+                    )
+                start = np.asarray(wall[0], dtype=float)
+                end = np.asarray(wall[1], dtype=float)
+                if start.shape != (2,) or end.shape != (2,):
+                    raise ValueError("Wall segment endpoints must be 2D positions.")
+                axis.plot(
+                    [start[0], end[0]],
+                    [start[1], end[1]],
+                    color="black",
+                    linewidth=2.5,
+                    solid_capstyle="round",
+                    label="Path boundary" if index == 0 else None,
+                    zorder=5.5,
+                )
 
     if clip_to_dish:
         for axis in figure.axes:

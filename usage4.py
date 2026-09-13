@@ -1,6 +1,7 @@
 """Optimize controls, simulate microrobot/payload dynamics, and animate them."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -32,6 +33,40 @@ def _initial_state(cfg):
     return state
 
 
+class _PartialSolutionRecorder:
+    """Keep lightweight RHS snapshots for a user-interrupted integration."""
+
+    def __init__(self, t_eval, initial_state):
+        self.t_eval = np.asarray(t_eval, dtype=float)
+        self.times = [float(self.t_eval[0])]
+        self.states = [np.asarray(initial_state, dtype=float).copy()]
+        self.next_sample = 1
+
+    @property
+    def last_time(self):
+        return self.times[-1]
+
+    def update(self, t, state):
+        t = float(t)
+        if self.next_sample >= len(self.t_eval):
+            return
+        if t <= self.times[-1] or t < self.t_eval[self.next_sample]:
+            return
+
+        self.times.append(t)
+        self.states.append(np.asarray(state, dtype=float).copy())
+        self.next_sample = int(np.searchsorted(self.t_eval, t, side="right"))
+
+    def build_solution(self):
+        return SimpleNamespace(
+            t=np.asarray(self.times),
+            y=np.column_stack(self.states),
+            success=False,
+            status=-2,
+            message="Dynamics integration stopped by user; partial result retained.",
+        )
+
+
 def main(case_name=None):
     case_name = case_name or get_case_name_from_argv()
     params = load_case(case_name)
@@ -41,9 +76,12 @@ def main(case_name=None):
     print(f"Loaded case: {case_name}")
     workflow = run_control_workflow(cfg, params, report=print_optimization_results)
     progress = SolveIVPProgress(cfg.T_SPAN, min_interval=cfg.SOLVER_PROGRESS_INTERVAL)
+    initial_state = _initial_state(cfg)
+    partial = _PartialSolutionRecorder(cfg.T_EVAL, initial_state)
 
     def dynamics(t, state):
         progress.update(t)
+        partial.update(t, state)
         return microrobot_payload_dynamics(
             t, state, workflow.source_positions, workflow.target_controls,
             cfg.M_SOURCE_MAGNITUDE, cfg.M_ROBOT_MAGNITUDE,
@@ -55,20 +93,37 @@ def main(case_name=None):
             cfg.USE_OVERDAMPED_DYNAMICS, cfg.DYNAMICS_SPEEDUP,
             cfg.WALL_SEGMENTS, cfg.WALL_STIFFNESS, cfg.WALL_DAMPING,
             cfg.WALL_INTERACTION_RANGE, cfg.WALL_RECOVERY_DEPTH,
+            cfg.ROBOT_INTERACTION_SCALE,
         )
 
-    solution = solve_ivp(
-        dynamics, cfg.T_SPAN, _initial_state(cfg), t_eval=cfg.T_EVAL,
-        method=params.get("SOLVER_METHOD", "RK45"),
-        rtol=params.get("SOLVER_RTOL", 1e-5),
-        atol=params.get("SOLVER_ATOL", 1e-8),
-        max_step=params.get("SOLVER_MAX_STEP", np.inf),
-    )
-    progress.finish(solution.message)
-    if not solution.success:
+    print("Solving dynamics... Press Ctrl+C to stop and save a partial video.")
+    interrupted = False
+    try:
+        solution = solve_ivp(
+            dynamics, cfg.T_SPAN, initial_state, t_eval=cfg.T_EVAL,
+            method=params.get("SOLVER_METHOD", "RK45"),
+            rtol=params.get("SOLVER_RTOL", 1e-5),
+            atol=params.get("SOLVER_ATOL", 1e-8),
+            max_step=params.get("SOLVER_MAX_STEP", np.inf),
+        )
+    except KeyboardInterrupt:
+        interrupted = True
+        solution = partial.build_solution()
+        progress.stop(partial.last_time)
+        print(
+            f"Using {len(solution.t)} retained samples through "
+            f"t = {solution.t[-1]:.3f} s."
+        )
+    else:
+        progress.finish(solution.message)
+
+    if not solution.success and not interrupted:
         raise RuntimeError(f"Dynamics integration failed: {solution.message}")
 
-    video_filename = Path("outputs") / case_output_path(case_name).with_suffix(".mp4")
+    video_stem = case_output_path(case_name)
+    if interrupted:
+        video_stem = video_stem.with_name(f"{video_stem.name}_partial")
+    video_filename = Path("outputs") / video_stem.with_suffix(".mp4")
     video_filename.parent.mkdir(parents=True, exist_ok=True)
     animate_trajectories(
         solution.t, solution.y, workflow.source_positions, cfg.TARGET_SCHEDULE,
@@ -78,6 +133,7 @@ def main(case_name=None):
         draw_quiver=params.get("ANIMATION_DRAW_QUIVER", False),
         draw_sources=True, draw_all_targets=False, draw_active_target=True,
         draw_target_trajectory=params.get("ANIMATION_DRAW_TARGET_TRAJECTORY", False),
+        draw_target_points=params.get("ANIMATION_DRAW_TARGET_POINTS", False),
         plot_trajectories=params.get("ANIMATION_DRAW_TRAJECTORIES", False),
         plot_microrobots=True,
         robot_marker_size=params.get("ANIMATION_ROBOT_MARKER_SIZE", 55),

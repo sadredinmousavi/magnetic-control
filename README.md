@@ -1,7 +1,13 @@
 # Magnetic Microrobot Simulation
 
-This project contains two main entry scripts:
+This project contains five usage scripts:
 
+- `usage0.py`
+  Loads a previously saved magnet-angle sequence and renders its static field plots.
+- `usage1.py`
+  Saves one field-free overview of all scheduled target points and workspace geometry.
+- `usage2.py`
+  Computes optimized control inputs and saves the angle sequence.
 - `usage3.py`
   Control-input workflow only. It computes the optimized control inputs for all scheduled targets and plots the results. It does not run dynamics simulation.
 - `usage4.py`
@@ -56,7 +62,7 @@ outputs/case_003_cond_002/plot_001.png
 
 ## How Case Loading Works
 
-Both `usage3.py` and `usage4.py` load a case by module name.
+All usage scripts load a case by module name.
 
 There is no hard-coded default case. If no case is supplied, a file-selection
 dialog opens so an unintended case is not run silently.
@@ -72,7 +78,8 @@ python usage4.py
 ```
 
 
-usage1 --> gives the angles and plot static
+usage0 --> loads saved angles and plots their static fields
+usage1 --> plots the complete scheduled target trajectory without a field
 usage2 --> gives the target points, calculates, and saves the sequence in both
 `outputs/` and `experimental/sequences/`
 usage3 --> gives the target points and calculate and plot
@@ -81,13 +88,26 @@ usage4 --> gives the target points and calculate and simulate and make animation
 Run a specific case:
 
 ```powershell
-python usage1.py cases/case_001/cond_001.py outputs/case_001_test_001.txt
+python usage0.py cases/case_001/cond_001.py outputs/case_001_test_001.txt
+python usage1.py cases/case_001/cond_001.py
 python usage2.py cases/case_001/cond_001.py
 python usage3.py cases/case_001/cond_001.py
 python usage4.py cases/case_001/cond_001.py
 ```
 
 ## What Each Script Does
+
+### `usage0.py`
+
+- loads magnet angles from a sequence created by Usage 2
+- computes and displays a static field plot for each saved row
+
+### `usage1.py`
+
+- loads `TARGET_SCHEDULE` without running optimization
+- plots every target track in schedule order
+- retains source magnets, walls, and the dish outline
+- saves one field-free image as `outputs/<case>_<condition>/target_trajectory.png`
 
 ### `usage3.py`
 
@@ -219,6 +239,9 @@ use the same rate.
 
 # Experimental
 
+See [`CASE_OPTIONS_CHEATSHEET.md`](CASE_OPTIONS_CHEATSHEET.md) for every
+implemented case `PARAMS` option, its default, and the usages that consume it.
+
 Run these commands from the project root. Change `COM5` if the adapter uses a
 different port.
 
@@ -231,15 +254,27 @@ python .\experimental\gui002.py
 python .\experimental\gui003.py
 ```
 
+On Windows, double-click `usage.bat` in the project root. The launcher scans
+`cases/case_*` and provides separate Usage, Case, and Condition menus. Use the
+Up/Down arrow keys and Enter, or type a displayed list number/name and press
+Enter. The selected module is passed directly to the usage, so no case-file
+dialog opens. Usage 0 automatically uses the matching sequence from `outputs/`
+or `experimental/sequences/`; run Usage 2 first if that sequence does not exist.
+
 GUI001 and GUI002 start maximized, and their connection bars include controls
-to connect or close the serial connection. GUI001 also includes an IP Webcam
-viewer. Start the server in the Android IP Webcam app, keep the phone and
-computer on the same network, click `IP Camera`, and enter the MJPEG URL shown
-by the app. A typical URL is `http://PHONE_IP:8080/video`. If authentication is
-enabled in IP Webcam, enter its username and password in the popup as well. The
-viewer can overlay OpenCV detections for a selected robot color, `DICT_4X4_50`
-ArUco IDs, or both. `Min area` filters small color noise; increase it when small
-false detections appear.
+to connect or close the serial connection. GUI001 also includes a USB-webcam
+viewer. Click `Webcam`; the GUI enumerates connected cameras by device name in a
+background thread and lists them in the Camera dropdown. On Windows the label also
+includes the USB VID/PID when available. Select the desired camera and press
+Connect, or press Rescan after attaching new hardware. The viewer can overlay
+OpenCV detections for a selected robot color,
+`DICT_4X4_50` ArUco IDs, or both. `Min area` filters small color noise; increase
+it when small false detections appear.
+
+Close Windows Camera, Teams, browsers, and other camera applications before
+opening or rescanning the GUI. Discovery performs warm-up reads and retries a
+common MJPEG 640x480 mode for USB cameras whose first frames are not immediately
+available. Exact Default-backend duplicates are hidden from the dropdown.
 
 ### Serial adapter tests (PowerShell)
 

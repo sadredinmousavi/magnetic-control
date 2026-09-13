@@ -15,7 +15,7 @@ from functions_utility import compute_grid_fields, extract_optimization_info, pl
 
 class RefactorTests(unittest.TestCase):
     def test_usage_modules_are_import_safe(self):
-        for module_name in ("usage1", "usage2", "usage3", "usage4"):
+        for module_name in ("usage0", "usage1", "usage2", "usage3", "usage4"):
             importlib.import_module(module_name)
 
     def test_schedule_requires_increasing_times(self):
@@ -67,6 +67,50 @@ class RefactorTests(unittest.TestCase):
             options = {"block": False} if plot_type == "force_info" else {}
             figure = plot_field(plot_type, field, sources, info, **options)
             self.assertIsNotNone(figure)
+
+    def test_target_path_is_drawn_on_field_axes(self):
+        axis = np.linspace(-1.0, 1.0, 5)
+        X, Y = np.meshgrid(axis, axis)
+        values = 1.0 + X**2 + Y**2
+        field = {
+            "X": X, "Y": Y, "Fx": values, "Fy": values,
+            "U_pot": values, "Bx": values, "By": values,
+            "target_pos": np.zeros(2),
+        }
+        info = extract_optimization_info(
+            np.array([0.5, 0.5]), np.zeros(2), np.eye(2), np.ones(2),
+            np.eye(2), desired_pos=np.zeros(2),
+        )
+        target_path = np.array([[-0.5, -0.5], [0.0, 0.25], [0.5, 0.5]])
+
+        figure = plot_field(
+            "force_info",
+            field,
+            np.array([[2.0, 0.0], [0.0, 2.0]]),
+            info,
+            target_path=target_path,
+            wall_segments=[
+                (np.array([-0.6, -0.4]), np.array([0.6, -0.4]))
+            ],
+            block=False,
+        )
+
+        path_lines = [
+            line
+            for plot_axis in figure.axes
+            for line in plot_axis.lines
+            if line.get_label() == "Target path"
+        ]
+        self.assertEqual(len(path_lines), 1)
+        self.assertTrue(np.allclose(path_lines[0].get_xdata(), target_path[:, 0]))
+        self.assertTrue(np.allclose(path_lines[0].get_ydata(), target_path[:, 1]))
+        wall_lines = [
+            line
+            for plot_axis in figure.axes
+            for line in plot_axis.lines
+            if line.get_label() == "Path boundary"
+        ]
+        self.assertEqual(len(wall_lines), 1)
 
     def test_one_sided_wall_pushes_crossed_robot_back_inside(self):
         wall = (

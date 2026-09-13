@@ -1,13 +1,27 @@
-"""Seven robots traverse the supplied Path-v3 top-view CAD geometry."""
+"""Seven robots traverse a 30%-enlarged Path-v3 top-view CAD geometry."""
 
 import numpy as np
 
-from .path_v3_geometry import CAD_BOUNDING_BOX, CAD_EDGE_POLYLINES, WALL_SEGMENTS
+from .path_v3_geometry import (
+    CAD_BOUNDING_BOX as _CAD_BOUNDING_BOX,
+    CAD_EDGE_POLYLINES as _CAD_EDGE_POLYLINES,
+    WALL_SEGMENTS as _WALL_SEGMENTS,
+)
 
 
 NUM_ROBOTS = 7
 FORMATION_DURATION = 10.0
 PATH_STEP_DURATION = 10.0
+PATH_SCALE = 1.30
+
+# Scale the complete CAD path uniformly about the origin so that the walls and
+# moving-target centerline remain aligned.
+CAD_BOUNDING_BOX = PATH_SCALE * _CAD_BOUNDING_BOX
+CAD_EDGE_POLYLINES = tuple(PATH_SCALE * polyline for polyline in _CAD_EDGE_POLYLINES)
+WALL_SEGMENTS = tuple(
+    (PATH_SCALE * start, PATH_SCALE * end)
+    for start, end in _WALL_SEGMENTS
+)
 
 # The JSON stores original CAD X/Z coordinates in millimetres. The geometry
 # loader converts them to simulation metres without changing their orientation.
@@ -55,7 +69,7 @@ TRANSITION_PATH_POINTS = np.array([
     [39.00e-3, -3.77e-3],
 ])
 
-PATH_POINTS = np.vstack((
+PATH_POINTS = PATH_SCALE * np.vstack((
     UPPER_PATH_POINTS,
     TRANSITION_PATH_POINTS,
     LOWER_PATH_POINTS,
@@ -93,9 +107,10 @@ PARAMS = {
     "SOLVER_PROGRESS_INTERVAL": 0.5,
     "SOLVER_MAX_STEP": 0.05,
 
-    "ANIMATION_TITLE": "Swarm Control Through Path-v3 CAD Geometry",
+    "ANIMATION_TITLE": "Swarm Control Through 30%-Enlarged Path-v3 CAD Geometry",
     "ANIMATION_DRAW_TRAJECTORIES": False,
     "ANIMATION_DRAW_TARGET_TRAJECTORY": True,
+    "ANIMATION_DRAW_TARGET_POINTS": True,
 
     "WALL_SEGMENTS": WALL_SEGMENTS,
     "WALL_STIFFNESS": 5e-4,
@@ -110,5 +125,5 @@ PARAMS = {
     "PLOT_DRAW_TARGET_PATH": True,
 }
 
-# Public alias makes the imported source geometry discoverable from cond_005.
+# Public alias makes the scaled source geometry discoverable from cond_006.
 PATH_V3_EDGE_POLYLINES = CAD_EDGE_POLYLINES
