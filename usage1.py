@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from case_loader import (
+    case_output_name,
     case_output_path,
     get_case_name_from_argv,
     load_case,
@@ -18,6 +19,23 @@ from functions_main import generate_circular_source_positions
 
 
 REQUIRED_KEYS = ["NUM_SOURCES", "RADIUS", "TARGET_SCHEDULE", "GRID_MIN", "GRID_MAX"]
+PROJECT_DIR = Path(__file__).resolve().parent
+ALL_OUTPUT_DIRNAME = "target_trajectories"
+
+
+def discover_case_conditions(project_dir=PROJECT_DIR):
+    """Return every runnable case/condition module name in name order."""
+    cases_dir = Path(project_dir) / "cases"
+    case_names = []
+    for case_dir in sorted(cases_dir.glob("case_*"), key=lambda path: path.name.lower()):
+        if not case_dir.is_dir() or not (case_dir / "case.py").is_file():
+            continue
+        conditions = sorted(
+            (path.stem for path in case_dir.glob("cond_*.py") if path.is_file()),
+            key=str.lower,
+        )
+        case_names.extend(f"{case_dir.name}.{condition}" for condition in conditions)
+    return case_names
 
 
 def _target_groups(schedule):
@@ -117,8 +135,36 @@ def create_target_trajectory_figure(params):
     return fig
 
 
-def main(case_name=None, save_plot=True):
+def save_all_target_trajectories(case_names=None, output_dir=None):
+    """Save one target plot for every case/condition without opening plot windows."""
+    case_names = list(case_names or discover_case_conditions())
+    if not case_names:
+        raise FileNotFoundError("No cases/case_*/cond_*.py files were found.")
+
+    output_dir = Path(output_dir or Path("outputs") / ALL_OUTPUT_DIRNAME)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths = []
+
+    print(f"Saving {len(case_names)} target trajectories to {output_dir.resolve()}\n")
+    for case_name in case_names:
+        params = load_case(case_name)
+        require_keys(params, REQUIRED_KEYS, case_name)
+        fig = create_target_trajectory_figure(params)
+        output_path = output_dir / f"{case_output_name(case_name)}_target_trajectory.png"
+        fig.savefig(output_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        saved_paths.append(output_path)
+        print(f"Saved: {output_path.resolve()}")
+
+    print(f"\nSaved {len(saved_paths)} target trajectory plots.")
+    return saved_paths
+
+
+def main(case_name=None, save_plot=True, show_plot=True):
     case_name = case_name or get_case_name_from_argv()
+    if str(case_name).strip().lower() == "all":
+        return save_all_target_trajectories()
+
     params = load_case(case_name)
     require_keys(params, REQUIRED_KEYS, case_name)
 
@@ -131,7 +177,8 @@ def main(case_name=None, save_plot=True):
         fig.savefig(output_path, dpi=200, bbox_inches="tight")
         print(f"Saved target trajectory: {output_path.resolve()}")
 
-    plt.show()
+    if show_plot:
+        plt.show()
     return fig, output_path
 
 

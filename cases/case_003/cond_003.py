@@ -3,7 +3,7 @@ import numpy as np
 
 PARAMS = {
     "TARGET_SCHEDULE": [
-        (6.0,  np.array([0.00, 0.00]), 1, np.deg2rad(0.0)),
+        (0.0,  np.array([0.00, 0.00]), 1, np.deg2rad(0.0)),
         (6.0,  np.array([0.0500,  0.0000]), 1, np.deg2rad(0.0)),
         (7.5,  np.array([0.0462,  0.0191]), 1, np.deg2rad(0.0)),
         (9.0,  np.array([0.0354,  0.0354]), 1, np.deg2rad(0.0)),

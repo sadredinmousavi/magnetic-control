@@ -108,6 +108,9 @@ python usage4.py cases/case_001/cond_001.py
 - plots every target track in schedule order
 - retains source magnets, walls, and the dish outline
 - saves one field-free image as `outputs/<case>_<condition>/target_trajectory.png`
+- in the Windows launcher, choose `All cases and conditions` to skip the
+  condition selector and save every plot without opening plot windows; batch
+  files are named `outputs/target_trajectories/<case>_<condition>_target_trajectory.png`
 
 ### `usage3.py`
 
@@ -252,7 +255,28 @@ python -m pip install -r .\experimental\requirements.txt
 python .\experimental\gui001.py
 python .\experimental\gui002.py
 python .\experimental\gui003.py
+python .\experimental\gui004.py
 ```
+
+GUI004 is an offline microrobot detector. Select a recorded video, choose the
+detection mode/color/minimum area, and process it without real-time playback
+delays. It previews the latest annotated frame and saves an annotated MP4 and a
+detection CSV under `outputs/offline_detection/<video_name>/`. It can also be
+started by double-clicking `gui004.bat`. Its editable geometry defaults are
+`h = 1 cm` and camera-to-dot-surface height `= 29 cm`; both values are recorded
+in the detection CSV. The four green calibration dots are defined as a
+`10 cm x 10 cm` rectangle by default; its width and height are independently
+editable and are also recorded in the CSV. In Phase 1, use the play/pause button
+or timeline to choose a clear raw frame, then click the four green dots in any
+order. GUI004 orders and draws the corners, saves the local camera calibration
+under `inputs/camera_calibration.json`, and masks later detection to that
+four-point region. Each approximate calibration click searches a configurable
+nearby radius and snaps to the nearest green-dot center. Phase 1 performs no
+robot detection. In Phase 2, identify the
+robots separately by clicking them or by choosing their color. Phase 3 processes
+the complete video. A manual robot click searches the configurable nearby pixel
+radius and snaps to the center of the nearest matching-color blob; if none is
+found, the exact clicked position is retained and the GUI shows a warning.
 
 On Windows, double-click `usage.bat` in the project root. The launcher scans
 `cases/case_*` and provides separate Usage, Case, and Condition menus. Use the

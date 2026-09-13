@@ -3,6 +3,8 @@
 # outputs/*.txt
 # outputs/temp_plots/*.png
 outputs/*
+inputs/*
+!inputs/.gitkeep
 *.rar
 *.pdf
 

@@ -14,6 +14,7 @@ USAGES = (
     ("3", "Usage 3 - optimize and create static plots"),
     ("4", "Usage 4 - optimize, simulate, and create animation"),
 )
+ALL_CASES_LABEL = "All cases and conditions"
 
 
 def discover_cases(project_dir=PROJECT_DIR):
@@ -161,10 +162,22 @@ def main():
     usage_number = USAGES[usage_index][0]
 
     while True:
-        case_index = select_menu("Choose a case", [name for name, _ in discovered])
+        case_choices = [name for name, _ in discovered]
+        if usage_number == "1":
+            case_choices.insert(0, ALL_CASES_LABEL)
+
+        case_index = select_menu("Choose a case", case_choices)
         if case_index is None:
             return main()
-        case_name, conditions = discovered[case_index]
+
+        if usage_number == "1" and case_index == 0:
+            os.system("cls" if os.name == "nt" else "clear")
+            print("Starting Usage 1 for all cases and conditions...\n")
+            run_usage("1", "all")
+            return 0
+
+        discovered_index = case_index - 1 if usage_number == "1" else case_index
+        case_name, conditions = discovered[discovered_index]
 
         condition_index = select_menu(
             f"Choose a condition for {case_name}", conditions

@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from usage_launcher import discover_cases, resolve_usage0_input, _resolve_typed_choice
+from usage_launcher import discover_cases, main, resolve_usage0_input, _resolve_typed_choice
 
 
 class UsageLauncherTests(unittest.TestCase):
@@ -45,6 +46,19 @@ class UsageLauncherTests(unittest.TestCase):
             self.assertEqual(
                 resolve_usage0_input("case_002.cond_005", root), output
             )
+
+    @patch("usage_launcher.os.system")
+    @patch("usage_launcher.run_usage")
+    @patch("usage_launcher.select_menu", side_effect=[1, 0])
+    @patch("usage_launcher.discover_cases", return_value=[
+        ("case_001", ["cond_001", "cond_002"]),
+    ])
+    def test_usage1_all_skips_condition_selector(
+        self, _discover, select_menu, run_usage, _system
+    ):
+        self.assertEqual(main(), 0)
+        self.assertEqual(select_menu.call_count, 2)
+        run_usage.assert_called_once_with("1", "all")
 
 
 if __name__ == "__main__":
