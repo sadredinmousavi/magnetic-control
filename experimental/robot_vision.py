@@ -13,6 +13,7 @@ class RobotDetector:
         "Red": [((0, 100, 70), (10, 255, 255)), ((170, 100, 70), (179, 255, 255))],
         "Green": [((35, 70, 50), (85, 255, 255))],
         "Blue": [((90, 70, 50), (135, 255, 255))],
+        "Dark Blue": [((90, 100, 70), (135, 255, 175))],
         "Yellow": [((20, 100, 80), (35, 255, 255))],
         "Dark": [((0, 0, 0), (179, 255, 65))],
     }
@@ -22,14 +23,28 @@ class RobotDetector:
         parameters = cv2.aruco.DetectorParameters()
         self.aruco_detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
-    def process(self, frame_bgr, mode="Off", color="Red", minimum_area=150.0):
+    def process(
+        self,
+        frame_bgr,
+        mode="Off",
+        color="Red",
+        minimum_area=150.0,
+        morphology_kernel_size=5,
+        color_ranges=None,
+    ):
         """Return an annotated BGR frame and a list of detected robots."""
         annotated = frame_bgr.copy()
         detections = []
 
         if mode in ("Color blobs", "Color + ArUco"):
             detections.extend(
-                self.detect_color_blobs(annotated, color, float(minimum_area))
+                self.detect_color_blobs(
+                    annotated,
+                    color,
+                    float(minimum_area),
+                    morphology_kernel_size,
+                    color_ranges,
+                )
             )
 
         if mode in ("ArUco markers", "Color + ArUco"):
@@ -37,10 +52,20 @@ class RobotDetector:
 
         return annotated, detections
 
-    def detect_color_blobs(self, frame_bgr, color, minimum_area):
+    def detect_color_blobs(
+        self,
+        frame_bgr,
+        color,
+        minimum_area,
+        morphology_kernel_size=5,
+        color_ranges=None,
+    ):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-        for lower, upper in self.COLOR_RANGES.get(color, self.COLOR_RANGES["Red"]):
+        ranges = color_ranges or self.COLOR_RANGES.get(
+            color, self.COLOR_RANGES["Red"]
+        )
+        for lower, upper in ranges:
             mask = cv2.bitwise_or(
                 mask,
                 cv2.inRange(
@@ -50,33 +75,30 @@ class RobotDetector:
                 ),
             )
 
-        kernel = np.ones((5, 5), dtype=np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
+        kernel_size = max(1, int(morphology_kernel_size))
+        if kernel_size > 1:
+            kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         detections = []
-        valid_contours = sorted(
+        component_count, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
+        components = sorted(
             (
-                contour
-                for contour in contours
-                if cv2.contourArea(contour) >= minimum_area
+                (stats[index], centroids[index])
+                for index in range(1, component_count)
+                if stats[index, cv2.CC_STAT_AREA] >= minimum_area
             ),
-            key=cv2.contourArea,
+            key=lambda component: component[0][cv2.CC_STAT_AREA],
             reverse=True,
         )
-        for index, contour in enumerate(valid_contours, start=1):
-            area = float(cv2.contourArea(contour))
-            x, y, width, height = cv2.boundingRect(contour)
-            moments = cv2.moments(contour)
-            if moments["m00"]:
-                center_x = int(moments["m10"] / moments["m00"])
-                center_y = int(moments["m01"] / moments["m00"])
-            else:
-                center_x = x + width // 2
-                center_y = y + height // 2
+        for index, (stats_row, centroid) in enumerate(components, start=1):
+            x = int(stats_row[cv2.CC_STAT_LEFT])
+            y = int(stats_row[cv2.CC_STAT_TOP])
+            width = int(stats_row[cv2.CC_STAT_WIDTH])
+            height = int(stats_row[cv2.CC_STAT_HEIGHT])
+            area = float(stats_row[cv2.CC_STAT_AREA])
+            center_x = int(round(float(centroid[0])))
+            center_y = int(round(float(centroid[1])))
 
             label = f"{color} {index}: ({center_x}, {center_y})"
             cv2.rectangle(

@@ -269,14 +269,23 @@ in the detection CSV. The four green calibration dots are defined as a
 editable and are also recorded in the CSV. In Phase 1, use the play/pause button
 or timeline to choose a clear raw frame, then click the four green dots in any
 order. GUI004 orders and draws the corners, saves the local camera calibration
-under `inputs/camera_calibration.json`, and masks later detection to that
+under `inputs/<video_name>_camera_calibration.json`, and masks later detection to that
 four-point region. Each approximate calibration click searches a configurable
-nearby radius and snaps to the nearest green-dot center. Phase 1 performs no
-robot detection. In Phase 2, identify the
-robots separately by clicking them or by choosing their color. Phase 3 processes
+nearby radius and snaps to the nearest green-dot center. The calibration tab's
+minimum-area setting can be lowered for very small dots. Phase 1 performs no
+robot detection. In Phase 2, the separate click minimum-area setting and light
+click-search filtering support very small robots without weakening full-video
+detection filtering. The automatic detection cleanup size is also selectable;
+use `1` for tiny robots and `3` or `5` to suppress progressively more noise.
+Identify the robots separately by clicking them or by choosing their color.
+Phase 3 processes
 the complete video. A manual robot click searches the configurable nearby pixel
 radius and snaps to the center of the nearest matching-color blob; if none is
 found, the exact clicked position is retained and the GUI shows a warning.
+`Learned from clicks` is the default: choose manual selection and click every
+robot, and GUI004 builds an HSV profile from those samples for Find by color and
+full-video processing. Learning also selects area `1` and cleanup size `1` so
+tiny sampled robots are not discarded.
 
 On Windows, double-click `usage.bat` in the project root. The launcher scans
 `cases/case_*` and provides separate Usage, Case, and Condition menus. Use the

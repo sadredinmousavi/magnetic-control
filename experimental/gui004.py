@@ -17,11 +17,15 @@ from robot_vision import RobotDetector
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 INPUT_DIR = PROJECT_DIR / "inputs"
-CALIBRATION_FILE = INPUT_DIR / "camera_calibration.json"
 VIDEO_FILETYPES = [
     ("Video files", "*.mp4 *.avi *.mov *.mkv *.m4v"),
     ("All files", "*.*"),
 ]
+
+
+def calibration_file_for(video_path):
+    """Return the per-video calibration file path."""
+    return INPUT_DIR / f"{Path(video_path).stem}_camera_calibration.json"
 
 
 class OfflineDetectionGUI:
@@ -39,6 +43,7 @@ class OfflineDetectionGUI:
         self.preview_queue = queue.Queue(maxsize=1)
         self.preview_photo = None
         self.preview_capture = None
+        self.current_video_path = None
         self.playback_after_id = None
         self.video_playing = False
         self.video_fps = 30.0
@@ -48,6 +53,7 @@ class OfflineDetectionGUI:
         self.display_transform = None
         self.calibration_points = []
         self.robot_points = []
+        self.learned_robot_color_ranges = None
         self.timeline_is_updating = False
 
         self.build_controls()
@@ -135,6 +141,14 @@ class OfflineDetectionGUI:
             calibration, textvariable=self.calibration_search_radius_var, width=8
         ).grid(row=4, column=1, padx=8, pady=4, sticky="w")
 
+        tk.Label(calibration, text="Green-dot min area (px²)").grid(
+            row=4, column=2, columnspan=2, sticky="e"
+        )
+        self.calibration_minimum_area_var = tk.StringVar(value="1")
+        tk.Entry(
+            calibration, textvariable=self.calibration_minimum_area_var, width=8
+        ).grid(row=4, column=4, padx=8, pady=4, sticky="w")
+
         self.calibration_status_label = tk.Label(
             calibration,
             text="Choose a video, find a clear frame, then click the 4 green dots.",
@@ -165,14 +179,17 @@ class OfflineDetectionGUI:
         tk.Label(robot_finding, text="Robot color").grid(
             row=0, column=2, sticky="e"
         )
-        self.detection_color_var = tk.StringVar(value="Dark")
+        self.detection_color_var = tk.StringVar(value="Learned from clicks")
         tk.OptionMenu(
             robot_finding,
             self.detection_color_var,
+            "Learned from clicks",
             *RobotDetector.COLOR_RANGES,
         ).grid(row=0, column=3, sticky="w", padx=8, pady=4)
 
-        tk.Label(robot_finding, text="Min area").grid(row=0, column=4, sticky="e")
+        tk.Label(robot_finding, text="Detection min area (px²)").grid(
+            row=0, column=4, sticky="e"
+        )
         self.minimum_area_var = tk.StringVar(value="20")
         tk.Entry(
             robot_finding, textvariable=self.minimum_area_var, width=8
@@ -192,12 +209,26 @@ class OfflineDetectionGUI:
         tk.Entry(
             robot_finding, textvariable=self.robot_search_radius_var, width=8
         ).grid(row=1, column=3, padx=8, pady=4, sticky="w")
+        tk.Label(robot_finding, text="Click min area (px²)").grid(
+            row=1, column=4, sticky="e"
+        )
+        self.robot_snap_minimum_area_var = tk.StringVar(value="1")
+        tk.Entry(
+            robot_finding, textvariable=self.robot_snap_minimum_area_var, width=8
+        ).grid(row=1, column=5, padx=4, pady=4, sticky="w")
         tk.Button(
             robot_finding, text="Find by color", command=self.find_robots_by_color
-        ).grid(row=1, column=4, padx=4)
+        ).grid(row=2, column=4, padx=4)
         tk.Button(
             robot_finding, text="Clear robots", command=self.clear_robot_points
-        ).grid(row=1, column=5, padx=4)
+        ).grid(row=2, column=5, padx=4)
+        tk.Label(robot_finding, text="Detection cleanup size (px)").grid(
+            row=2, column=0, sticky="w"
+        )
+        self.detection_filter_size_var = tk.StringVar(value="1")
+        tk.OptionMenu(
+            robot_finding, self.detection_filter_size_var, "1", "3", "5"
+        ).grid(row=2, column=1, sticky="w", padx=8, pady=4)
         self.robot_status_label = tk.Label(
             robot_finding,
             text="Choose manual selection and click each robot, or find them by color.",
@@ -205,7 +236,7 @@ class OfflineDetectionGUI:
             anchor="w",
         )
         self.robot_status_label.grid(
-            row=2, column=0, columnspan=6, sticky="ew", pady=4
+            row=3, column=0, columnspan=6, sticky="ew", pady=4
         )
 
         self.process_button = tk.Button(
@@ -273,6 +304,7 @@ class OfflineDetectionGUI:
             return
 
         self.preview_capture = capture
+        self.current_video_path = video_path
         self.video_fps = float(capture.get(cv2.CAP_PROP_FPS))
         if self.video_fps <= 0:
             self.video_fps = 30.0
@@ -282,15 +314,17 @@ class OfflineDetectionGUI:
         self.timeline.config(to=max(self.video_total_frames - 1, 1))
         self.calibration_points = []
         self.robot_points = []
-        self.load_saved_calibration(width, height)
+        self.learned_robot_color_ranges = None
+        self.load_saved_calibration(video_path, width, height)
         self.show_calibration_frame(0)
         self.phase_notebook.select(0)
 
-    def load_saved_calibration(self, video_width, video_height):
-        if not CALIBRATION_FILE.is_file():
+    def load_saved_calibration(self, video_path, video_width, video_height):
+        calibration_file = calibration_file_for(video_path)
+        if not calibration_file.is_file():
             return
         try:
-            data = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+            data = json.loads(calibration_file.read_text(encoding="utf-8"))
             saved_size = data.get("video_size_px", [])
             points = data.get("points_px", [])
             if saved_size != [video_width, video_height] or len(points) != 4:
@@ -300,6 +334,9 @@ class OfflineDetectionGUI:
             self.camera_height_var.set(str(data.get("camera_height_cm", 29)))
             self.rectangle_width_var.set(str(data.get("rectangle_width_cm", 10)))
             self.rectangle_height_var.set(str(data.get("rectangle_height_cm", 10)))
+            self.calibration_minimum_area_var.set(
+                str(data.get("calibration_minimum_area_px", 1))
+            )
             self.calibration_status_label.config(
                 text="Loaded the saved 4-point calibration for this video size.",
                 fg="green",
@@ -437,15 +474,20 @@ class OfflineDetectionGUI:
             return clicked_point, False, 0.0
         try:
             radius = int(self.calibration_search_radius_var.get().strip())
-            if radius <= 0:
+            minimum_area = float(self.calibration_minimum_area_var.get().strip())
+            if radius <= 0 or minimum_area <= 0:
                 raise ValueError
         except ValueError:
             messagebox.showerror(
-                "Input Error", "Green-dot search radius must be positive."
+                "Input Error", "Green-dot search radius and min area must be positive."
             )
             return None
         return self.find_nearest_blob_center(
-            clicked_point, color="Green", radius=radius, minimum_area=5.0
+            clicked_point,
+            color="Green",
+            radius=radius,
+            minimum_area=minimum_area,
+            morphology_kernel_size=1,
         )
 
     def add_robot_point(self, point):
@@ -469,6 +511,9 @@ class OfflineDetectionGUI:
             return
         snapped_point, snapped, distance = snap_result
         self.robot_points.append(snapped_point)
+        learned_detail = ""
+        if self.detection_color_var.get() == "Learned from clicks":
+            learned_detail = " " + self.update_learned_robot_color_profile()
         selected_count = len(self.robot_points)
         if snapped:
             detail = f"R{selected_count} snapped {distance:.1f} px to the blob center."
@@ -479,7 +524,7 @@ class OfflineDetectionGUI:
             )
             status_color = "orange"
         self.robot_status_label.config(
-            text=f"{selected_count}/{robot_count} robots selected. {detail}",
+            text=f"{selected_count}/{robot_count} robots selected. {detail}{learned_detail}",
             fg=status_color,
         )
         self.render_calibration_frame()
@@ -490,8 +535,7 @@ class OfflineDetectionGUI:
             return clicked_point, False, 0.0
         try:
             radius = int(self.robot_search_radius_var.get().strip())
-            minimum_area = float(self.minimum_area_var.get().strip())
-            if radius <= 0 or minimum_area <= 0:
+            if radius <= 0:
                 raise ValueError
         except ValueError:
             messagebox.showerror(
@@ -499,14 +543,111 @@ class OfflineDetectionGUI:
             )
             return None
 
+        if self.detection_color_var.get() == "Learned from clicks":
+            return self.find_local_contrasting_point(clicked_point, radius)
+
+        try:
+            minimum_area = float(self.robot_snap_minimum_area_var.get().strip())
+            if minimum_area <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Input Error", "Click min area must be positive.")
+            return None
+
         return self.find_nearest_blob_center(
             clicked_point,
             color=self.detection_color_var.get(),
             radius=radius,
             minimum_area=minimum_area,
+            morphology_kernel_size=1,
         )
 
-    def find_nearest_blob_center(self, clicked_point, color, radius, minimum_area):
+    def find_local_contrasting_point(self, clicked_point, radius):
+        """Find the darkest, most saturated pixel close to a learning click."""
+        clicked_x, clicked_y = clicked_point
+        frame_height, frame_width = self.current_frame_bgr.shape[:2]
+        local_radius = min(radius, 10)
+        x0 = max(0, clicked_x - local_radius)
+        y0 = max(0, clicked_y - local_radius)
+        x1 = min(frame_width, clicked_x + local_radius + 1)
+        y1 = min(frame_height, clicked_y + local_radius + 1)
+        hsv = cv2.cvtColor(self.current_frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        score = hsv[:, :, 2].astype(np.float32) - 0.35 * hsv[:, :, 1]
+        local_y, local_x = np.unravel_index(np.argmin(score), score.shape)
+        if float(np.median(score) - score[local_y, local_x]) < 8.0:
+            return clicked_point, False, 0.0
+        center = (int(local_x + x0), int(local_y + y0))
+        distance = float(np.hypot(center[0] - clicked_x, center[1] - clicked_y))
+        return center, True, distance
+
+    def update_learned_robot_color_profile(self):
+        """Build an HSV profile from small neighborhoods around clicked robots."""
+        hsv_frame = cv2.cvtColor(self.current_frame_bgr, cv2.COLOR_BGR2HSV)
+        samples = []
+        height, width = hsv_frame.shape[:2]
+        for center_x, center_y in self.robot_points:
+            x0, x1 = max(0, center_x - 2), min(width, center_x + 3)
+            y0, y1 = max(0, center_y - 2), min(height, center_y + 3)
+            patch = hsv_frame[y0:y1, x0:x1].reshape(-1, 3)
+            scores = patch[:, 2].astype(np.float32) - 0.35 * patch[:, 1]
+            selected = patch[scores <= scores.min() + 20.0]
+            samples.extend(selected.tolist())
+
+        values = np.asarray(samples, dtype=np.int16)
+        hue_angles = values[:, 0] * (2.0 * np.pi / 180.0)
+        hue_center = int(round(
+            np.arctan2(np.sin(hue_angles).mean(), np.cos(hue_angles).mean())
+            * 180.0 / (2.0 * np.pi)
+        )) % 180
+        hue_offsets = (values[:, 0] - hue_center + 90) % 180 - 90
+        hue_spread = min(25, int(np.max(np.abs(hue_offsets))) + 8)
+        saturation_low = max(0, int(values[:, 1].min()) - 25)
+        saturation_high = min(255, int(values[:, 1].max()) + 25)
+        value_low = max(0, int(values[:, 2].min()) - 25)
+        value_high = min(255, int(values[:, 2].max()) + 35)
+        hue_low, hue_high = hue_center - hue_spread, hue_center + hue_spread
+        if hue_low < 0:
+            ranges = [
+                ((0, saturation_low, value_low), (hue_high, saturation_high, value_high)),
+                ((180 + hue_low, saturation_low, value_low), (179, saturation_high, value_high)),
+            ]
+        elif hue_high > 179:
+            ranges = [
+                ((hue_low, saturation_low, value_low), (179, saturation_high, value_high)),
+                ((0, saturation_low, value_low), (hue_high - 180, saturation_high, value_high)),
+            ]
+        else:
+            ranges = [
+                ((hue_low, saturation_low, value_low), (hue_high, saturation_high, value_high))
+            ]
+        self.learned_robot_color_ranges = ranges
+        self.minimum_area_var.set("1")
+        self.robot_snap_minimum_area_var.set("1")
+        self.detection_filter_size_var.set("1")
+        return (
+            f"Learned HSV near H={hue_center}, "
+            f"S={saturation_low}-{saturation_high}, V={value_low}-{value_high}."
+        )
+
+    def selected_robot_color_ranges(self):
+        if self.detection_color_var.get() != "Learned from clicks":
+            return None
+        if self.learned_robot_color_ranges:
+            return self.learned_robot_color_ranges
+        messagebox.showerror(
+            "Robot Profile Error",
+            "Choose Manual selection and click the robots to learn their appearance first.",
+        )
+        return False
+
+    def find_nearest_blob_center(
+        self,
+        clicked_point,
+        color,
+        radius,
+        minimum_area,
+        morphology_kernel_size=5,
+    ):
         clicked_x, clicked_y = clicked_point
         frame_height, frame_width = self.current_frame_bgr.shape[:2]
         x0 = max(0, clicked_x - radius)
@@ -519,6 +660,7 @@ class OfflineDetectionGUI:
             mode="Color blobs",
             color=color,
             minimum_area=minimum_area,
+            morphology_kernel_size=morphology_kernel_size,
         )
 
         candidates = []
@@ -543,6 +685,18 @@ class OfflineDetectionGUI:
             return None
         return robot_count
 
+    def read_detection_filter_size(self):
+        try:
+            filter_size = int(self.detection_filter_size_var.get().strip())
+            if filter_size not in (1, 3, 5):
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Input Error", "Detection cleanup size must be 1, 3, or 5."
+            )
+            return None
+        return filter_size
+
     def find_robots_by_color(self):
         if self.current_frame_bgr is None:
             messagebox.showerror("Video Error", "Choose a video first.")
@@ -554,6 +708,12 @@ class OfflineDetectionGUI:
             return
         robot_count = self.read_robot_count()
         if robot_count is None:
+            return
+        filter_size = self.read_detection_filter_size()
+        if filter_size is None:
+            return
+        color_ranges = self.selected_robot_color_ranges()
+        if color_ranges is False:
             return
         try:
             minimum_area = float(self.minimum_area_var.get().strip())
@@ -567,6 +727,7 @@ class OfflineDetectionGUI:
         workspace_points = np.array(self.calibration_points, dtype=np.int32)
         workspace_mask = np.zeros((height, width), dtype=np.uint8)
         cv2.fillPoly(workspace_mask, [workspace_points], 255)
+        workspace_mask = cv2.erode(workspace_mask, np.ones((7, 7), np.uint8))
         detection_frame = np.full_like(self.current_frame_bgr, 255)
         cv2.copyTo(self.current_frame_bgr, workspace_mask, detection_frame)
         _, detections = self.detector.process(
@@ -574,6 +735,8 @@ class OfflineDetectionGUI:
             mode="Color blobs",
             color=self.detection_color_var.get(),
             minimum_area=minimum_area,
+            morphology_kernel_size=filter_size,
+            color_ranges=color_ranges,
         )
         self.robot_points = [item["center"] for item in detections[:robot_count]]
         self.robot_finding_mode_var.set("Color detection")
@@ -582,6 +745,7 @@ class OfflineDetectionGUI:
             text=f"Found {found}/{robot_count} robots by color.",
             fg="green" if found == robot_count else "orange",
         )
+        self.detection_label.config(text=self.detector.summarize(detections))
         self.render_calibration_frame()
 
     def clear_robot_points(self):
@@ -662,6 +826,17 @@ class OfflineDetectionGUI:
         geometry = self.read_geometry_values()
         if geometry is None:
             return
+        try:
+            calibration_minimum_area = float(
+                self.calibration_minimum_area_var.get().strip()
+            )
+            if calibration_minimum_area <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Input Error", "Green-dot min area must be positive."
+            )
+            return
         object_height_cm, camera_height_cm, rectangle_width_cm, rectangle_height_cm = geometry
         height, width = self.current_frame_bgr.shape[:2]
         calibration = {
@@ -673,13 +848,16 @@ class OfflineDetectionGUI:
             "camera_height_cm": camera_height_cm,
             "rectangle_width_cm": rectangle_width_cm,
             "rectangle_height_cm": rectangle_height_cm,
+            "calibration_minimum_area_px": calibration_minimum_area,
         }
         INPUT_DIR.mkdir(parents=True, exist_ok=True)
-        CALIBRATION_FILE.write_text(
+        video_path = self.current_video_path or Path(self.video_path_var.get().strip())
+        calibration_file = calibration_file_for(video_path)
+        calibration_file.write_text(
             json.dumps(calibration, indent=2) + "\n", encoding="utf-8"
         )
         self.calibration_status_label.config(
-            text=f"Calibration saved: {CALIBRATION_FILE}", fg="green"
+            text=f"Calibration saved: {calibration_file}", fg="green"
         )
 
     def read_geometry_values(self):
@@ -754,6 +932,12 @@ class OfflineDetectionGUI:
         robot_count = self.read_robot_count()
         if robot_count is None:
             return
+        filter_size = self.read_detection_filter_size()
+        if filter_size is None:
+            return
+        color_ranges = self.selected_robot_color_ranges()
+        if color_ranges is False:
+            return
         if len(self.robot_points) != robot_count:
             messagebox.showerror(
                 "Robot Finding Error",
@@ -782,6 +966,8 @@ class OfflineDetectionGUI:
                 rectangle_height_cm,
                 list(self.calibration_points),
                 self.stop_event,
+                filter_size,
+                color_ranges,
             ),
             daemon=True,
         )
@@ -799,6 +985,8 @@ class OfflineDetectionGUI:
         rectangle_height_cm,
         calibration_points,
         stop_event,
+        morphology_kernel_size=5,
+        color_ranges=None,
     ):
         capture = cv2.VideoCapture(str(video_path))
         writer = None
@@ -820,6 +1008,7 @@ class OfflineDetectionGUI:
             workspace_points = np.array(calibration_points, dtype=np.int32)
             workspace_mask = np.zeros((height, width), dtype=np.uint8)
             cv2.fillPoly(workspace_mask, [workspace_points], 255)
+            workspace_mask = cv2.erode(workspace_mask, np.ones((7, 7), np.uint8))
 
             output_dir = PROJECT_DIR / "outputs" / "offline_detection" / video_path.stem
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -860,6 +1049,8 @@ class OfflineDetectionGUI:
                     mode=mode,
                     color=color,
                     minimum_area=minimum_area,
+                    morphology_kernel_size=morphology_kernel_size,
+                    color_ranges=color_ranges,
                 )
                 annotated[workspace_mask == 0] = frame_bgr[workspace_mask == 0]
                 cv2.polylines(
