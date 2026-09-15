@@ -30,8 +30,8 @@ CAD_DATA, CAD_EDGE_POLYLINES = _load_edge_polylines()
 WALL_OPENINGS = (
     (np.array([-65.0, 0.0]) * MM_TO_M, 5.0 * MM_TO_M, None),
     (np.array([-15.0, 0.0]) * MM_TO_M, 4.0 * MM_TO_M, (3,)),
-    (np.array([0.0, 15.0]) * MM_TO_M, 7.0 * MM_TO_M, None),
-    (np.array([15.0, 0.0]) * MM_TO_M, 7.0 * MM_TO_M, None),
+    (np.array([0.0, 15.0]) * MM_TO_M, 7.0 * MM_TO_M, (5, 19)),
+    (np.array([15.0, 0.0]) * MM_TO_M, 7.0 * MM_TO_M, (18,)),
     (np.array([-57.7, -30.0]) * MM_TO_M, 5.0 * MM_TO_M, (37,)),
 )
 

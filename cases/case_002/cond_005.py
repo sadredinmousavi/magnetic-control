@@ -48,6 +48,11 @@ _lower_inner = np.array([
     [-59.66825144757523, -25.78177203353052],
 ])
 LOWER_PATH_POINTS = 0.5e-3 * (_lower_outer + _lower_inner)
+LOWER_PATH_WITH_MIDPOINTS = np.empty((2 * len(LOWER_PATH_POINTS) - 1, 2))
+LOWER_PATH_WITH_MIDPOINTS[::2] = LOWER_PATH_POINTS
+LOWER_PATH_WITH_MIDPOINTS[1::2] = 0.5 * (
+    LOWER_PATH_POINTS[:-1] + LOWER_PATH_POINTS[1:]
+)
 
 # Pass through the open right-hand junction between the two CAD corridors.
 TRANSITION_PATH_POINTS = np.array([
@@ -55,10 +60,12 @@ TRANSITION_PATH_POINTS = np.array([
     [39.00e-3, -3.77e-3],
 ])
 
+ENTRY_PATH_POINTS = np.linspace([0.0, 0.0], [-0.035, 0.0], 6)
 PATH_POINTS = np.vstack((
+    ENTRY_PATH_POINTS,
     UPPER_PATH_POINTS,
     TRANSITION_PATH_POINTS,
-    LOWER_PATH_POINTS,
+    LOWER_PATH_WITH_MIDPOINTS,
 ))
 
 _robot_angles = np.linspace(0.0, 2.0 * np.pi, NUM_ROBOTS, endpoint=False)
@@ -67,14 +74,33 @@ INITIAL_ROBOT_POSITIONS = PATH_POINTS[0] + np.column_stack((
     0.0015 * np.sin(_robot_angles),
 ))
 
+_segment_directions = np.diff(PATH_POINTS, axis=0)
+_segment_directions /= np.linalg.norm(_segment_directions, axis=1, keepdims=True)
+_path_tangents = np.vstack((
+    _segment_directions[0],
+    _segment_directions[:-1] + _segment_directions[1:],
+    _segment_directions[-1],
+))
+_path_angles = np.arctan2(_path_tangents[:, 1], _path_tangents[:, 0])
+_curve_start = len(ENTRY_PATH_POINTS)
+_curve_end = _curve_start + len(UPPER_PATH_POINTS)
+_ratios = np.where(
+    (np.arange(len(PATH_POINTS)) >= _curve_start)
+    & (np.arange(len(PATH_POINTS)) < _curve_end),
+    3.0, 2.0,
+)
+_ratios[:_curve_start] = 5.0
+# The weak stiffness axis is the long formation axis, tangent to the path.
+_stiffness_angles = _path_angles + np.pi / 2
+
 TARGET_SCHEDULE = [
-    (0.0, PATH_POINTS[0], 1.0, 0.0),
+    (0.0, PATH_POINTS[0], _ratios[0], _stiffness_angles[0]),
     *[
         (
             FORMATION_DURATION + index * PATH_STEP_DURATION,
             point,
-            1.0,
-            0.0,
+            _ratios[index + 1],
+            _stiffness_angles[index + 1],
         )
         for index, point in enumerate(PATH_POINTS[1:])
     ],
