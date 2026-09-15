@@ -1,0 +1,57 @@
+"""Ten robots and a passive rectangular cargo under the existing magnets."""
+
+import numpy as np
+
+
+CARGO_SIZE = np.array([0.108, 0.024])  # length / width = 4.5
+ROBOT_X = np.linspace(-0.014, 0.014, 5)
+INITIAL_ROBOT_POSITIONS = np.array([
+    *[(x, 0.012) for x in ROBOT_X],
+    *[(x, -0.012) for x in ROBOT_X],
+])
+
+# Desired magnetic equilibrium points, not prescribed robot/cargo positions.
+TARGET_SCHEDULE = [
+    (0.0, np.array([0.0, 0.0]), 4.5, 0.0),
+    (12.0, np.array([-0.035, 0.0]), 4.5, 0.0),
+    (24.0, np.array([0.035, 0.0]), 4.5, 0.0),
+    (36.0, np.array([0.035, 0.0]), 4.5, np.pi / 4),
+    (48.0, np.array([0.035, 0.0]), 4.5, np.pi / 2),
+    (60.0, np.array([0.035, 0.045]), 4.5, np.pi / 2),
+    (72.0, np.array([-0.030, 0.045]), 4.5, np.pi / 2),
+]
+
+
+PARAMS = {
+    "TARGET_SCHEDULE": TARGET_SCHEDULE,
+    "INITIAL_ROBOT_POSITIONS": INITIAL_ROBOT_POSITIONS,
+    "T_SPAN": (0.0, 84.0),
+    "T_EVAL_POINTS": 240,
+    "SOLVER_PROGRESS_INTERVAL": 0.5,
+    "USE_OVERDAMPED_DYNAMICS": False,
+    "DYNAMICS_SPEEDUP": 1.0,
+    "ANIMATION_DRAW_CONTOUR": True,
+    "ANIMATION_DRAW_SOURCES": True,
+    "ANIMATION_DRAW_ACTIVE_TARGET": True,
+    "ANIMATION_DRAW_TARGET_TRAJECTORY": True,
+    "ANIMATION_DRAW_TRAJECTORIES": False,
+    "ANIMATION_TITLE": "Magnet-Driven Rectangular Cargo Dynamics",
+    "ANIMATION_ROBOT_MARKER_SIZE": 18,
+    "VIDEO_DPI": 100,
+    "VIDEO_FPS": 20,
+    "PAYLOAD_RADIUS": 0.0,  # PAYLOAD_SIZE specifies the physical contact geometry.
+    "PAYLOAD_SIZE": CARGO_SIZE,
+    "PAYLOAD_HEIGHT": 0.001,
+    "PAYLOAD_DENSITY": 50.0,
+    "PAYLOAD_DRAG_FACTOR": 50.0,
+    "CONTACT_STIFFNESS": 2e-5,
+    "CONTACT_DAMPING": 5e-5,
+    "PAYLOAD_CAPILLARY_GAIN": 5e-7,
+    "PAYLOAD_CAPILLARY_RANGE": 0.007,
+    "PAYLOAD_FRICTION_COEFFICIENT": 0.5,
+    "PAYLOAD_FRICTION_SLIP_SPEED": 1e-5,
+    "PAYLOAD_INITIAL_POS": np.zeros(2),
+    "PAYLOAD_INITIAL_VEL": np.zeros(2),
+    "PAYLOAD_INITIAL_ANGLE": 0.0,
+    "PAYLOAD_INITIAL_ANGULAR_VEL": 0.0,
+}

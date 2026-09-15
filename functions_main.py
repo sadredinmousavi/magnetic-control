@@ -205,7 +205,7 @@ def calculate_capillary_force(pos_j, pos_i, robot_radius, gamma=0.072, meniscus_
     Capillary force exerted BY robot j ON robot i.
     
     Dong formula:
-        F_cap_ij = 2*pi*gamma*R^2*sin(C)^2 * r_ij / |r_ij|^2
+        F_cap_ij = -2*pi*gamma*R^2*sin(C)^2 * r_ij / |r_ij|^2
     
     pos_i, pos_j: 2D positions [x, y] in meters
     robot_radius: R in meters
@@ -225,7 +225,7 @@ def calculate_capillary_force(pos_j, pos_i, robot_radius, gamma=0.072, meniscus_
         sin_C = np.sin(meniscus_angle)
     
     K_cap = 2 * np.pi * gamma * robot_radius**2 * sin_C**2
-    return K_cap * r_ij / (r_mag**2)
+    return -K_cap * r_ij / (r_mag**2)
 
 
 def calculate_robot_payload_contact_force(

@@ -26,12 +26,53 @@ def _load_edge_polylines():
 
 CAD_DATA, CAD_EDGE_POLYLINES = _load_edge_polylines()
 
-# Each sampled CAD edge becomes consecutive two-sided simulator wall segments.
-WALL_SEGMENTS = tuple(
-    (start.copy(), end.copy())
-    for polyline in CAD_EDGE_POLYLINES
-    for start, end in zip(polyline[:-1], polyline[1:])
+# Opening centers and radii are in the original CAD coordinate frame.
+WALL_OPENINGS = (
+    (np.array([-65.0, 0.0]) * MM_TO_M, 5.0 * MM_TO_M, None),
+    (np.array([-15.0, 0.0]) * MM_TO_M, 4.0 * MM_TO_M, (3,)),
+    (np.array([0.0, 15.0]) * MM_TO_M, 7.0 * MM_TO_M, None),
+    (np.array([15.0, 0.0]) * MM_TO_M, 7.0 * MM_TO_M, None),
+    (np.array([-57.7, -30.0]) * MM_TO_M, 5.0 * MM_TO_M, (37,)),
 )
+
+
+def _cut_wall_opening(segments, center, radius):
+    remaining = []
+    for start, end in segments:
+        direction = end - start
+        a = np.dot(direction, direction)
+        b = 2.0 * np.dot(start - center, direction)
+        c = np.dot(start - center, start - center) - radius**2
+        discriminant = b**2 - 4.0 * a * c
+        if discriminant <= 0:
+            remaining.append((start, end))
+            continue
+
+        root = np.sqrt(discriminant)
+        enter = np.clip((-b - root) / (2.0 * a), 0.0, 1.0)
+        exit = np.clip((-b + root) / (2.0 * a), 0.0, 1.0)
+        if enter >= exit:
+            remaining.append((start, end))
+            continue
+        if enter > 0:
+            remaining.append((start, start + enter * direction))
+        if exit < 1:
+            remaining.append((start + exit * direction, end))
+    return tuple(remaining)
+
+
+# Keep the source CAD edges intact; clip only the simulator/plot walls.
+_wall_segments = []
+for _edge_id, _polyline in enumerate(CAD_EDGE_POLYLINES):
+    _edge_segments = tuple(
+        (start.copy(), end.copy())
+        for start, end in zip(_polyline[:-1], _polyline[1:])
+    )
+    for _center, _radius, _edge_ids in WALL_OPENINGS:
+        if _edge_ids is None or _edge_id in _edge_ids:
+            _edge_segments = _cut_wall_opening(_edge_segments, _center, _radius)
+    _wall_segments.extend(_edge_segments)
+WALL_SEGMENTS = tuple(_wall_segments)
 
 CAD_BOUNDING_BOX = np.array([
     [CAD_DATA["bounding_box_mm"]["x_min"], CAD_DATA["bounding_box_mm"]["z_min"]],

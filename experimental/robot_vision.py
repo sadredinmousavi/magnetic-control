@@ -31,6 +31,7 @@ class RobotDetector:
         minimum_area=150.0,
         morphology_kernel_size=5,
         color_ranges=None,
+        draw_annotations=True,
     ):
         """Return an annotated BGR frame and a list of detected robots."""
         annotated = frame_bgr.copy()
@@ -44,6 +45,7 @@ class RobotDetector:
                     float(minimum_area),
                     morphology_kernel_size,
                     color_ranges,
+                    draw_annotations,
                 )
             )
 
@@ -59,6 +61,7 @@ class RobotDetector:
         minimum_area,
         morphology_kernel_size=5,
         color_ranges=None,
+        draw_annotations=True,
     ):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
@@ -100,28 +103,28 @@ class RobotDetector:
             center_x = int(round(float(centroid[0])))
             center_y = int(round(float(centroid[1])))
 
-            label = f"{color} {index}: ({center_x}, {center_y})"
-            cv2.rectangle(
-                frame_bgr, (x, y), (x + width, y + height), (0, 255, 0), 2
-            )
-            cv2.drawMarker(
-                frame_bgr,
-                (center_x, center_y),
-                (0, 255, 0),
-                cv2.MARKER_CROSS,
-                18,
-                2,
-            )
-            cv2.putText(
-                frame_bgr,
-                label,
-                (x, max(y - 8, 18)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
+            if draw_annotations:
+                cv2.rectangle(
+                    frame_bgr, (x, y), (x + width, y + height), (0, 255, 0), 2
+                )
+                cv2.drawMarker(
+                    frame_bgr,
+                    (center_x, center_y),
+                    (0, 255, 0),
+                    cv2.MARKER_CROSS,
+                    18,
+                    2,
+                )
+                cv2.putText(
+                    frame_bgr,
+                    f"{color} {index}: ({center_x}, {center_y})",
+                    (x, max(y - 8, 18)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
             detections.append(
                 {
                     "kind": "color",

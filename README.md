@@ -262,7 +262,7 @@ GUI004 is an offline microrobot detector. Select a recorded video, choose the
 detection mode/color/minimum area, and process it without real-time playback
 delays. It previews the latest annotated frame and saves an annotated MP4 and a
 detection CSV under `outputs/offline_detection/<video_name>/`. It can also be
-started by double-clicking `gui004.bat`. Its editable geometry defaults are
+started by double-clicking `03-gui004.bat`. Its editable geometry defaults are
 `h = 1 cm` and camera-to-dot-surface height `= 29 cm`; both values are recorded
 in the detection CSV. The four green calibration dots are defined as a
 `10 cm x 10 cm` rectangle by default; its width and height are independently
@@ -277,6 +277,12 @@ robot detection. In Phase 2, the separate click minimum-area setting and light
 click-search filtering support very small robots without weakening full-video
 detection filtering. The automatic detection cleanup size is also selectable;
 use `1` for tiny robots and `3` or `5` to suppress progressively more noise.
+After processing, Phase 4 replays the original video with green `+` robot marks,
+a red `+` at their area-weighted center, and the workspace outline. Use the
+Robot marks and Lines switches to show or hide those overlays, or load an
+existing detection CSV for the selected video.
+The Red center track switch draws its path as a dashed line up to the current
+frame; frames with no detections leave a break in the path.
 Identify the robots separately by clicking them or by choosing their color.
 Phase 3 processes
 the complete video. A manual robot click searches the configurable nearby pixel
@@ -287,7 +293,7 @@ robot, and GUI004 builds an HSV profile from those samples for Find by color and
 full-video processing. Learning also selects area `1` and cleanup size `1` so
 tiny sampled robots are not discarded.
 
-On Windows, double-click `usage.bat` in the project root. The launcher scans
+On Windows, double-click `04-usage.bat` in the project root. The launcher scans
 `cases/case_*` and provides separate Usage, Case, and Condition menus. Use the
 Up/Down arrow keys and Enter, or type a displayed list number/name and press
 Enter. The selected module is passed directly to the usage, so no case-file

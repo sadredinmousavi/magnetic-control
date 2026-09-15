@@ -1,4 +1,4 @@
-"""Interactive Windows launcher used by usage.bat."""
+"""Interactive Windows launcher used by 04-usage.bat."""
 
 import importlib
 import os

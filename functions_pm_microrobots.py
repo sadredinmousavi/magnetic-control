@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.patches as patches
+from matplotlib.transforms import Affine2D
 from scipy.constants import mu_0
 
 from case_loader import unpack_target_schedule_entry
@@ -70,7 +71,7 @@ def calculate_robot_robot_forces_batch(
     capillary_scale = np.zeros_like(r_mag)
     capillary_scale[valid] = 1.0 / (r_mag[valid] ** 2)
     k_cap = 2 * np.pi * gamma * robot_radius**2 * capillary_sin_C**2
-    capillary_forces = k_cap * np.sum(r_vec * capillary_scale[:, :, None], axis=1)
+    capillary_forces = -k_cap * np.sum(r_vec * capillary_scale[:, :, None], axis=1)
 
     return magnetic_forces + capillary_forces
 
@@ -456,6 +457,7 @@ def animate_trajectories(
     video_crf=18,
     figure_size=(8, 8),
     animation_title="Microrobot Swarm Dynamics",
+    payload_size=None,
 ):
     """
     Fast animation for time-varying target microrobot simulation.
@@ -504,9 +506,10 @@ def animate_trajectories(
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
 
-    num_bodies = trajectories.shape[0] // 4
-    has_payload = payload_radius is not None
-    num_robots = num_bodies - 1 if has_payload else num_bodies
+    has_payload = payload_radius is not None or payload_size is not None
+    payload_state_size = 6 if payload_size is not None else 4
+    num_robots = ((trajectories.shape[0] - payload_state_size) // 4
+                  if has_payload else trajectories.shape[0] // 4)
 
     # ---------------------------------------------------------
     # Helper: active target / field index
@@ -802,16 +805,18 @@ def animate_trajectories(
     # ---------------------------------------------------------
     payload_patch = None
     if has_payload:
-        payload_patch = plt.Circle(
-            (0.0, 0.0),
-            payload_radius,
-            color="orange",
-            alpha=0.65,
-            ec="black",
-            linewidth=1.5,
-            label="Payload",
-            zorder=6
-        )
+        if payload_size is not None:
+            length, width = payload_size
+            payload_patch = patches.Rectangle(
+                (-length / 2, -width / 2), length, width,
+                facecolor="orange", alpha=0.75, edgecolor="black",
+                linewidth=1.5, label="Payload", zorder=6,
+            )
+        else:
+            payload_patch = plt.Circle(
+                (0.0, 0.0), payload_radius, color="orange", alpha=0.65,
+                ec="black", linewidth=1.5, label="Payload", zorder=6,
+            )
         ax.add_patch(payload_patch)
     
     # ---------------------------------------------------------
@@ -916,7 +921,14 @@ def animate_trajectories(
             payload_idx = num_robots * 4
             payload_x = trajectories[payload_idx, frame]
             payload_y = trajectories[payload_idx + 1, frame]
-            payload_patch.center = (payload_x, payload_y)
+            if payload_size is not None:
+                payload_angle = trajectories[payload_idx + 4, frame]
+                payload_patch.set_transform(
+                    Affine2D().rotate(payload_angle).translate(payload_x, payload_y)
+                    + ax.transData
+                )
+            else:
+                payload_patch.center = (payload_x, payload_y)
             artists.append(payload_patch)
 
         time_text.set_text(
@@ -941,19 +953,41 @@ def animate_trajectories(
 
     if save_video:
         print(f"Saving video to '{video_name}'...")
-        writer = animation.FFMpegWriter(
-            fps=video_fps,
-            codec="libx264",
-            bitrate=-1,
-            extra_args=[
-                "-crf", str(video_crf),
-                "-preset", "slow",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-            ],
-            metadata={"title": "Microrobot Swarm Dynamics"},
-        )
-        ani.save(video_name, writer=writer, dpi=video_dpi)
+        if animation.FFMpegWriter.isAvailable():
+            writer = animation.FFMpegWriter(
+                fps=video_fps,
+                codec="libx264",
+                bitrate=-1,
+                extra_args=[
+                    "-crf", str(video_crf),
+                    "-preset", "slow",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                ],
+                metadata={"title": "Microrobot Swarm Dynamics"},
+            )
+            ani.save(video_name, writer=writer, dpi=video_dpi)
+        else:
+            import cv2
+
+            fig.set_dpi(video_dpi)
+            fig.canvas.draw()
+            width, height = fig.canvas.get_width_height()
+            writer = cv2.VideoWriter(
+                str(video_name), cv2.VideoWriter_fourcc(*"mp4v"),
+                video_fps, (width, height),
+            )
+            if not writer.isOpened():
+                raise RuntimeError(f"Could not create video: {video_name}")
+            try:
+                for frame in range(len(t_eval)):
+                    for artist in update(frame):
+                        artist.set_animated(False)
+                    fig.canvas.draw()
+                    rgba = np.asarray(fig.canvas.buffer_rgba())
+                    writer.write(cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR))
+            finally:
+                writer.release()
         print("Video saved!")
 
     plt.show()

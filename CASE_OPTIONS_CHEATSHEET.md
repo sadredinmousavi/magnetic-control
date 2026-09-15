@@ -150,6 +150,8 @@ zero interaction coefficients.
 | Option | Default | Used by | Meaning |
 |---|---:|---|---|
 | `ANIMATION_DRAW_CONTOUR` | `True` | 4 | Shows the field contour background. |
+| `ANIMATION_DRAW_SOURCES` | `True` | 4 | Shows source magnets in the animation. |
+| `ANIMATION_DRAW_ACTIVE_TARGET` | `True` | 4 | Shows the active target marker. |
 | `ANIMATION_DRAW_STREAMLINES` | `False` | 4 | Shows field streamlines. |
 | `ANIMATION_DRAW_QUIVER` | `False` | 4 | Shows field direction arrows. |
 | `ANIMATION_DRAW_TARGET_TRAJECTORY` | `False` | 4 | Shows the route formed by scheduled target positions. |

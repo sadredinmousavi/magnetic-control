@@ -12,7 +12,7 @@ from .path_v3_geometry import (
 NUM_ROBOTS = 7
 FORMATION_DURATION = 10.0
 PATH_STEP_DURATION = 10.0
-PATH_SCALE = 1.30
+PATH_SCALE = 1.60
 
 # Scale the complete CAD path uniformly about the origin so that the walls and
 # moving-target centerline remain aligned.
@@ -81,14 +81,26 @@ INITIAL_ROBOT_POSITIONS = PATH_POINTS[0] + np.column_stack((
     0.0015 * np.sin(_robot_angles),
 ))
 
+_segment_directions = np.diff(PATH_POINTS, axis=0)
+_segment_directions /= np.linalg.norm(_segment_directions, axis=1, keepdims=True)
+_path_tangents = np.vstack((
+    _segment_directions[0],
+    _segment_directions[:-1] + _segment_directions[1:],
+    _segment_directions[-1],
+))
+_path_angles = np.arctan2(_path_tangents[:, 1], _path_tangents[:, 0])
+_ratios = np.where(np.arange(len(PATH_POINTS)) < len(UPPER_PATH_POINTS), 3.0, 2.0)
+# The weaker stiffness axis is the long formation axis, so the strong axis is normal to the path.
+_stiffness_angles = _path_angles + np.pi / 2
+
 TARGET_SCHEDULE = [
-    (0.0, PATH_POINTS[0], 1.0, 0.0),
+    (0.0, PATH_POINTS[0], _ratios[0], _stiffness_angles[0]),
     *[
         (
             FORMATION_DURATION + index * PATH_STEP_DURATION,
             point,
-            1.0,
-            0.0,
+            _ratios[index + 1],
+            _stiffness_angles[index + 1],
         )
         for index, point in enumerate(PATH_POINTS[1:])
     ],
@@ -106,6 +118,7 @@ PARAMS = {
     "T_EVAL_POINTS": 600,
     "SOLVER_PROGRESS_INTERVAL": 0.5,
     "SOLVER_MAX_STEP": 0.05,
+    "ROBOT_INTERACTION_SCALE": 0.25, # for testing purposes
 
     "ANIMATION_TITLE": "Swarm Control Through 30%-Enlarged Path-v3 CAD Geometry",
     "ANIMATION_DRAW_TRAJECTORIES": False,

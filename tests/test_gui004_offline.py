@@ -18,6 +18,40 @@ from robot_vision import RobotDetector
 
 
 class OfflineDetectionTests(unittest.TestCase):
+    def test_red_center_track_is_dashed_and_stops_at_current_frame(self):
+        frame = np.full((80, 100, 3), 240, dtype=np.uint8)
+        track = [(0, (20, 30)), (1, (60, 30)), (3, (80, 30))]
+
+        before_motion = gui004.draw_dashed_center_track(frame, track, 0)
+        after_motion = gui004.draw_dashed_center_track(frame, track, 1)
+        after_gap = gui004.draw_dashed_center_track(frame, track, 3)
+
+        self.assertTrue(np.array_equal(before_motion, frame))
+        self.assertGreater(int(after_motion[30, 24, 2]), 250)
+        self.assertEqual(tuple(after_motion[30, 32]), (240, 240, 240))
+        self.assertEqual(tuple(after_gap[30, 70]), (240, 240, 240))
+
+    def test_post_overlays_use_original_frame_and_any_robot_count(self):
+        frame = np.full((120, 160, 3), 240, dtype=np.uint8)
+        detections = [
+            {"center": (20, 30), "area": 1},
+            {"center": (40, 30), "area": 1},
+            {"center": (60, 30), "area": 1},
+            {"center": (100, 70), "area": 3},
+        ]
+        corners = [(5, 5), (155, 5), (155, 115), (5, 115)]
+        overlaid = gui004.draw_detection_overlays(frame, detections, corners)
+
+        self.assertEqual(tuple(overlaid[20, 15]), (240, 240, 240))
+        self.assertEqual(tuple(overlaid[30, 20]), (0, 255, 0))
+        self.assertEqual(tuple(overlaid[50, 70]), (0, 0, 255))
+        self.assertGreater(int(overlaid[5, 80, 1]), 240)
+        self.assertLess(int(overlaid[5, 80, 0]), 50)
+        self.assertTrue(np.array_equal(
+            gui004.draw_detection_overlays(frame, detections, corners, False, False),
+            frame,
+        ))
+
     def test_calibration_filename_includes_video_name(self):
         original_input_dir = gui004.INPUT_DIR
         gui004.INPUT_DIR = Path("inputs")
@@ -216,6 +250,9 @@ class OfflineDetectionTests(unittest.TestCase):
             self.assertTrue(
                 all(row["dot_rectangle_height_cm"] == "10.0" for row in rows)
             )
+            detections_by_frame = gui004.read_detections_csv(csv_output)
+            self.assertEqual(len(detections_by_frame), 8)
+            self.assertEqual(len(detections_by_frame[0]), 1)
 
 
 if __name__ == "__main__":

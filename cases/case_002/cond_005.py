@@ -1,11 +1,11 @@
-"""Seven robots traverse the supplied Path-v3 top-view CAD geometry."""
+"""Three robots traverse the supplied Path-v3 top-view CAD geometry."""
 
 import numpy as np
 
 from .path_v3_geometry import CAD_BOUNDING_BOX, CAD_EDGE_POLYLINES, WALL_SEGMENTS
 
 
-NUM_ROBOTS = 7
+NUM_ROBOTS = 3
 FORMATION_DURATION = 10.0
 PATH_STEP_DURATION = 10.0
 

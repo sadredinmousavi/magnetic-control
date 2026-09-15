@@ -28,6 +28,81 @@ def calibration_file_for(video_path):
     return INPUT_DIR / f"{Path(video_path).stem}_camera_calibration.json"
 
 
+def area_center_for(detections):
+    if not detections:
+        return None
+    weights = np.array([max(float(item.get("area", 0) or 0), 0)
+                        for item in detections], dtype=float)
+    if not weights.any():
+        weights[:] = 1
+    centers = np.array([item["center"] for item in detections], dtype=float)
+    return tuple(np.rint(np.average(centers, axis=0,
+                                   weights=weights)).astype(int))
+
+
+def draw_dashed_center_track(frame_bgr, center_track, current_frame):
+    annotated = frame_bgr.copy()
+    dash_length, gap_length = 8.0, 6.0
+    period = dash_length + gap_length
+    distance_traveled = 0.0
+    previous = None
+    for frame_number, center in center_track:
+        if frame_number > current_frame:
+            break
+        if previous is not None:
+            previous_frame, previous_center = previous
+            if frame_number == previous_frame + 1:
+                start = np.array(previous_center, dtype=float)
+                vector = np.array(center, dtype=float) - start
+                length = float(np.linalg.norm(vector))
+                position = 0.0
+                while position < length:
+                    phase = distance_traveled % period
+                    remaining = min(length - position,
+                                    (dash_length if phase < dash_length else period) - phase)
+                    if phase < dash_length:
+                        first = tuple(np.rint(start + vector * (position / length)).astype(int))
+                        last = tuple(np.rint(start + vector * ((position + remaining) / length)).astype(int))
+                        cv2.line(annotated, first, last, (0, 0, 255), 1, cv2.LINE_AA)
+                    position += remaining
+                    distance_traveled += remaining
+            else:
+                distance_traveled = 0.0
+        previous = (frame_number, center)
+    return annotated
+
+
+def draw_detection_overlays(frame_bgr, detections, workspace_points=(),
+                            show_robots=True, show_lines=True):
+    annotated = frame_bgr.copy()
+    if show_lines and len(workspace_points) == 4:
+        cv2.polylines(annotated, [np.asarray(workspace_points, dtype=np.int32)],
+                      True, (0, 255, 0), 1, cv2.LINE_AA)
+    if show_robots and detections:
+        for detection in detections:
+            center = tuple(map(int, detection["center"]))
+            cv2.drawMarker(annotated, center, (0, 255, 0),
+                           cv2.MARKER_CROSS, 18, 2, cv2.LINE_AA)
+        area_center = area_center_for(detections)
+        cv2.drawMarker(annotated, area_center, (0, 0, 255),
+                       cv2.MARKER_CROSS, 22, 2, cv2.LINE_AA)
+    return annotated
+
+
+def read_detections_csv(csv_path):
+    by_frame = {}
+    with Path(csv_path).open(newline="", encoding="utf-8") as csv_file:
+        for row in csv.DictReader(csv_file):
+            if not row.get("center_x_px") or not row.get("center_y_px"):
+                continue
+            frame = int(row["frame"])
+            by_frame.setdefault(frame, []).append({
+                "center": (int(row["center_x_px"]), int(row["center_y_px"])),
+                "area": float(row["area_px2"] or 0),
+            })
+    return by_frame
+
+
 class OfflineDetectionGUI:
     """Process a recorded video as fast as possible and save its detections."""
 
@@ -55,6 +130,12 @@ class OfflineDetectionGUI:
         self.robot_points = []
         self.learned_robot_color_ranges = None
         self.timeline_is_updating = False
+        self.post_detections = {}
+        self.post_center_track = []
+        self.post_frame_number = 0
+        self.post_playing = False
+        self.post_after_id = None
+        self.post_timeline_is_updating = False
 
         self.build_controls()
         self.build_viewer()
@@ -69,12 +150,15 @@ class OfflineDetectionGUI:
         calibration = tk.Frame(self.phase_notebook, padx=10, pady=8)
         robot_finding = tk.Frame(self.phase_notebook, padx=10, pady=8)
         processing = tk.Frame(self.phase_notebook, padx=10, pady=8)
+        post_processing = tk.Frame(self.phase_notebook, padx=10, pady=8)
         self.phase_notebook.add(calibration, text="Phase 1 - Calibration")
         self.phase_notebook.add(robot_finding, text="Phase 2 - Find robots")
         self.phase_notebook.add(processing, text="Phase 3 - Process")
+        self.phase_notebook.add(post_processing, text="Phase 4 - Post-process")
         calibration.columnconfigure(1, weight=1)
         robot_finding.columnconfigure(1, weight=1)
         processing.columnconfigure(1, weight=1)
+        post_processing.columnconfigure(1, weight=1)
 
         tk.Label(calibration, text="Video file").grid(row=0, column=0, sticky="w")
         self.video_path_var = tk.StringVar()
@@ -260,6 +344,35 @@ class OfflineDetectionGUI:
             anchor="w",
         ).grid(row=1, column=0, columnspan=6, sticky="ew")
 
+        self.post_play_button = tk.Button(
+            post_processing, text="Play", command=self.toggle_post_playback
+        )
+        self.post_play_button.grid(row=0, column=0, padx=4, pady=4)
+        self.post_timeline = tk.Scale(
+            post_processing, from_=0, to=1, orient="horizontal", showvalue=False,
+            command=self.on_post_timeline_changed,
+        )
+        self.post_timeline.grid(row=0, column=1, columnspan=3, sticky="ew", padx=8)
+        self.post_time_label = tk.Label(post_processing, text="00:00.000 / 00:00.000")
+        self.post_time_label.grid(row=0, column=4, padx=4)
+        tk.Button(post_processing, text="Load detections",
+                  command=self.choose_post_detections).grid(row=0, column=5, padx=4)
+        self.show_robot_marks_var = tk.BooleanVar(value=True)
+        self.show_lines_var = tk.BooleanVar(value=True)
+        self.show_center_track_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(post_processing, text="Robot marks (+)",
+                       variable=self.show_robot_marks_var,
+                       command=self.render_post_frame).grid(row=1, column=0,
+                                                            columnspan=2, sticky="w")
+        tk.Checkbutton(post_processing, text="Lines",
+                       variable=self.show_lines_var,
+                       command=self.render_post_frame).grid(row=1, column=2,
+                                                            columnspan=2, sticky="w")
+        tk.Checkbutton(post_processing, text="Red center track",
+                       variable=self.show_center_track_var,
+                       command=self.render_post_frame).grid(row=1, column=4,
+                                                            columnspan=2, sticky="w")
+
         self.status_label = tk.Label(
             self.root,
             text="Choose a recorded video, configure detection, and press Process Video.",
@@ -294,6 +407,7 @@ class OfflineDetectionGUI:
 
     def open_calibration_video(self, video_path):
         self.pause_playback()
+        self.pause_post_playback()
         if self.preview_capture is not None:
             self.preview_capture.release()
 
@@ -315,9 +429,140 @@ class OfflineDetectionGUI:
         self.calibration_points = []
         self.robot_points = []
         self.learned_robot_color_ranges = None
+        self.post_detections = {}
+        self.post_center_track = []
+        self.post_frame_number = 0
+        self.post_timeline.config(to=max(self.video_total_frames - 1, 1))
         self.load_saved_calibration(video_path, width, height)
         self.show_calibration_frame(0)
         self.phase_notebook.select(0)
+
+    def choose_post_detections(self):
+        video_path = Path(self.video_path_var.get().strip())
+        if not video_path.is_file():
+            messagebox.showerror("Video Error", "Select the original video first.")
+            return
+        output_dir = PROJECT_DIR / "outputs" / "offline_detection" / video_path.stem
+        selected = filedialog.askopenfilename(
+            title="Select detection CSV", initialdir=output_dir,
+            filetypes=[("Detection CSV", "*.csv")],
+        )
+        if selected:
+            self.load_post_detections(Path(selected))
+
+    def load_post_detections(self, csv_path):
+        video_path = Path(self.video_path_var.get().strip())
+        if not video_path.is_file():
+            messagebox.showerror("Video Error", "Select the original video first.")
+            return
+        try:
+            detections = read_detections_csv(csv_path)
+        except (OSError, ValueError, KeyError) as exc:
+            messagebox.showerror("Detection Error", f"Could not read detections: {exc}")
+            return
+        if self.preview_capture is None or self.current_video_path != video_path:
+            capture = cv2.VideoCapture(str(video_path))
+            if not capture.isOpened():
+                messagebox.showerror("Video Error", f"Could not open video: {video_path}")
+                return
+            if self.preview_capture is not None:
+                self.preview_capture.release()
+            self.preview_capture = capture
+            self.current_video_path = video_path
+            self.video_fps = float(capture.get(cv2.CAP_PROP_FPS))
+            if self.video_fps <= 0:
+                self.video_fps = 30.0
+            self.video_total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.timeline.config(to=max(self.video_total_frames - 1, 1))
+        self.pause_post_playback()
+        self.post_detections = detections
+        self.post_center_track = [
+            (frame, area_center_for(detections[frame]))
+            for frame in sorted(detections)
+        ]
+        self.post_frame_number = 0
+        self.post_timeline.config(to=max(self.video_total_frames - 1, 1))
+        self.phase_notebook.select(3)
+        self.show_post_frame(0)
+
+    def show_post_frame(self, frame_number, sequential=False):
+        if self.preview_capture is None:
+            return
+        frame_number = max(0, min(int(frame_number), max(self.video_total_frames - 1, 0)))
+        if not sequential:
+            self.preview_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        success, frame_bgr = self.preview_capture.read()
+        if not success:
+            self.pause_post_playback()
+            return
+        self.current_frame_bgr = frame_bgr
+        self.post_frame_number = frame_number
+        self.post_timeline_is_updating = True
+        self.post_timeline.set(frame_number)
+        self.post_timeline_is_updating = False
+        total_seconds = max(self.video_total_frames - 1, 0) / self.video_fps
+        self.post_time_label.config(
+            text=f"{self.format_time(frame_number / self.video_fps)} / "
+                 f"{self.format_time(total_seconds)}"
+        )
+        self.render_post_frame()
+
+    def render_post_frame(self):
+        if self.current_frame_bgr is None or self.phase_notebook.index(
+                self.phase_notebook.select()) != 3:
+            return
+        detections = self.post_detections.get(self.post_frame_number, [])
+        source_frame = self.current_frame_bgr
+        if self.show_center_track_var.get():
+            source_frame = draw_dashed_center_track(
+                source_frame, self.post_center_track, self.post_frame_number
+            )
+        annotated = draw_detection_overlays(
+            source_frame, detections, self.calibration_points,
+            self.show_robot_marks_var.get(), self.show_lines_var.get(),
+        )
+        self.show_preview(Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)))
+        self.detection_label.config(text=f"Detected robots: {len(detections)}")
+
+    def on_post_timeline_changed(self, value):
+        if self.post_timeline_is_updating or self.preview_capture is None:
+            return
+        self.pause_post_playback()
+        self.show_post_frame(round(float(value)))
+
+    def toggle_post_playback(self):
+        if self.preview_capture is None:
+            messagebox.showerror("Video Error", "Select the original video first.")
+            return
+        if self.post_playing:
+            self.pause_post_playback()
+            return
+        self.pause_playback()
+        if self.post_frame_number >= self.video_total_frames - 1:
+            self.show_post_frame(0)
+        self.post_playing = True
+        self.post_play_button.config(text="Pause")
+        self.play_next_post_frame()
+
+    def play_next_post_frame(self):
+        if not self.post_playing:
+            return
+        next_frame = self.post_frame_number + 1
+        if next_frame >= self.video_total_frames:
+            self.pause_post_playback()
+            return
+        self.show_post_frame(next_frame, sequential=True)
+        self.post_after_id = self.root.after(
+            max(1, round(1000.0 / self.video_fps)), self.play_next_post_frame
+        )
+
+    def pause_post_playback(self):
+        self.post_playing = False
+        if hasattr(self, "post_play_button"):
+            self.post_play_button.config(text="Play")
+        if self.post_after_id is not None:
+            self.root.after_cancel(self.post_after_id)
+            self.post_after_id = None
 
     def load_saved_calibration(self, video_path, video_width, video_height):
         calibration_file = calibration_file_for(video_path)
@@ -745,7 +990,7 @@ class OfflineDetectionGUI:
             text=f"Found {found}/{robot_count} robots by color.",
             fg="green" if found == robot_count else "orange",
         )
-        self.detection_label.config(text=self.detector.summarize(detections))
+        self.detection_label.config(text=f"Detected robots: {len(detections)}")
         self.render_calibration_frame()
 
     def clear_robot_points(self):
@@ -792,19 +1037,9 @@ class OfflineDetectionGUI:
                 cv2.LINE_AA,
             )
         if self.phase_notebook.index(self.phase_notebook.select()) == 1:
-            for index, point in enumerate(self.robot_points, start=1):
-                cv2.circle(annotated, point, 10, (0, 0, 255), 2, cv2.LINE_AA)
+            for point in self.robot_points:
                 cv2.drawMarker(
-                    annotated, point, (0, 0, 255), cv2.MARKER_CROSS, 16, 2
-                )
-                cv2.putText(
-                    annotated,
-                    f"R{index}",
-                    (point[0] + 12, point[1] - 12),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 0, 255),
-                    2,
+                    annotated, point, (0, 255, 0), cv2.MARKER_CROSS, 18, 2,
                     cv2.LINE_AA,
                 )
         rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
@@ -889,15 +1124,24 @@ class OfflineDetectionGUI:
 
     def on_phase_changed(self, _event=None):
         self.pause_playback()
-        if self.phase_notebook.index(self.phase_notebook.select()) in (0, 1):
-            self.render_calibration_frame()
+        self.pause_post_playback()
+        phase = self.phase_notebook.index(self.phase_notebook.select())
+        if phase in (0, 1):
+            if self.preview_capture is not None:
+                self.show_calibration_frame(self.current_frame_number)
+            else:
+                self.render_calibration_frame()
+        elif phase == 3 and self.preview_capture is not None:
+            self.show_post_frame(self.post_frame_number)
 
     def on_canvas_resize(self, _event=None):
-        if (
-            hasattr(self, "phase_notebook")
-            and self.phase_notebook.index(self.phase_notebook.select()) in (0, 1)
-        ):
+        if not hasattr(self, "phase_notebook"):
+            return
+        phase = self.phase_notebook.index(self.phase_notebook.select())
+        if phase in (0, 1):
             self.render_calibration_frame()
+        elif phase == 3:
+            self.render_post_frame()
 
     def start_processing(self):
         if self.worker_thread and self.worker_thread.is_alive():
@@ -1044,22 +1288,17 @@ class OfflineDetectionGUI:
 
                 detection_frame = np.full_like(frame_bgr, 255)
                 cv2.copyTo(frame_bgr, workspace_mask, detection_frame)
-                annotated, detections = self.detector.process(
+                _, detections = self.detector.process(
                     detection_frame,
                     mode=mode,
                     color=color,
                     minimum_area=minimum_area,
                     morphology_kernel_size=morphology_kernel_size,
                     color_ranges=color_ranges,
+                    draw_annotations=False,
                 )
-                annotated[workspace_mask == 0] = frame_bgr[workspace_mask == 0]
-                cv2.polylines(
-                    annotated,
-                    [workspace_points],
-                    True,
-                    (0, 255, 0),
-                    1,
-                    cv2.LINE_AA,
+                annotated = draw_detection_overlays(
+                    frame_bgr, detections, calibration_points
                 )
                 writer.write(annotated)
                 time_s = frame_number / fps
@@ -1092,7 +1331,7 @@ class OfflineDetectionGUI:
                         "dot_rectangle_height_cm": rectangle_height_cm,
                     })
 
-                summary = self.detector.summarize(detections)
+                summary = f"Detected robots: {len(detections)}"
                 progress = (
                     100.0 * (frame_number + 1) / total_frames
                     if total_frames > 0
@@ -1152,7 +1391,8 @@ class OfflineDetectionGUI:
 
         if item is not None:
             if item["kind"] == "frame":
-                self.show_preview(item["image"])
+                if self.phase_notebook.index(self.phase_notebook.select()) != 3:
+                    self.show_preview(item["image"])
                 self.detection_label.config(text=item["summary"])
                 self.progress["value"] = item["progress"]
                 total = item["total"]
@@ -1172,6 +1412,8 @@ class OfflineDetectionGUI:
                     ),
                     fg="orange" if item["stopped"] else "green",
                 )
+                if not item["stopped"]:
+                    self.load_post_detections(item["csv_output"])
             elif item["kind"] == "error":
                 self.set_running(False)
                 self.status_label.config(text=f"Processing failed: {item['message']}", fg="red")
@@ -1219,6 +1461,7 @@ class OfflineDetectionGUI:
 
     def close(self):
         self.pause_playback()
+        self.pause_post_playback()
         if self.preview_capture is not None:
             self.preview_capture.release()
         if self.stop_event is not None:
