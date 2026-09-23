@@ -18,7 +18,7 @@
 PARAMS = {
     # --- System Geometry ---
     "NUM_SOURCES": 8,
-    "RADIUS": 0.25,
+    "RADIUS": 0.18,
 
     # --- Magnetic Properties ---
     "SOURCE_MAGNETIZATION": 1000e3,
