@@ -144,6 +144,9 @@ zero interaction coefficients.
 | `PAYLOAD_CAPILLARY_RANGE` | Required for 4 | 4 | Capillary interaction range; cutoff is calculated as three times this value. |
 | `PAYLOAD_INITIAL_POS` | Required for 4 | 4 | Initial payload `(x, y)` position in metres. |
 | `PAYLOAD_INITIAL_VEL` | Required for 4 | 4 | Initial payload `(vx, vy)` velocity in m/s. |
+| `PAYLOAD_INITIAL_ANGLE` | `0.0` | 4 | Initial rectangular-payload orientation in radians. |
+| `PAYLOAD_INITIAL_ANGULAR_VEL` | `0.0` | 4 | Initial rectangular-payload angular velocity in rad/s. |
+| `PAYLOAD_ANGULAR_DRAG_FACTOR` | `1.0` | 4 | Multiplier for rectangular-payload angular drag; must be non-negative. |
 
 ## Animation and video options
 
@@ -152,12 +155,16 @@ zero interaction coefficients.
 | `ANIMATION_DRAW_CONTOUR` | `True` | 4 | Shows the field contour background. |
 | `ANIMATION_DRAW_SOURCES` | `True` | 4 | Shows source magnets in the animation. |
 | `ANIMATION_DRAW_ACTIVE_TARGET` | `True` | 4 | Shows the active target marker. |
+| `ANIMATION_ACTIVE_TARGET_MARKER` | `"X"` | 4 | Active red target marker: filled `X` or plain `x`. |
+| `ANIMATION_ACTIVE_TARGET_MARKER_SIZE` | `180` | 4 | Matplotlib active target marker area; must be positive. |
+| `ANIMATION_ACTIVE_TARGET_ALPHA` | `1.0` | 4 | Active target opacity from `0.0` to `1.0`. |
 | `ANIMATION_DRAW_STREAMLINES` | `False` | 4 | Shows field streamlines. |
 | `ANIMATION_DRAW_QUIVER` | `False` | 4 | Shows field direction arrows. |
 | `ANIMATION_DRAW_TARGET_TRAJECTORY` | `False` | 4 | Shows the route formed by scheduled target positions. |
 | `ANIMATION_DRAW_TARGET_POINTS` | `False` | 4 | Shows orange dots at every scheduled primary target position. |
 | `ANIMATION_DRAW_TRAJECTORIES` | `False` | 4 | Shows individual simulated robot trails. |
 | `ANIMATION_ROBOT_MARKER_SIZE` | `55` | 4 | Matplotlib robot marker area; must be positive. |
+| `PAYLOAD_SIZE` | `None` | 4 | Optional rectangular payload `(length, width)` in metres. Enables rotated contact geometry, torque, angular dynamics, and rotated rendering. |
 | `ANIMATION_FIGURE_SIZE` | `(8, 8)` | 1, 4 | Figure size `(width, height)` in inches. With DPI, both output pixel dimensions must be even. |
 | `ANIMATION_TITLE` | `"Microrobot Swarm Dynamics"` | 4 | Animation title. |
 | `SAVE_VIDEO` | `True` | 4 | Saves an MP4 when true. |

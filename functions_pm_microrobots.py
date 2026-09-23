@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.patches as patches
-from matplotlib.transforms import Affine2D
+import matplotlib.transforms as transforms
 from scipy.constants import mu_0
 
 from case_loader import unpack_target_schedule_entry
@@ -11,6 +11,7 @@ from functions_main import (
     calculate_capillary_force,
     calculate_dipole_interaction_force,
     calculate_robot_payload_interaction_force,
+    calculate_robot_rectangular_payload_interaction_force,
     calculate_total_force_from_sources,
 )
 from functions_utility import (
@@ -229,15 +230,22 @@ def microrobot_payload_dynamics(
     wall_interaction_range=0.0,
     wall_recovery_depth=0.0,
     robot_interaction_scale=1.0,
+    payload_size=None,
+    payload_inertia=None,
+    payload_angular_drag=None,
 ):
     """
     State layout:
     robots:
         [x1, y1, vx1, vy1, ..., xN, yN, vxN, vyN]
     payload:
-        [xp, yp, vxp, vyp]
+        circular:    [xp, yp, vxp, vyp]
+        rectangular: [xp, yp, vxp, vyp, angle, angular_velocity]
     """
-    num_robot_states = len(state) - 4
+    payload_state_count = 6 if payload_size is not None else 4
+    num_robot_states = len(state) - payload_state_count
+    if num_robot_states < 0 or num_robot_states % 4:
+        raise ValueError("State size does not match the robot/payload layout.")
     N = num_robot_states // 4
 
     derivatives = np.zeros_like(state)
@@ -247,8 +255,11 @@ def microrobot_payload_dynamics(
     payload_idx = 4 * N
     payload_pos = np.array([state[payload_idx], state[payload_idx + 1]])
     payload_vel = np.array([state[payload_idx + 2], state[payload_idx + 3]])
+    payload_angle = state[payload_idx + 4] if payload_size is not None else 0.0
+    payload_omega = state[payload_idx + 5] if payload_size is not None else 0.0
 
     F_payload = np.zeros(2)
+    torque_payload = 0.0
     robot_states = state[:num_robot_states].reshape(N, 4)
     robot_positions = robot_states[:, :2]
     robot_velocities = robot_states[:, 2:4]
@@ -322,20 +333,39 @@ def microrobot_payload_dynamics(
 
         # 3&4 Robot-payload contact and capillary attraction
 
-        F_robot_on_payload = calculate_robot_payload_interaction_force(
+        interaction_kwargs = dict(
             robot_pos=pos_i,
             robot_vel=vel_i,
             payload_pos=payload_pos,
             payload_vel=payload_vel,
             robot_radius=robot_radius,
-            payload_radius=payload_radius,
             k_contact=contact_stiffness,
             c_contact=contact_damping,
             capillary_gain=payload_capillary_gain,
             capillary_range=payload_capillary_range,
             capillary_cutoff=payload_capillary_cutoff,
-            adhesion_gap=0.0
+            adhesion_gap=0.0,
         )
+        if payload_size is None:
+            F_robot_on_payload = calculate_robot_payload_interaction_force(
+                payload_radius=payload_radius,
+                **interaction_kwargs,
+            )
+        else:
+            F_robot_on_payload, contact_point = (
+                calculate_robot_rectangular_payload_interaction_force(
+                    payload_size=payload_size,
+                    payload_angle=payload_angle,
+                    payload_omega=payload_omega,
+                    return_contact_point=True,
+                    **interaction_kwargs,
+                )
+            )
+            contact_offset = contact_point - payload_pos
+            torque_payload += (
+                contact_offset[0] * F_robot_on_payload[1]
+                - contact_offset[1] * F_robot_on_payload[0]
+            )
 
         F_payload_on_robot = -F_robot_on_payload
 
@@ -378,6 +408,14 @@ def microrobot_payload_dynamics(
         derivatives[payload_idx + 1] = payload_terminal_velocity[1]
         derivatives[payload_idx + 2] = 0.0
         derivatives[payload_idx + 3] = 0.0
+        if payload_size is not None:
+            angular_velocity = 0.0
+            if payload_angular_drag is not None and payload_angular_drag > 0:
+                angular_velocity = (
+                    dynamics_speedup * torque_payload / payload_angular_drag
+                )
+            derivatives[payload_idx + 4] = angular_velocity
+            derivatives[payload_idx + 5] = 0.0
         return derivatives
 
     # Payload dynamics
@@ -389,6 +427,15 @@ def microrobot_payload_dynamics(
     derivatives[payload_idx + 1] = payload_vel[1]
     derivatives[payload_idx + 2] = payload_accel[0]
     derivatives[payload_idx + 3] = payload_accel[1]
+    if payload_size is not None:
+        if payload_inertia is None or payload_inertia <= 0:
+            raise ValueError("Rectangular payload inertia must be positive.")
+        angular_drag_torque = 0.0
+        if payload_angular_drag is not None:
+            angular_drag_torque = -payload_angular_drag * payload_omega
+        angular_accel = (torque_payload + angular_drag_torque) / payload_inertia
+        derivatives[payload_idx + 4] = payload_omega
+        derivatives[payload_idx + 5] = angular_accel
 
     # if int(t * 10) % 10 == 0:
     #     print(
@@ -458,6 +505,9 @@ def animate_trajectories(
     figure_size=(8, 8),
     animation_title="Microrobot Swarm Dynamics",
     payload_size=None,
+    active_target_marker="X",
+    active_target_marker_size=180,
+    active_target_alpha=1.0,
 ):
     """
     Fast animation for time-varying target microrobot simulation.
@@ -470,6 +520,12 @@ def animate_trajectories(
         raise ValueError("VIDEO_DPI and VIDEO_FPS must be positive.")
     if robot_marker_size <= 0:
         raise ValueError("ANIMATION_ROBOT_MARKER_SIZE must be positive.")
+    if active_target_marker not in ("X", "x"):
+        raise ValueError("ANIMATION_ACTIVE_TARGET_MARKER must be 'X' or 'x'.")
+    if active_target_marker_size <= 0:
+        raise ValueError("ANIMATION_ACTIVE_TARGET_MARKER_SIZE must be positive.")
+    if not 0.0 <= active_target_alpha <= 1.0:
+        raise ValueError("ANIMATION_ACTIVE_TARGET_ALPHA must be between 0 and 1.")
     dish_center = np.asarray(dish_center, dtype=float)
     if dish_center.shape != (2,):
         raise ValueError("DISH_CENTER must be a 2D position.")
@@ -777,11 +833,13 @@ def animate_trajectories(
             initial_targets[:, 0],
             initial_targets[:, 1],
             c="red",
-            s=180,
-            marker="X",
-            edgecolors="black",
+            s=active_target_marker_size,
+            marker=active_target_marker,
+            edgecolors="black" if active_target_marker == "X" else None,
+            linewidths=1.5 if active_target_marker == "x" else 1.0,
+            alpha=active_target_alpha,
             label="Active target",
-            zorder=10,
+            zorder=30,
         )
 
     # ---------------------------------------------------------
@@ -797,7 +855,7 @@ def animate_trajectories(
             marker="o",
             edgecolors="black",
             label="Microrobots",
-            zorder=8,
+            zorder=20,
         )
 
     # ---------------------------------------------------------
@@ -810,7 +868,7 @@ def animate_trajectories(
             payload_patch = patches.Rectangle(
                 (-length / 2, -width / 2), length, width,
                 facecolor="orange", alpha=0.75, edgecolor="black",
-                linewidth=1.5, label="Payload", zorder=6,
+                linewidth=1.5, label="Payload", zorder=9,
             )
         else:
             payload_patch = plt.Circle(
@@ -922,10 +980,13 @@ def animate_trajectories(
             payload_x = trajectories[payload_idx, frame]
             payload_y = trajectories[payload_idx + 1, frame]
             if payload_size is not None:
+                length, width = payload_size
                 payload_angle = trajectories[payload_idx + 4, frame]
+                payload_patch.set_xy((payload_x - length / 2, payload_y - width / 2))
                 payload_patch.set_transform(
-                    Affine2D().rotate(payload_angle).translate(payload_x, payload_y)
-                    + ax.transData
+                    transforms.Affine2D().rotate_around(
+                        payload_x, payload_y, payload_angle
+                    ) + ax.transData
                 )
             else:
                 payload_patch.center = (payload_x, payload_y)

@@ -273,6 +273,11 @@ def build_common_config(params):
     solver_progress_interval = params.get("SOLVER_PROGRESS_INTERVAL")
 
     payload_radius = params.get("PAYLOAD_RADIUS")
+    payload_size = params.get("PAYLOAD_SIZE")
+    if payload_size is not None:
+        payload_size = np.asarray(payload_size, dtype=float)
+        if payload_size.shape != (2,) or np.any(payload_size <= 0):
+            raise ValueError("PAYLOAD_SIZE must contain two positive dimensions.")
     payload_height = params.get("PAYLOAD_HEIGHT")
     payload_density = params.get("PAYLOAD_DENSITY")
     payload_drag_factor = params.get("PAYLOAD_DRAG_FACTOR")
@@ -282,10 +287,20 @@ def build_common_config(params):
     payload_capillary_range = params.get("PAYLOAD_CAPILLARY_RANGE")
     payload_initial_pos = params.get("PAYLOAD_INITIAL_POS")
     payload_initial_vel = params.get("PAYLOAD_INITIAL_VEL")
-
+    payload_initial_angle = float(params.get("PAYLOAD_INITIAL_ANGLE", 0.0))
+    payload_initial_angular_vel = float(
+        params.get("PAYLOAD_INITIAL_ANGULAR_VEL", 0.0)
+    )
+    payload_angular_drag_factor = float(
+        params.get("PAYLOAD_ANGULAR_DRAG_FACTOR", 1.0)
+    )
+    if payload_angular_drag_factor < 0:
+        raise ValueError("PAYLOAD_ANGULAR_DRAG_FACTOR must be non-negative.")
     payload_volume = None
     payload_mass = None
     payload_drag = None
+    payload_inertia = None
+    payload_angular_drag = None
     payload_capillary_cutoff = None
     if payload_radius is not None and payload_height is not None:
         payload_volume = np.pi * payload_radius**2 * payload_height
@@ -293,6 +308,16 @@ def build_common_config(params):
         payload_mass = payload_density * payload_volume
     if fluid_drag is not None and payload_drag_factor is not None:
         payload_drag = fluid_drag * payload_drag_factor
+    if payload_size is not None:
+        radius_of_gyration_sq = np.sum(payload_size**2) / 12.0
+        if payload_mass is not None:
+            payload_inertia = payload_mass * radius_of_gyration_sq
+        if payload_drag is not None:
+            payload_angular_drag = (
+                payload_drag
+                * radius_of_gyration_sq
+                * payload_angular_drag_factor
+            )
     if payload_capillary_range is not None:
         payload_capillary_cutoff = 3 * payload_capillary_range
 
@@ -341,12 +366,16 @@ def build_common_config(params):
         T_EVAL=t_eval,
         SOLVER_PROGRESS_INTERVAL=solver_progress_interval,
         PAYLOAD_RADIUS=payload_radius,
+        PAYLOAD_SIZE=payload_size,
         PAYLOAD_HEIGHT=payload_height,
         PAYLOAD_DENSITY=payload_density,
         PAYLOAD_DRAG_FACTOR=payload_drag_factor,
         PAYLOAD_VOLUME=payload_volume,
         PAYLOAD_MASS=payload_mass,
         PAYLOAD_DRAG=payload_drag,
+        PAYLOAD_INERTIA=payload_inertia,
+        PAYLOAD_ANGULAR_DRAG=payload_angular_drag,
+        PAYLOAD_ANGULAR_DRAG_FACTOR=payload_angular_drag_factor,
         CONTACT_STIFFNESS=contact_stiffness,
         CONTACT_DAMPING=contact_damping,
         PAYLOAD_CAPILLARY_GAIN=payload_capillary_gain,
@@ -354,4 +383,6 @@ def build_common_config(params):
         PAYLOAD_CAPILLARY_CUTOFF=payload_capillary_cutoff,
         PAYLOAD_INITIAL_POS=payload_initial_pos,
         PAYLOAD_INITIAL_VEL=payload_initial_vel,
+        PAYLOAD_INITIAL_ANGLE=payload_initial_angle,
+        PAYLOAD_INITIAL_ANGULAR_VEL=payload_initial_angular_vel,
     )

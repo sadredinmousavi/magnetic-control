@@ -125,7 +125,7 @@ PARAMS = {
     "TARGET_SCHEDULE": TARGET_SCHEDULE,
     "INITIAL_ROBOT_POSITIONS": INITIAL_ROBOT_POSITIONS,
 
-    "DISH_RADIUS": WORKSPACE_RADIUS,
+    # "DISH_RADIUS": WORKSPACE_RADIUS,  # dont need to override
     "GRID_MIN": -0.3,
     "GRID_MAX": 0.3,
     "T_SPAN": (0.0, TARGET_SCHEDULE[-1][0] + PATH_STEP_DURATION),
@@ -134,10 +134,10 @@ PARAMS = {
     "SOLVER_MAX_STEP": 0.05,
     "ROBOT_INTERACTION_SCALE": 0.25, # for testing purposes
 
-    "ANIMATION_TITLE": "Swarm Control Through 30%-Enlarged Path-v3 CAD Geometry",
+    "ANIMATION_TITLE": "Shape and Orientation Regulation Along the Path Tangent",
     "ANIMATION_DRAW_TRAJECTORIES": False,
     "ANIMATION_DRAW_TARGET_TRAJECTORY": True,
-    "ANIMATION_DRAW_TARGET_POINTS": True,
+    "ANIMATION_DRAW_TARGET_POINTS": False,
 
     "WALL_SEGMENTS": WALL_SEGMENTS,
     "WALL_STIFFNESS": 5e-4,

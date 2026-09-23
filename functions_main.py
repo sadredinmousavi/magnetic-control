@@ -391,6 +391,120 @@ def calculate_robot_payload_interaction_force(
     return F_total
 
 
+def calculate_robot_rectangular_payload_interaction_force(
+    robot_pos,
+    robot_vel,
+    payload_pos,
+    payload_vel,
+    robot_radius,
+    payload_size,
+    k_contact,
+    c_contact,
+    capillary_gain,
+    capillary_range,
+    capillary_cutoff,
+    adhesion_gap=0.0,
+    payload_angle=0.0,
+    payload_omega=0.0,
+    return_contact_point=False,
+):
+    """Force exerted by a circular robot on a rotating rectangle.
+
+    Contact distance is measured from the robot center to the closest point
+    on the rectangle's four edges in its local frame. The returned force is
+    expressed in world coordinates and is applied to the payload. When
+    requested, the world-space contact point is also returned for torque.
+    """
+    robot_pos = np.asarray(robot_pos, dtype=float)
+    robot_vel = np.asarray(robot_vel, dtype=float)
+    payload_pos = np.asarray(payload_pos, dtype=float)
+    payload_vel = np.asarray(payload_vel, dtype=float)
+    payload_size = np.asarray(payload_size, dtype=float)
+
+    if payload_size.shape != (2,) or np.any(payload_size <= 0):
+        raise ValueError("payload_size must contain two positive dimensions.")
+
+    cos_angle = np.cos(payload_angle)
+    sin_angle = np.sin(payload_angle)
+
+    def to_local(vector):
+        return np.array([
+            cos_angle * vector[0] + sin_angle * vector[1],
+            -sin_angle * vector[0] + cos_angle * vector[1],
+        ])
+
+    def to_world(vector):
+        return np.array([
+            cos_angle * vector[0] - sin_angle * vector[1],
+            sin_angle * vector[0] + cos_angle * vector[1],
+        ])
+
+    half_size = payload_size / 2.0
+    local_pos = to_local(robot_pos - payload_pos)
+    inside = np.all(np.abs(local_pos) <= half_size)
+
+    if inside:
+        edge_distances = np.array([
+            local_pos[0] + half_size[0],
+            half_size[0] - local_pos[0],
+            local_pos[1] + half_size[1],
+            half_size[1] - local_pos[1],
+        ])
+        nearest_edge = int(np.argmin(edge_distances))
+        inward_normals = np.array([
+            [1.0, 0.0],
+            [-1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, -1.0],
+        ])
+        normal_local = inward_normals[nearest_edge]
+        edge_distance = edge_distances[nearest_edge]
+        contact_local = local_pos - edge_distance * normal_local
+        gap = -(robot_radius + edge_distance)
+    else:
+        contact_local = np.clip(local_pos, -half_size, half_size)
+        robot_to_rectangle = contact_local - local_pos
+        surface_distance = np.linalg.norm(robot_to_rectangle)
+        if surface_distance < 1e-12:
+            force = np.zeros(2)
+            contact_point = payload_pos + to_world(contact_local)
+            return (force, contact_point) if return_contact_point else force
+        normal_local = robot_to_rectangle / surface_distance
+        gap = surface_distance - robot_radius
+
+    normal = to_world(normal_local)
+    contact_offset = to_world(contact_local)
+    contact_point = payload_pos + contact_offset
+    contact_velocity = payload_vel + payload_omega * np.array([
+        -contact_offset[1], contact_offset[0]
+    ])
+    relative_velocity = contact_velocity - robot_vel
+    normal_relative_velocity = np.dot(relative_velocity, normal)
+    total_force = np.zeros(2)
+
+    if capillary_gain > 0 and gap <= capillary_cutoff:
+        effective_gap = max(gap - adhesion_gap, 0.0)
+        capillary_magnitude = capillary_gain * np.exp(
+            -effective_gap / capillary_range
+        )
+        if gap < 0:
+            penetration = -gap
+            capillary_magnitude *= np.exp(
+                -penetration / max(robot_radius, 1e-12)
+            )
+        total_force -= capillary_magnitude * normal
+
+    if gap < 0:
+        overlap = -gap
+        closing_speed = max(-normal_relative_velocity, 0.0)
+        contact_magnitude = k_contact * overlap + c_contact * closing_speed
+        total_force += contact_magnitude * normal
+
+    if return_contact_point:
+        return total_force, contact_point
+    return total_force
+
+
 
 
 

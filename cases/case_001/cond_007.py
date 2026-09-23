@@ -62,11 +62,11 @@ PARAMS = {
     "SOLVER_RTOL": 1e-4,
     "SOLVER_ATOL": 1e-7,
 
-    "ANIMATION_TITLE": "Payload Manipulation",
+    "ANIMATION_TITLE": "Object Transport Through Equilibrium-Point Control",
     "ANIMATION_DRAW_TRAJECTORIES": False,
     "ANIMATION_DRAW_TARGET_TRAJECTORY": True,
 
-    "PAYLOAD_RADIUS": 0.025,
+    "PAYLOAD_RADIUS": 0.015,
     "PAYLOAD_HEIGHT": 0.001,
     "PAYLOAD_DENSITY": 50,
     "PAYLOAD_DRAG_FACTOR": 50,

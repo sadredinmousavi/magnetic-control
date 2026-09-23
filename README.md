@@ -278,9 +278,68 @@ click-search filtering support very small robots without weakening full-video
 detection filtering. The automatic detection cleanup size is also selectable;
 use `1` for tiny robots and `3` or `5` to suppress progressively more noise.
 After processing, Phase 4 replays the original video with green `+` robot marks,
-a red `+` at their area-weighted center, and the workspace outline. Use the
+a red `+` at the equal-weight mean of robot positions, and the workspace outline.
+In Phase 2, enable **Circular detection area** to restrict automatic finding,
+manual robot searches, and full-video detection to that circle. Use **Adjust
+circle** to drag its center or edge, the diameter slider to resize, or **Fit to
+workspace** for an initial placement. **Fit to workspace** returns directly to
+robot-selection mode. When manually adjusting, uncheck **Adjust circle (blocks
+selection)** before selecting robots.
+The circle limits where color candidates may be found; it does not by itself
+make every matching blob a robot. Phase 2 marks the accepted references as
+`R1`, `R2`, and so on, and reports both the selected-robot count and the raw
+color-candidate count. During processing, each robot identity is matched to the
+nearest unclaimed candidate within the adjustable **Click/tracking radius**.
+Because the four calibration dots and camera are fixed, candidates within the
+adjustable **Calibration-dot exclusion** radius around P1-P4 are never promoted
+to robots. They remain auditable in the CSV with
+`exclusion_reason=calibration_marker`.
+For experiments containing a painted red payload, tick **Detect red cargo** in
+Phase 2. Cargo detection uses a separate red connected component and separate
+minimum-area/tracking-radius controls, so enabling it does not change robot
+selection. **Preview cargo** shows a cyan box and centroid around the measured
+shape; both approximately circular and rectangular shapes are supported. The
+largest red component initializes the cargo identity, after which frame-to-frame
+position continuity is enforced. Cargo measurements are saved separately as
+`<video_name>_cargo.csv`. Phase 4 can show or hide the cargo marker and its cyan
+translation trail, and circular exports preserve those selected overlays.
+Unmatched candidates are not drawn as robots or used for the red center, but
+remain in the CSV with `accepted=0`; accepted rows include their `robot_id`.
+With the circle disabled, detection covers the full frame, including outside
+the green calibration lines. This detection region is separate from Phase 4's
+export crop. Reprocess the video after changing the detection region; existing
+CSV detections do not change. The red trail uses closely spaced 4-pixel dashes and
+3-pixel gaps; this changes drawing density, not the measured sample count.
+The center uses no temporal smoothing or detected-area weights. In Phase 4,
+set **Expected robots** to the actual robot count: frames with a missing tracked
+robot have no center marker and leave gaps in the center track. Raw candidate
+positions and areas are preserved. A nearby false candidate can still replace
+a missed robot, so inspect the numbered individual marks when interpreting the
+trajectory. Reload existing detection CSVs to recompute their displayed
+centers; previously saved annotated videos must be regenerated. In Phase 4,
+robot markers can be switched between green `+` marks and hollow green
+rectangles that leave the detected robots visible. Phase 4 also provides an
+optional circular crop: drag inside the circle to move it, drag its edge or use
+the diameter slider to resize it, or choose **Fit to workspace** to initialize
+it around the calibration corners (limited to the frame size). The preview
+dims the outside area. **Export cropped video** saves the entire original video
+with the current overlay settings inside a square MP4 with black corners;
+exports are silent and can be cancelled. Detection and calibration coordinates
+remain in the original frame. Use the
 Robot marks and Lines switches to show or hide those overlays, or load an
 existing detection CSV for the selected video.
+Phase 4 can also export transparent annotations. **Transparent AVI** uses
+lossless RGBA PNG frames for editors that reject MOV; QuickTime Animation MOV
+remains an alternate save-dialog format. **Export PNG sequence** is the most
+portable fallback and includes `sequence_info.json` with the source frame rate.
+For Camtasia, **Export blue-screen MP4** creates a standard high-quality H.264
+video over pure blue (`#0000FF`). Put it above the original clip and apply
+Camtasia's **Remove a Color** effect to the blue background.
+Each option contains only the currently enabled workspace lines, robot/cargo
+marks, labels, and translation trails. It retains the original dimensions,
+frame rate, and frame count but contains no original image pixels or audio.
+Place the overlay on a track directly above the untouched original at the same
+start time; the original video therefore undergoes no quality-reducing re-encode.
 The Red center track switch draws its path as a dashed line up to the current
 frame; frames with no detections leave a break in the path.
 Identify the robots separately by clicking them or by choosing their color.

@@ -32,6 +32,7 @@ class RobotDetector:
         morphology_kernel_size=5,
         color_ranges=None,
         draw_annotations=True,
+        detection_mask=None,
     ):
         """Return an annotated BGR frame and a list of detected robots."""
         annotated = frame_bgr.copy()
@@ -46,11 +47,21 @@ class RobotDetector:
                     morphology_kernel_size,
                     color_ranges,
                     draw_annotations,
+                    detection_mask,
                 )
             )
 
         if mode in ("ArUco markers", "Color + ArUco"):
-            detections.extend(self.detect_aruco_markers(annotated))
+            aruco_frame = annotated
+            if detection_mask is not None:
+                aruco_frame = annotated.copy()
+                aruco_frame[detection_mask == 0] = 255
+            markers = self.detect_aruco_markers(aruco_frame)
+            if detection_mask is not None:
+                markers = [item for item in markers
+                           if detection_mask[item["center"][1], item["center"][0]]]
+                annotated[detection_mask != 0] = aruco_frame[detection_mask != 0]
+            detections.extend(markers)
 
         return annotated, detections
 
@@ -62,6 +73,7 @@ class RobotDetector:
         morphology_kernel_size=5,
         color_ranges=None,
         draw_annotations=True,
+        detection_mask=None,
     ):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
@@ -78,11 +90,15 @@ class RobotDetector:
                 ),
             )
 
+        if detection_mask is not None:
+            mask = cv2.bitwise_and(mask, detection_mask)
         kernel_size = max(1, int(morphology_kernel_size))
         if kernel_size > 1:
             kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        if detection_mask is not None:
+            mask = cv2.bitwise_and(mask, detection_mask)
         detections = []
         component_count, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
         components = sorted(
@@ -131,6 +147,7 @@ class RobotDetector:
                     "label": f"{color} {index}",
                     "center": (center_x, center_y),
                     "area": area,
+                    "bbox": (x, y, width, height),
                 }
             )
 

@@ -25,11 +25,16 @@ REQUIRED_KEYS = [
 
 
 def _initial_state(cfg):
-    state = np.zeros(cfg.NUM_ROBOTS * 4 + 4)
+    payload_state_count = 6 if cfg.PAYLOAD_SIZE is not None else 4
+    state = np.zeros(cfg.NUM_ROBOTS * 4 + payload_state_count)
     robot_states = state[:cfg.NUM_ROBOTS * 4].reshape(cfg.NUM_ROBOTS, 4)
     robot_states[:, :2] = np.asarray(cfg.INITIAL_ROBOT_POSITIONS)
-    state[-4:-2] = cfg.PAYLOAD_INITIAL_POS
-    state[-2:] = cfg.PAYLOAD_INITIAL_VEL
+    payload_idx = cfg.NUM_ROBOTS * 4
+    state[payload_idx:payload_idx + 2] = cfg.PAYLOAD_INITIAL_POS
+    state[payload_idx + 2:payload_idx + 4] = cfg.PAYLOAD_INITIAL_VEL
+    if cfg.PAYLOAD_SIZE is not None:
+        state[payload_idx + 4] = cfg.PAYLOAD_INITIAL_ANGLE
+        state[payload_idx + 5] = cfg.PAYLOAD_INITIAL_ANGULAR_VEL
     return state
 
 
@@ -94,6 +99,9 @@ def main(case_name=None):
             cfg.WALL_SEGMENTS, cfg.WALL_STIFFNESS, cfg.WALL_DAMPING,
             cfg.WALL_INTERACTION_RANGE, cfg.WALL_RECOVERY_DEPTH,
             cfg.ROBOT_INTERACTION_SCALE,
+            cfg.PAYLOAD_SIZE,
+            cfg.PAYLOAD_INERTIA,
+            cfg.PAYLOAD_ANGULAR_DRAG,
         )
 
     print("Solving dynamics... Press Ctrl+C to stop and save a partial video.")
@@ -134,12 +142,16 @@ def main(case_name=None):
         draw_sources=params.get("ANIMATION_DRAW_SOURCES", True),
         draw_all_targets=False,
         draw_active_target=params.get("ANIMATION_DRAW_ACTIVE_TARGET", True),
+        active_target_marker=params.get("ANIMATION_ACTIVE_TARGET_MARKER", "X"),
+        active_target_marker_size=params.get("ANIMATION_ACTIVE_TARGET_MARKER_SIZE", 180),
+        active_target_alpha=params.get("ANIMATION_ACTIVE_TARGET_ALPHA", 1.0),
         draw_target_trajectory=params.get("ANIMATION_DRAW_TARGET_TRAJECTORY", False),
         draw_target_points=params.get("ANIMATION_DRAW_TARGET_POINTS", False),
         plot_trajectories=params.get("ANIMATION_DRAW_TRAJECTORIES", False),
         plot_microrobots=True,
         robot_marker_size=params.get("ANIMATION_ROBOT_MARKER_SIZE", 55),
         payload_radius=cfg.PAYLOAD_RADIUS,
+        payload_size=cfg.PAYLOAD_SIZE,
         clip_field_to_dish=params.get("PLOT_FIELD_INSIDE_DISH", False),
         dish_center=params.get("DISH_CENTER", (0.0, 0.0)),
         dish_radius=params.get("DISH_RADIUS"),

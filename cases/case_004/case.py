@@ -50,6 +50,9 @@ PARAMS = {
 
     # --- Animation Parameters ---
     "ANIMATION_ROBOT_MARKER_SIZE": 8,
+    "ANIMATION_ACTIVE_TARGET_MARKER": "x",
+    "ANIMATION_ACTIVE_TARGET_MARKER_SIZE": 60,
+    "ANIMATION_ACTIVE_TARGET_ALPHA": 0.7,
 
     # --- Dynamics / Solver Parameters ---
     "USE_OVERDAMPED_DYNAMICS": False,

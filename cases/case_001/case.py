@@ -51,6 +51,9 @@ PARAMS = {
 
     # --- Animation Parameters ---
     "ANIMATION_ROBOT_MARKER_SIZE": 8,
+    "ANIMATION_ACTIVE_TARGET_MARKER": "x",
+    "ANIMATION_ACTIVE_TARGET_MARKER_SIZE": 60,
+    "ANIMATION_ACTIVE_TARGET_ALPHA": 0.7,
 
     # --- Payload Parameters ---
     # Disabled for this case: kept only to satisfy usage4.py's required keys.
