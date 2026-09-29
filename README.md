@@ -260,8 +260,9 @@ python .\experimental\gui004.py
 
 GUI004 is an offline microrobot detector. Select a recorded video, choose the
 detection mode/color/minimum area, and process it without real-time playback
-delays. It previews the latest annotated frame and saves an annotated MP4 and a
-detection CSV under `outputs/offline_detection/<video_name>/`. It can also be
+delays. It previews the latest annotated frame and saves a detection CSV under
+`outputs/offline_detection/<video_name>/`; video is encoded only when explicitly
+exported from Phase 4. It can also be
 started by double-clicking `03-gui004.bat`. Its editable geometry defaults are
 `h = 1 cm` and camera-to-dot-surface height `= 29 cm`; both values are recorded
 in the detection CSV. The four green calibration dots are defined as a
@@ -316,7 +317,7 @@ robot have no center marker and leave gaps in the center track. Raw candidate
 positions and areas are preserved. A nearby false candidate can still replace
 a missed robot, so inspect the numbered individual marks when interpreting the
 trajectory. Reload existing detection CSVs to recompute their displayed
-centers; previously saved annotated videos must be regenerated. In Phase 4,
+centers. In Phase 4,
 robot markers can be switched between green `+` marks and hollow green
 rectangles that leave the detected robots visible. Phase 4 also provides an
 optional circular crop: drag inside the circle to move it, drag its edge or use

@@ -10,6 +10,7 @@ class RobotDetector:
     """Detect colored robot bodies and optional ArUco identity markers."""
 
     COLOR_RANGES = {
+        "Dark contrast": [],
         "Red": [((0, 100, 70), (10, 255, 255)), ((170, 100, 70), (179, 255, 255))],
         "Green": [((35, 70, 50), (85, 255, 255))],
         "Blue": [((90, 70, 50), (135, 255, 255))],
@@ -75,20 +76,31 @@ class RobotDetector:
         draw_annotations=True,
         detection_mask=None,
     ):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-        ranges = color_ranges or self.COLOR_RANGES.get(
-            color, self.COLOR_RANGES["Red"]
-        )
-        for lower, upper in ranges:
-            mask = cv2.bitwise_or(
-                mask,
-                cv2.inRange(
-                    hsv,
-                    np.array(lower, dtype=np.uint8),
-                    np.array(upper, dtype=np.uint8),
-                ),
+        if color == "Dark contrast":
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            # Subtract each pixel from a smooth local-background estimate.
+            # This responds to tiny dark robots on uneven white illumination
+            # without depending on hue or saturation.
+            local_background = cv2.GaussianBlur(
+                gray, (0, 0), sigmaX=5.0, sigmaY=5.0
             )
+            contrast = cv2.subtract(local_background, gray)
+            mask = np.where(contrast >= 30, 255, 0).astype(np.uint8)
+        else:
+            hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+            mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+            ranges = color_ranges or self.COLOR_RANGES.get(
+                color, self.COLOR_RANGES["Red"]
+            )
+            for lower, upper in ranges:
+                mask = cv2.bitwise_or(
+                    mask,
+                    cv2.inRange(
+                        hsv,
+                        np.array(lower, dtype=np.uint8),
+                        np.array(upper, dtype=np.uint8),
+                    ),
+                )
 
         if detection_mask is not None:
             mask = cv2.bitwise_and(mask, detection_mask)

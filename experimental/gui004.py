@@ -92,6 +92,231 @@ def match_robot_candidates(candidates, reference_points, max_distance):
     return selected
 
 
+def match_compact_swarm_candidates(
+    candidates,
+    reference_points,
+    expected_count,
+    individual_radius,
+    predicted_center=None,
+    swarm_radius=None,
+):
+    """Match candidates as one compact swarm around its previous center."""
+    references = np.asarray(reference_points, dtype=float)
+    if references.size == 0 or not candidates or expected_count <= 0:
+        return []
+
+    swarm_center = (
+        references.mean(axis=0)
+        if predicted_center is None
+        else np.asarray(predicted_center, dtype=float)
+    )
+    formation_radius = float(np.max(np.linalg.norm(
+        references - swarm_center, axis=1
+    )))
+    # The group gate follows the equilibrium neighborhood. It is deliberately
+    # wider than an individual gate so robots may rotate or exchange places
+    # without being discarded, while distant workspace artifacts stay out.
+    if swarm_radius is None:
+        swarm_radius = max(
+            2.5 * float(individual_radius),
+            1.5 * formation_radius + float(individual_radius),
+        )
+    else:
+        swarm_radius = float(swarm_radius)
+    distances_to_swarm = np.asarray([
+        np.linalg.norm(np.asarray(candidate["center"], dtype=float) - swarm_center)
+        for candidate in candidates
+    ])
+    nearby_indices = np.flatnonzero(distances_to_swarm <= swarm_radius)
+    if len(nearby_indices) == 0:
+        return []
+
+    # If dark noise also exists in the workspace, retain only the candidates
+    # closest to the predicted swarm center.
+    nearby_indices = np.asarray(sorted(
+        nearby_indices,
+        key=lambda index: (
+            -float(candidates[int(index)].get("area", 1.0)),
+            distances_to_swarm[int(index)],
+        ),
+    )[:expected_count])
+    nearby = [candidates[int(index)] for index in nearby_indices]
+
+    # Inside the compact swarm gate, use global assignment without the narrow
+    # per-robot cutoff. The particles are visually identical, so maintaining a
+    # stable group is more meaningful than rejecting robots when identities
+    # exchange around the equilibrium point.
+    candidate_centers = np.asarray(
+        [candidate["center"] for candidate in nearby], dtype=float
+    )
+    costs = np.linalg.norm(
+        references[:, None, :] - candidate_centers[None, :, :], axis=2
+    )
+    reference_indices, candidate_indices = linear_sum_assignment(costs)
+    selected = []
+    for reference_index, candidate_index in sorted(
+        zip(reference_indices, candidate_indices)
+    ):
+        detection = dict(nearby[int(candidate_index)])
+        detection["robot_id"] = int(reference_index) + 1
+        detection["candidate_index"] = int(
+            nearby[int(candidate_index)].get(
+                "candidate_index", nearby_indices[int(candidate_index)]
+            )
+        )
+        detection["match_distance_px"] = float(
+            costs[reference_index, candidate_index]
+        )
+        detection["swarm_reacquired"] = (
+            detection["match_distance_px"] > individual_radius
+        )
+        selected.append(detection)
+    return selected
+
+
+def find_compact_swarm_candidates(candidates, expected_count, swarm_radius):
+    """Find the strongest dense group when no previous swarm center exists."""
+    if expected_count <= 0 or not candidates or swarm_radius <= 0:
+        return []
+    centers = np.asarray([item["center"] for item in candidates], dtype=float)
+    areas = np.asarray([
+        max(float(item.get("area", 1.0)), 1.0) for item in candidates
+    ])
+    best_indices = None
+    best_score = None
+    best_partial = np.array([], dtype=int)
+
+    for seed in centers:
+        distances = np.linalg.norm(centers - seed, axis=1)
+        neighborhood = np.flatnonzero(distances <= 2.0 * swarm_radius)
+        neighborhood = np.asarray(sorted(
+            neighborhood,
+            key=lambda index: (-areas[index], distances[index]),
+        ))
+        if len(neighborhood) > len(best_partial):
+            best_partial = neighborhood[:expected_count]
+        if len(neighborhood) < expected_count:
+            continue
+        chosen = neighborhood[:expected_count]
+        group_center = centers[chosen].mean(axis=0)
+        radial_distances = np.linalg.norm(
+            centers[chosen] - group_center, axis=1
+        )
+        if np.max(radial_distances) > swarm_radius:
+            continue
+        compactness = float(np.mean(radial_distances**2)) / swarm_radius**2
+        strength = float(np.mean(np.log1p(areas[chosen])))
+        score = compactness - 0.05 * strength
+        if best_score is None or score < best_score:
+            best_score = score
+            best_indices = chosen
+
+    chosen = best_indices if best_indices is not None else best_partial
+    return [candidates[int(index)] for index in chosen]
+
+
+def track_robot_candidates_bidirectionally(
+    eligible_frames,
+    anchor_frame,
+    initial_robot_points,
+    tracking_radius,
+    anchor_circle=None,
+):
+    """Track identities backward and forward from a user-labelled frame."""
+    frame_count = len(eligible_frames)
+    if frame_count == 0:
+        return []
+    if not 0 <= anchor_frame < frame_count:
+        raise ValueError(
+            f"Robot reference frame {anchor_frame} is outside the video."
+        )
+
+    initial_points = [tuple(point) for point in initial_robot_points]
+    selections = [[] for _ in range(frame_count)]
+    circle_centers = [None for _ in range(frame_count)]
+
+    expected_count = len(initial_points)
+
+    initial_center = np.asarray(initial_points, dtype=float).mean(axis=0)
+    if anchor_circle is None:
+        anchor_center = initial_center
+        initial_formation_radius = max(
+            np.linalg.norm(np.asarray(initial_points) - initial_center, axis=1)
+        )
+        swarm_radius = max(
+            2.5 * float(tracking_radius),
+            1.5 * float(initial_formation_radius) + float(tracking_radius),
+        )
+    else:
+        anchor_center = np.asarray(anchor_circle[:2], dtype=float)
+        swarm_radius = float(anchor_circle[2])
+        if swarm_radius <= 0:
+            raise ValueError("The Phase 2 swarm-circle radius must be positive.")
+
+    def match_frame(frame_number, reference_points, predicted_center):
+        return match_compact_swarm_candidates(
+            eligible_frames[frame_number],
+            reference_points,
+            expected_count,
+            tracking_radius,
+            predicted_center=predicted_center,
+            swarm_radius=swarm_radius,
+        )
+
+    def track_direction(frame_numbers, reference_points, starting_center):
+        references = list(reference_points)
+        center = np.asarray(starting_center, dtype=float)
+        velocity = np.zeros(2, dtype=float)
+        for frame_number in frame_numbers:
+            predicted_center = center + velocity
+            selected = match_frame(
+                frame_number, references, predicted_center
+            )
+            selections[frame_number] = selected
+            for detection in selected:
+                references[detection["robot_id"] - 1] = detection["center"]
+            if selected:
+                measured_center = np.mean(
+                    [item["center"] for item in selected], axis=0
+                )
+                completeness = min(1.0, len(selected) / expected_count)
+                updated_center = (
+                    completeness * measured_center
+                    + (1.0 - completeness) * predicted_center
+                )
+                velocity = 0.7 * velocity + 0.3 * (updated_center - center)
+                center = updated_center
+            else:
+                center = predicted_center
+            circle_centers[frame_number] = tuple(center)
+        return references, center
+
+    anchor_selected = match_frame(anchor_frame, initial_points, anchor_center)
+    selections[anchor_frame] = anchor_selected
+    anchor_points = list(initial_points)
+    for detection in anchor_selected:
+        anchor_points[detection["robot_id"] - 1] = detection["center"]
+
+    if anchor_selected:
+        measured_anchor = np.mean(
+            [item["center"] for item in anchor_selected], axis=0
+        )
+        completeness = min(1.0, len(anchor_selected) / expected_count)
+        anchor_center = (
+            completeness * measured_anchor
+            + (1.0 - completeness) * anchor_center
+        )
+    circle_centers[anchor_frame] = tuple(anchor_center)
+
+    track_direction(
+        range(anchor_frame + 1, frame_count), anchor_points, anchor_center
+    )
+    track_direction(
+        range(anchor_frame - 1, -1, -1), anchor_points, anchor_center
+    )
+    return selections, circle_centers, swarm_radius
+
+
 def exclude_calibration_markers(candidates, calibration_points, radius):
     """Separate candidates near fixed calibration dots without deleting data."""
     eligible = []
@@ -228,17 +453,6 @@ def draw_detection_overlays(frame_bgr, detections, workspace_points=(),
                     2,
                     cv2.LINE_AA,
                 )
-            if detection.get("robot_id") is not None:
-                cv2.putText(
-                    annotated,
-                    f"R{detection['robot_id']}",
-                    (center[0] + 11, center[1] - 9),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 255, 0),
-                    1,
-                    cv2.LINE_AA,
-                )
         center = robot_center_for(detections, expected_count)
         if center is not None:
             cv2.drawMarker(annotated, tuple(np.rint(center).astype(int)), (0, 0, 255),
@@ -262,6 +476,54 @@ def read_detections_csv(csv_path):
                 "robot_id": int(row["robot_id"]) if row.get("robot_id") else None,
             })
     return by_frame
+
+
+def read_detection_summary_csv(csv_path):
+    """Read saved swarm centers/count, with inference for legacy CSV files."""
+    saved_centers = {}
+    saved_roi_centers = {}
+    expected_counts = []
+    accepted_per_frame = {}
+    with Path(csv_path).open(newline="", encoding="utf-8") as csv_file:
+        for row in csv.DictReader(csv_file):
+            if not row.get("frame"):
+                continue
+            frame = int(row["frame"])
+            accepted = row.get("accepted", "").strip().lower()
+            if accepted in ("1", "true", "yes"):
+                accepted_per_frame[frame] = accepted_per_frame.get(frame, 0) + 1
+            if row.get("expected_robot_count"):
+                expected_counts.append(int(row["expected_robot_count"]))
+            if (row.get("robot_center_x_px")
+                    and row.get("robot_center_y_px")):
+                saved_centers[frame] = (
+                    float(row["robot_center_x_px"]),
+                    float(row["robot_center_y_px"]),
+                )
+            if (row.get("moving_roi_center_x_px")
+                    and row.get("moving_roi_center_y_px")):
+                saved_roi_centers[frame] = (
+                    float(row["moving_roi_center_x_px"]),
+                    float(row["moving_roi_center_y_px"]),
+                )
+
+    if expected_counts:
+        frequencies = {
+            count: expected_counts.count(count) for count in set(expected_counts)
+        }
+        expected_count = max(frequencies, key=lambda count: (frequencies[count], count))
+    else:
+        # Older files did not store the requested count. The most frequent
+        # accepted count recovers it without requiring another detection run.
+        observed_counts = [count for count in accepted_per_frame.values() if count]
+        frequencies = {
+            count: observed_counts.count(count) for count in set(observed_counts)
+        }
+        expected_count = (
+            max(frequencies, key=lambda count: (frequencies[count], count))
+            if frequencies else None
+        )
+    return saved_centers, saved_roi_centers, expected_count
 
 
 def read_cargo_csv(csv_path):
@@ -291,6 +553,15 @@ def circle_detection_mask(shape, circle):
     x, y, radius = circle
     yy, xx = np.ogrid[:shape[0], :shape[1]]
     return (((xx-x)**2 + (yy-y)**2 <= radius**2) * 255).astype(np.uint8)
+
+
+def workspace_detection_mask(shape, calibration_points):
+    """Return the calibrated four-corner workspace as an 8-bit mask."""
+    mask = np.zeros(shape, dtype=np.uint8)
+    points = np.asarray(calibration_points, dtype=np.int32)
+    if points.shape == (4, 2):
+        cv2.fillConvexPoly(mask, points, 255)
+    return mask
 
 
 def circular_video_frame(frame, center, radius, preview=False):
@@ -376,6 +647,116 @@ def render_annotation_frame(
     if show_cargo:
         frame = draw_cargo_overlay(frame, cargo_detections.get(frame_number))
     return frame
+
+
+def render_selected_video_frame(
+    frame,
+    frame_number,
+    detections,
+    center_track,
+    workspace,
+    show_robots,
+    show_lines,
+    show_center_track,
+    marker_style,
+    expected_count,
+    cargo_detections,
+    cargo_track,
+    show_cargo,
+    show_cargo_track,
+    crop_center=None,
+    crop_radius=None,
+):
+    """Render the original frame with exactly the selected Phase 4 options."""
+    rendered = frame
+    if show_center_track:
+        rendered = draw_dashed_center_track(rendered, center_track, frame_number)
+    if show_cargo_track and cargo_track:
+        rendered = draw_dashed_center_track(
+            rendered, cargo_track, frame_number, color=(255, 255, 0)
+        )
+    rendered = draw_detection_overlays(
+        rendered, detections.get(frame_number, []), workspace,
+        show_robots, show_lines, marker_style, expected_count,
+    )
+    if show_cargo:
+        rendered = draw_cargo_overlay(
+            rendered, cargo_detections.get(frame_number)
+        )
+    if crop_center is not None and crop_radius is not None:
+        rendered = circular_video_frame(rendered, crop_center, crop_radius)
+    return rendered
+
+
+def export_selected_video(
+    source, destination, detections, center_track, workspace,
+    show_robots, show_lines, show_center_track, marker_style, expected_count,
+    cargo_detections, cargo_track, show_cargo, show_cargo_track,
+    crop_center, crop_radius, stop_event, updates,
+):
+    """Export the source video with the selected Phase 4 display options."""
+    capture = cv2.VideoCapture(str(source))
+    writer = None
+    temporary = None
+    try:
+        if not capture.isOpened():
+            raise ValueError("Could not open the original video.")
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        fps = fps if np.isfinite(fps) and fps > 0 else 30.0
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        if crop_center is not None and crop_radius is not None:
+            crop_radius = max(1, int(round(crop_radius)))
+            output_size = (2 * crop_radius, 2 * crop_radius)
+        else:
+            output_size = (width, height)
+        descriptor, temporary = tempfile.mkstemp(
+            suffix=".mp4", prefix=".video-export-",
+            dir=Path(destination).parent,
+        )
+        os.close(descriptor)
+        writer = cv2.VideoWriter(
+            temporary, cv2.VideoWriter_fourcc(*"mp4v"), fps, output_size
+        )
+        if not writer.isOpened():
+            raise ValueError("Could not initialize the MP4 encoder.")
+
+        frame_number = 0
+        while not stop_event.is_set():
+            success, frame = capture.read()
+            if not success:
+                break
+            writer.write(render_selected_video_frame(
+                frame, frame_number, detections, center_track, workspace,
+                show_robots, show_lines, show_center_track, marker_style,
+                expected_count, cargo_detections, cargo_track, show_cargo,
+                show_cargo_track, crop_center, crop_radius,
+            ))
+            frame_number += 1
+            if frame_number % 30 == 0:
+                updates.put(("progress", frame_number, total))
+
+        writer.release()
+        writer = None
+        if stop_event.is_set():
+            updates.put(("cancelled",))
+        elif not frame_number or (total > 0 and frame_number < total):
+            raise ValueError(
+                f"Video ended unexpectedly after {frame_number} of {total} frames."
+            )
+        else:
+            os.replace(temporary, destination)
+            temporary = None
+            updates.put(("done", str(destination), frame_number))
+    except Exception as error:
+        updates.put(("error", str(error)))
+    finally:
+        capture.release()
+        if writer is not None:
+            writer.release()
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
 
 
 def export_annotation_overlay(
@@ -755,6 +1136,7 @@ class OfflineDetectionGUI:
         self.display_transform = None
         self.calibration_points = []
         self.robot_points = []
+        self.robot_reference_frame_number = None
         self.current_cargo_detection = None
         self.learned_robot_color_ranges = None
         self.timeline_is_updating = False
@@ -775,6 +1157,9 @@ class OfflineDetectionGUI:
         self.crop_export_thread = None
         self.crop_export_stop = threading.Event()
         self.crop_export_updates = queue.Queue()
+        self.video_export_thread = None
+        self.video_export_stop = threading.Event()
+        self.video_export_updates = queue.Queue()
         self.overlay_export_thread = None
         self.overlay_export_stop = threading.Event()
         self.overlay_export_updates = queue.Queue()
@@ -905,7 +1290,7 @@ class OfflineDetectionGUI:
         tk.Label(robot_finding, text="Robot color").grid(
             row=0, column=2, sticky="e"
         )
-        self.detection_color_var = tk.StringVar(value="Learned from clicks")
+        self.detection_color_var = tk.StringVar(value="Dark contrast")
         tk.OptionMenu(
             robot_finding,
             self.detection_color_var,
@@ -916,7 +1301,7 @@ class OfflineDetectionGUI:
         tk.Label(robot_finding, text="Detection min area (px²)").grid(
             row=0, column=4, sticky="e"
         )
-        self.minimum_area_var = tk.StringVar(value="20")
+        self.minimum_area_var = tk.StringVar(value="1")
         tk.Entry(
             robot_finding, textvariable=self.minimum_area_var, width=8
         ).grid(row=0, column=5, padx=4, pady=4)
@@ -943,7 +1328,7 @@ class OfflineDetectionGUI:
             robot_finding, textvariable=self.robot_snap_minimum_area_var, width=8
         ).grid(row=1, column=5, padx=4, pady=4, sticky="w")
         tk.Button(
-            robot_finding, text="Find by color", command=self.find_robots_by_color
+            robot_finding, text="Find robots", command=self.find_robots_by_color
         ).grid(row=2, column=4, padx=4)
         tk.Button(
             robot_finding, text="Clear robots", command=self.clear_robot_points
@@ -1040,7 +1425,7 @@ class OfflineDetectionGUI:
         )
         tk.Label(
             processing,
-            text="Uses the Phase 2 color and enabled circular detection area.",
+            text="Uses dark contrast inside the moving Phase 2 swarm circle.",
             anchor="w",
         ).grid(row=1, column=0, columnspan=6, sticky="ew")
 
@@ -1104,8 +1489,31 @@ class OfflineDetectionGUI:
             row=3, column=0, columnspan=6, sticky="w"
         )
 
+        video_export_controls = ttk.LabelFrame(
+            post_processing, text="Video export", padding=6
+        )
+        video_export_controls.grid(
+            row=4, column=0, columnspan=6, sticky="ew", pady=(6, 0)
+        )
+        self.video_export_button = ttk.Button(
+            video_export_controls, text="Export video",
+            command=self.start_video_export,
+        )
+        self.video_export_button.grid(row=0, column=0, padx=4)
+        self.video_export_cancel_button = ttk.Button(
+            video_export_controls, text="Cancel export", state="disabled",
+            command=self.video_export_stop.set,
+        )
+        self.video_export_cancel_button.grid(row=0, column=1, padx=4)
+        self.video_export_status = ttk.Label(
+            video_export_controls,
+            text="Exports the original video with exactly the checked options above.",
+        )
+        self.video_export_status.grid(row=0, column=2, sticky="w", padx=8)
+        video_export_controls.columnconfigure(2, weight=1)
+
         crop_controls = ttk.LabelFrame(post_processing, text="Circular crop", padding=6)
-        crop_controls.grid(row=4, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+        crop_controls.grid(row=5, column=0, columnspan=6, sticky="ew", pady=(6, 0))
         crop_controls.columnconfigure(2, weight=1)
         self.crop_enabled_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(crop_controls, text="Enable", variable=self.crop_enabled_var,
@@ -1136,7 +1544,7 @@ class OfflineDetectionGUI:
         overlay_controls = ttk.LabelFrame(
             post_processing, text="Transparent annotation overlay", padding=6
         )
-        overlay_controls.grid(row=5, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+        overlay_controls.grid(row=6, column=0, columnspan=6, sticky="ew", pady=(6, 0))
         self.overlay_chroma_button = ttk.Button(
             overlay_controls,
             text="Export blue-screen MP4",
@@ -1168,11 +1576,11 @@ class OfflineDetectionGUI:
         )
         self.overlay_export_status.grid(row=1, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(post_processing, text="Expected robots:").grid(row=6, column=0, sticky="w")
+        ttk.Label(post_processing, text="Expected robots:").grid(row=7, column=0, sticky="w")
         ttk.Entry(post_processing, textvariable=self.robot_count_var, width=6
-                  ).grid(row=6, column=1, sticky="w")
+                  ).grid(row=7, column=1, sticky="w")
         ttk.Label(post_processing, text="Center: equal weights · count mismatch = gap · no smoothing"
-                  ).grid(row=6, column=2, columnspan=4, sticky="w")
+                  ).grid(row=7, column=2, columnspan=4, sticky="w")
         self.robot_count_var.trace_add("write", self.on_center_count_changed)
 
         self.status_label = tk.Label(
@@ -1240,6 +1648,7 @@ class OfflineDetectionGUI:
         self.timeline.config(to=max(self.video_total_frames - 1, 1))
         self.calibration_points = []
         self.robot_points = []
+        self.robot_reference_frame_number = None
         self.current_cargo_detection = None
         self.learned_robot_color_ranges = None
         self.post_detections = {}
@@ -1272,6 +1681,9 @@ class OfflineDetectionGUI:
             return
         try:
             detections = read_detections_csv(csv_path)
+            saved_centers, _saved_roi_centers, saved_expected_count = (
+                read_detection_summary_csv(csv_path)
+            )
             cargo_path = Path(csv_path).with_name(
                 Path(csv_path).name.replace("_detections.csv", "_cargo.csv")
             )
@@ -1295,11 +1707,22 @@ class OfflineDetectionGUI:
             self.video_total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
             self.timeline.config(to=max(self.video_total_frames - 1, 1))
         self.pause_post_playback()
+        if saved_expected_count is not None:
+            self.robot_count_var.set(str(saved_expected_count))
         self.post_detections = detections
         self.post_cargo_detections = cargo_detections
+        center_frames = sorted(set(detections) | set(saved_centers))
         self.post_center_track = [
-            (frame, robot_center_for(detections[frame], self.expected_center_count()))
-            for frame in sorted(detections)
+            (
+                frame,
+                saved_centers.get(
+                    frame,
+                    robot_center_for(
+                        detections.get(frame, []), self.expected_center_count()
+                    ),
+                ),
+            )
+            for frame in center_frames
         ]
         self.post_cargo_track = [
             (frame, cargo_detections[frame]["center"])
@@ -1517,6 +1940,79 @@ class OfflineDetectionGUI:
     def end_crop_drag(self, _event=None):
         self.crop_drag = None
         self.detection_drag = None
+
+    def start_video_export(self):
+        if (self.video_export_thread is not None
+                and self.video_export_thread.is_alive()):
+            return
+        if self.current_video_path is None:
+            messagebox.showerror("Video export", "Open the original video first.")
+            return
+        destination = filedialog.asksaveasfilename(
+            title="Export video with selected overlays",
+            defaultextension=".mp4",
+            initialfile=f"{self.current_video_path.stem}_annotated.mp4",
+            filetypes=[("MP4 video", "*.mp4")],
+        )
+        if not destination:
+            return
+        if Path(destination).resolve() == Path(self.current_video_path).resolve():
+            messagebox.showerror(
+                "Video export", "Choose a different file from the original video."
+            )
+            return
+
+        crop_enabled = self.crop_enabled_var.get()
+        crop_center = tuple(self.crop_center) if crop_enabled else None
+        crop_radius = self.crop_radius if crop_enabled else None
+        self.pause_post_playback()
+        self.video_export_stop.clear()
+        self.video_export_button.config(state="disabled")
+        self.video_export_cancel_button.config(state="normal")
+        self.video_export_status.config(
+            text="Exporting with the current checked options…"
+        )
+        self.video_export_thread = threading.Thread(
+            target=export_selected_video,
+            args=(
+                self.current_video_path, destination,
+                dict(self.post_detections), list(self.post_center_track),
+                list(self.calibration_points), self.show_robot_marks_var.get(),
+                self.show_lines_var.get(), self.show_center_track_var.get(),
+                "rectangle" if self.post_robot_marker_style_var.get()
+                == "Hollow rectangle" else "cross",
+                self.expected_center_count(), dict(self.post_cargo_detections),
+                list(self.post_cargo_track), self.show_cargo_var.get(),
+                self.show_cargo_track_var.get(), crop_center, crop_radius,
+                self.video_export_stop, self.video_export_updates,
+            ),
+            daemon=True,
+        )
+        self.video_export_thread.start()
+        self.root.after(100, self.poll_video_export)
+
+    def poll_video_export(self):
+        finished = False
+        while not self.video_export_updates.empty():
+            item = self.video_export_updates.get_nowait()
+            if item[0] == "progress":
+                self.video_export_status.config(
+                    text=f"Exporting frame {item[1]} / {item[2] or '?'}…"
+                )
+            else:
+                finished = True
+                text = (
+                    f"Saved {item[2]} frames: {item[1]}"
+                    if item[0] == "done"
+                    else "Video export cancelled."
+                    if item[0] == "cancelled"
+                    else f"Video export failed: {item[1]}"
+                )
+                self.video_export_status.config(text=text)
+                self.video_export_button.config(state="normal")
+                self.video_export_cancel_button.config(state="disabled")
+        if not finished:
+            self.root.after(100, self.poll_video_export)
 
     def start_crop_export(self):
         if self.crop_export_thread is not None and self.crop_export_thread.is_alive():
@@ -2005,6 +2501,7 @@ class OfflineDetectionGUI:
         )
 
     def add_robot_point(self, point):
+        self.pause_playback()
         mask = self.detection_mask()
         if mask is not None and not mask[point[1], point[0]]:
             self.robot_status_label.config(text="Select a robot inside the circular detection area.", fg="orange")
@@ -2039,10 +2536,22 @@ class OfflineDetectionGUI:
                 fg="orange",
             )
             return
+        if (self.robot_points
+                and self.robot_reference_frame_number != self.current_frame_number):
+            self.robot_status_label.config(
+                text=(
+                    "All robot references must come from one frame. Clear the "
+                    "robots, choose one frame, and select them again."
+                ),
+                fg="orange",
+            )
+            return
         snap_result = self.snap_robot_point(point)
         if snap_result is None:
             return
         snapped_point, snapped, distance = snap_result
+        if not self.robot_points:
+            self.robot_reference_frame_number = self.current_frame_number
         self.robot_points.append(snapped_point)
         learned_detail = ""
         if self.detection_color_var.get() == "Learned from clicks":
@@ -2057,7 +2566,10 @@ class OfflineDetectionGUI:
             )
             status_color = "orange"
         self.robot_status_label.config(
-            text=f"{selected_count}/{robot_count} robots selected. {detail}{learned_detail}",
+            text=(
+                f"{selected_count}/{robot_count} robots selected on frame "
+                f"{self.robot_reference_frame_number}. {detail}{learned_detail}"
+            ),
             fg=status_color,
         )
         self.render_calibration_frame()
@@ -2317,6 +2829,7 @@ class OfflineDetectionGUI:
         self.render_calibration_frame()
 
     def find_robots_by_color(self):
+        self.pause_playback()
         if self.current_frame_bgr is None:
             messagebox.showerror("Video Error", "Choose a video first.")
             return
@@ -2377,6 +2890,9 @@ class OfflineDetectionGUI:
                 accepted["robot_id"] = robot_id
                 selected.append(accepted)
         self.robot_points = [item["center"] for item in selected]
+        self.robot_reference_frame_number = (
+            self.current_frame_number if self.robot_points else None
+        )
         self.robot_finding_mode_var.set("Color detection")
         found = len(self.robot_points)
         self.robot_status_label.config(
@@ -2384,6 +2900,7 @@ class OfflineDetectionGUI:
                 f"Selected {found}/{robot_count} robots from "
                 f"{len(eligible)} eligible color candidates; "
                 f"{len(excluded_indices)} calibration-dot candidate(s) ignored. "
+                f"Tracking anchor: frame {self.robot_reference_frame_number}. "
                 "Verify the R labels."
             ),
             fg="green" if found == robot_count else "orange",
@@ -2398,6 +2915,7 @@ class OfflineDetectionGUI:
 
     def clear_robot_points(self):
         self.robot_points = []
+        self.robot_reference_frame_number = None
         self.robot_status_label.config(
             text="Robot selections cleared. Click robots or find them by color.",
             fg="blue",
@@ -2608,12 +3126,59 @@ class OfflineDetectionGUI:
             if cargo_settings is None:
                 return
             cargo_minimum_area, cargo_tracking_radius = cargo_settings
+        mode = "Color blobs"
+        color = self.detection_color_var.get()
+
+        # A small enabled circle is sufficient to initialize the swarm. This
+        # avoids requiring six manual clicks when local dark contrast already
+        # separates the robots from the bright workspace.
         if len(self.robot_points) != robot_count:
-            messagebox.showerror(
-                "Robot Finding Error",
-                f"Complete Phase 2 by selecting or finding all {robot_count} robots.",
-            )
-            return
+            if (self.detection_circle_enabled.get()
+                    and self.detection_circle is not None
+                    and self.current_frame_bgr is not None):
+                _, anchor_candidates = self.detector.process(
+                    self.current_frame_bgr,
+                    mode=mode,
+                    color=color,
+                    minimum_area=minimum_area,
+                    morphology_kernel_size=filter_size,
+                    color_ranges=color_ranges,
+                    draw_annotations=False,
+                    detection_mask=self.detection_mask(),
+                )
+                anchor_eligible, _ = exclude_calibration_markers(
+                    anchor_candidates,
+                    self.calibration_points,
+                    exclusion_radius,
+                )
+                circle_center = np.asarray(self.detection_circle[:2], dtype=float)
+                anchor_eligible.sort(key=lambda item: (
+                    -float(item.get("area", 1.0)),
+                    np.linalg.norm(
+                        np.asarray(item["center"], dtype=float) - circle_center
+                    ),
+                ))
+                if len(anchor_eligible) >= robot_count:
+                    self.robot_points = [
+                        item["center"] for item in anchor_eligible[:robot_count]
+                    ]
+                    self.robot_reference_frame_number = self.current_frame_number
+                    self.detection_circle_edit.set(False)
+                else:
+                    messagebox.showerror(
+                        "Robot Finding Error",
+                        f"The swarm circle contains {len(anchor_eligible)} dark "
+                        f"candidate(s), but {robot_count} robots are expected. "
+                        "Center the circle on the swarm or reduce the minimum area.",
+                    )
+                    return
+            else:
+                messagebox.showerror(
+                    "Robot Finding Error",
+                    f"Select all {robot_count} robots, or enable a small Phase 2 "
+                    "circle containing the complete swarm.",
+                )
+                return
         try:
             tracking_radius = int(self.robot_search_radius_var.get().strip())
             if tracking_radius <= 0:
@@ -2622,8 +3187,6 @@ class OfflineDetectionGUI:
             messagebox.showerror("Input Error", "Click/tracking radius must be positive.")
             return
 
-        mode = "Color blobs"
-        color = self.detection_color_var.get()
         self.pause_playback()
         self.stop_event = threading.Event()
         self.set_running(True)
@@ -2653,6 +3216,11 @@ class OfflineDetectionGUI:
                 cargo_enabled,
                 cargo_minimum_area,
                 cargo_tracking_radius,
+                (
+                    self.robot_reference_frame_number
+                    if self.robot_reference_frame_number is not None
+                    else self.current_frame_number
+                ),
             ),
             daemon=True,
         )
@@ -2680,9 +3248,9 @@ class OfflineDetectionGUI:
         cargo_enabled=False,
         cargo_minimum_area=200,
         cargo_tracking_radius=100,
+        initial_robot_frame=0,
     ):
         capture = cv2.VideoCapture(str(video_path))
-        writer = None
         csv_file = None
         cargo_csv_file = None
         result = None
@@ -2699,21 +3267,14 @@ class OfflineDetectionGUI:
             if width <= 0 or height <= 0:
                 raise RuntimeError("The video does not report a valid frame size.")
             detection_mask = circle_detection_mask((height, width), detection_circle)
+            workspace_mask = workspace_detection_mask(
+                (height, width), calibration_points
+            )
 
             output_dir = PROJECT_DIR / "outputs" / "offline_detection" / video_path.stem
             output_dir.mkdir(parents=True, exist_ok=True)
-            video_output = output_dir / f"{video_path.stem}_annotated.mp4"
             csv_output = output_dir / f"{video_path.stem}_detections.csv"
             cargo_output = output_dir / f"{video_path.stem}_cargo.csv"
-
-            writer = cv2.VideoWriter(
-                str(video_output),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                fps,
-                (width, height),
-            )
-            if not writer.isOpened():
-                raise RuntimeError(f"Could not create output video: {video_output}")
 
             csv_file = csv_output.open("w", newline="", encoding="utf-8")
             csv_writer = csv.DictWriter(
@@ -2724,7 +3285,9 @@ class OfflineDetectionGUI:
                     "detection", "kind", "label",
                     "center_x_px", "center_y_px", "area_px2", "angle_deg",
                     "candidate_count", "accepted", "robot_id",
-                    "exclusion_reason",
+                    "exclusion_reason", "expected_robot_count",
+                    "robot_center_x_px", "robot_center_y_px",
+                    "moving_roi_center_x_px", "moving_roi_center_y_px",
                 ],
             )
             csv_writer.writeheader()
@@ -2741,11 +3304,27 @@ class OfflineDetectionGUI:
                 )
                 cargo_writer.writeheader()
 
+            # One-pass tracking starts at frame zero. The Phase 2 circle
+            # supplies the swarm size; its center is reacquired automatically
+            # as the densest compact group in the first usable frame.
+            tracked_points = []
+            swarm_center = None
+            swarm_velocity = np.zeros(2, dtype=float)
+            if detection_circle is not None:
+                swarm_radius = float(detection_circle[2])
+            elif initial_robot_points:
+                initial_array = np.asarray(initial_robot_points, dtype=float)
+                initial_center = initial_array.mean(axis=0)
+                swarm_radius = max(
+                    2.5 * float(tracking_radius),
+                    1.5 * float(np.max(np.linalg.norm(
+                        initial_array - initial_center, axis=1
+                    ))) + float(tracking_radius),
+                )
+            else:
+                swarm_radius = 2.5 * float(tracking_radius)
+
             frame_number = 0
-            tracked_points = (
-                [tuple(point) for point in initial_robot_points]
-                if initial_robot_points else []
-            )
             cargo_previous_center = None
             cargo_track = []
             while not stop_event.is_set():
@@ -2761,10 +3340,15 @@ class OfflineDetectionGUI:
                     morphology_kernel_size=morphology_kernel_size,
                     color_ranges=color_ranges,
                     draw_annotations=False,
-                    detection_mask=detection_mask,
+                    detection_mask=(
+                        workspace_mask if expected_count is not None
+                        else detection_mask
+                    ),
                 )
                 eligible, excluded_indices = exclude_calibration_markers(
-                    candidates, calibration_points, calibration_exclusion_radius
+                    candidates,
+                    calibration_points,
+                    calibration_exclusion_radius,
                 )
                 cargo_detection = None
                 if cargo_enabled:
@@ -2775,7 +3359,7 @@ class OfflineDetectionGUI:
                         minimum_area=cargo_minimum_area,
                         morphology_kernel_size=3,
                         draw_annotations=False,
-                        detection_mask=detection_mask,
+                        detection_mask=workspace_mask,
                     )
                     cargo_detection = select_cargo_candidate(
                         cargo_candidates,
@@ -2794,31 +3378,104 @@ class OfflineDetectionGUI:
                         detection = dict(candidate)
                         detection["robot_id"] = robot_id
                         selected.append(detection)
-                elif tracked_points:
-                    selected = match_robot_candidates(
-                        eligible, tracked_points, tracking_radius
-                    )
-                    for detection in selected:
-                        tracked_points[detection["robot_id"] - 1] = detection["center"]
                 else:
-                    selected = []
-                    for robot_id, candidate in enumerate(
-                            eligible[:expected_count], start=1):
-                        detection = dict(candidate)
-                        detection["robot_id"] = robot_id
-                        selected.append(detection)
-                    tracked_points = [item["center"] for item in selected]
-                annotated = draw_detection_overlays(
-                    frame_bgr, selected, calibration_points,
-                    expected_count=expected_count,
-                )
-                if cargo_enabled:
-                    annotated = draw_dashed_center_track(
-                        annotated, cargo_track, frame_number, color=(255, 255, 0)
+                    predicted_center = (
+                        None if swarm_center is None
+                        else swarm_center + swarm_velocity
                     )
-                    annotated = draw_cargo_overlay(annotated, cargo_detection)
-                writer.write(annotated)
+                    if tracked_points and predicted_center is not None:
+                        selected = match_compact_swarm_candidates(
+                            eligible,
+                            tracked_points,
+                            expected_count,
+                            tracking_radius,
+                            predicted_center=predicted_center,
+                            swarm_radius=swarm_radius,
+                        )
+                    else:
+                        selected = []
+
+                    # Initialize or recover from the densest compact group in
+                    # the workspace when the moving ROI has too few robots.
+                    minimum_reliable = max(1, (expected_count + 1) // 2)
+                    if len(selected) < minimum_reliable:
+                        recovered = find_compact_swarm_candidates(
+                            eligible, expected_count, swarm_radius
+                        )
+                        if len(recovered) >= minimum_reliable:
+                            if tracked_points:
+                                recovery_center = np.mean(
+                                    [item["center"] for item in recovered], axis=0
+                                )
+                                selected = match_compact_swarm_candidates(
+                                    recovered,
+                                    tracked_points,
+                                    expected_count,
+                                    tracking_radius,
+                                    predicted_center=recovery_center,
+                                    swarm_radius=swarm_radius,
+                                )
+                            else:
+                                selected = []
+                                for robot_id, candidate in enumerate(
+                                        recovered, start=1):
+                                    detection = dict(candidate)
+                                    detection["robot_id"] = robot_id
+                                    selected.append(detection)
+
+                    if selected:
+                        measured_center = np.mean(
+                            [item["center"] for item in selected], axis=0
+                        )
+                        if swarm_center is None:
+                            updated_center = measured_center
+                        else:
+                            completeness = min(
+                                1.0, len(selected) / expected_count
+                            )
+                            updated_center = (
+                                completeness * measured_center
+                                + (1.0 - completeness) * predicted_center
+                            )
+                        previous_center = (
+                            updated_center if swarm_center is None else swarm_center
+                        )
+                        swarm_velocity = (
+                            0.7 * swarm_velocity
+                            + 0.3 * (updated_center - previous_center)
+                        )
+                        swarm_center = updated_center
+
+                    if not tracked_points and len(selected) == expected_count:
+                        tracked_points = [item["center"] for item in selected]
+                    elif tracked_points:
+                        for detection in selected:
+                            tracked_points[detection["robot_id"] - 1] = (
+                                detection["center"]
+                            )
                 time_s = frame_number / fps
+                robot_center = robot_center_for(selected, expected_count)
+                roi_center = (
+                    None if swarm_center is None
+                    else tuple(map(float, swarm_center))
+                )
+                summary_columns = {
+                    "expected_robot_count": (
+                        "" if expected_count is None else expected_count
+                    ),
+                    "robot_center_x_px": (
+                        "" if robot_center is None else f"{robot_center[0]:.6f}"
+                    ),
+                    "robot_center_y_px": (
+                        "" if robot_center is None else f"{robot_center[1]:.6f}"
+                    ),
+                    "moving_roi_center_x_px": (
+                        "" if roi_center is None else f"{roi_center[0]:.6f}"
+                    ),
+                    "moving_roi_center_y_px": (
+                        "" if roi_center is None else f"{roi_center[1]:.6f}"
+                    ),
+                }
 
                 if cargo_writer is not None:
                     bbox = cargo_detection.get("bbox", ("", "", "", "")) \
@@ -2866,6 +3523,7 @@ class OfflineDetectionGUI:
                                 "calibration_marker"
                                 if detection_number - 1 in excluded_indices else ""
                             ),
+                            **summary_columns,
                         })
                 else:
                     csv_writer.writerow({
@@ -2876,6 +3534,7 @@ class OfflineDetectionGUI:
                         "dot_rectangle_width_cm": rectangle_width_cm,
                         "dot_rectangle_height_cm": rectangle_height_cm,
                         "candidate_count": 0,
+                        **summary_columns,
                     })
 
                 expected_text = expected_count if expected_count is not None else len(selected)
@@ -2884,12 +3543,46 @@ class OfflineDetectionGUI:
                     f"({len(eligible)} eligible, "
                     f"{len(excluded_indices)} calibration ignored)"
                 )
-                progress = (
-                    100.0 * (frame_number + 1) / total_frames
-                    if total_frames > 0
-                    else 0.0
-                )
+                if total_frames > 0:
+                    progress = 100.0 * (frame_number + 1) / total_frames
+                else:
+                    progress = 0.0
                 if frame_number % 5 == 0:
+                    annotated = draw_detection_overlays(
+                        frame_bgr, selected, calibration_points,
+                        expected_count=expected_count,
+                    )
+                    if swarm_center is not None and expected_count is not None:
+                        moving_center = tuple(map(
+                            lambda value: int(round(value)),
+                            swarm_center,
+                        ))
+                        cv2.circle(
+                            annotated,
+                            moving_center,
+                            int(round(swarm_radius)),
+                            (255, 255, 0),
+                            2,
+                            cv2.LINE_AA,
+                        )
+                        cv2.putText(
+                            annotated,
+                            "moving swarm ROI",
+                            (moving_center[0] + 8, moving_center[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45,
+                            (255, 255, 0),
+                            1,
+                            cv2.LINE_AA,
+                        )
+                    if cargo_enabled:
+                        annotated = draw_dashed_center_track(
+                            annotated, cargo_track, frame_number,
+                            color=(255, 255, 0),
+                        )
+                        annotated = draw_cargo_overlay(
+                            annotated, cargo_detection
+                        )
                     rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
                     self.put_latest_preview({
                         "kind": "frame",
@@ -2906,7 +3599,6 @@ class OfflineDetectionGUI:
                 "kind": "finished",
                 "stopped": stopped,
                 "frames": frame_number,
-                "video_output": video_output,
                 "csv_output": csv_output,
                 "cargo_output": cargo_output if cargo_enabled else None,
                 "object_height_cm": object_height_cm,
@@ -2918,8 +3610,6 @@ class OfflineDetectionGUI:
             result = {"kind": "error", "message": str(exc)}
         finally:
             capture.release()
-            if writer is not None:
-                writer.release()
             if csv_file is not None:
                 csv_file.close()
             if cargo_csv_file is not None:
@@ -2966,8 +3656,8 @@ class OfflineDetectionGUI:
                 )
                 self.status_label.config(
                     text=(
-                        f"{state} {item['frames']} frames. Video: "
-                        f"{item['video_output']} | CSV: {item['csv_output']}"
+                        f"{state} {item['frames']} frames. CSV: "
+                        f"{item['csv_output']}"
                         f"{cargo_text}"
                     ),
                     fg="orange" if item["stopped"] else "green",
@@ -3021,6 +3711,7 @@ class OfflineDetectionGUI:
 
     def close(self):
         self.crop_export_stop.set()
+        self.video_export_stop.set()
         self.overlay_export_stop.set()
         self.pause_playback()
         self.pause_post_playback()

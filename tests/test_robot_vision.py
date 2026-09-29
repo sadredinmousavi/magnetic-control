@@ -13,6 +13,26 @@ from robot_vision import RobotDetector
 
 
 class RobotVisionTests(unittest.TestCase):
+    def test_dark_contrast_detects_desaturated_robot_on_bright_background(self):
+        detector = RobotDetector()
+        frame = np.full((100, 120, 3), (210, 190, 170), dtype=np.uint8)
+        cv2.circle(frame, (40, 50), 2, (60, 30, 20), -1)
+        cv2.circle(frame, (75, 55), 2, (95, 65, 55), -1)
+
+        _, detections = detector.process(
+            frame,
+            mode="Color blobs",
+            color="Dark contrast",
+            minimum_area=1,
+            morphology_kernel_size=1,
+        )
+
+        centers = [item["center"] for item in detections]
+        self.assertTrue(any(np.linalg.norm(np.subtract(center, (40, 50))) <= 2
+                            for center in centers))
+        self.assertTrue(any(np.linalg.norm(np.subtract(center, (75, 55))) <= 2
+                            for center in centers))
+
     def setUp(self):
         self.detector = RobotDetector()
 
