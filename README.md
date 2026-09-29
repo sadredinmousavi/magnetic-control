@@ -353,6 +353,15 @@ robot, and GUI004 builds an HSV profile from those samples for Find by color and
 full-video processing. Learning also selects area `1` and cleanup size `1` so
 tiny sampled robots are not discarded.
 
+GUI005 starts the first-paper closed-loop workflow. The current first stage
+connects to the controller over serial (default COM5, 1000000 baud) and
+receives a live Raspberry Pi camera stream over SSH (default
+sadra@192.168.50.2, port 22). Launch it with
+05-gui005-1stpaper-closedloop.bat. Camera transport uses Windows OpenSSH and
+key/agent authentication; connect with ssh sadra@192.168.50.2 once in a
+terminal first to accept the host key and verify authentication. The Pi must
+provide either rpicam-vid or libcamera-vid.
+
 On Windows, double-click `04-usage.bat` in the project root. The launcher scans
 `cases/case_*` and provides separate Usage, Case, and Condition menus. Use the
 Up/Down arrow keys and Enter, or type a displayed list number/name and press
