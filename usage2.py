@@ -26,6 +26,10 @@ def main(case_name=None):
         cfg, params, compute_fields=False, report=print_optimization_results
     )
 
+    sequence_wait = float(params.get("SEQUENCE_WAIT", 2.0))
+    if sequence_wait <= 0:
+        raise ValueError("SEQUENCE_WAIT must be positive.")
+
     output_filename = Path("outputs") / case_output_path(case_name).with_suffix(".txt")
     output_filename.parent.mkdir(parents=True, exist_ok=True)
     with open(output_filename, "w", encoding="utf-8") as output:
@@ -34,7 +38,7 @@ def main(case_name=None):
             angle_text = "[" + ", ".join(
                 f"{angle:.2f}" for angle in opt_info["angles_deg"]
             ) + "]"
-            output.write(f"{angle_text} | 2 | 180\n")
+            output.write(f"{angle_text} | {sequence_wait:g} | 180\n")
 
     sequence_filename = (
         Path("experimental")
