@@ -26,15 +26,13 @@ def build_grid_test(grid_size, title):
     """Build a three-pass condition for measuring point repeatability."""
     grid_points = build_serpentine_grid(grid_size)
 
-    # Alternate direction between passes to reduce unnecessary repositioning.
-    # The first point of a reversed pass is omitted at the join and appended at
-    # the end, so every pass still measures every grid point exactly once.
-    passes = []
-    for repeat_index in range(REPEAT_COUNT):
-        points = grid_points if repeat_index % 2 == 0 else grid_points[::-1]
-        if passes and np.array_equal(passes[-1][-1], points[0]):
-            points = np.vstack((points[1:], points[:1]))
-        passes.append(points.copy())
+    # Reverse direction after each pass. Consecutive passes share their end
+    # point, avoiding a long repositioning move across the square. Every
+    # nonzero move is therefore only one grid spacing.
+    passes = [
+        (grid_points if repeat_index % 2 == 0 else grid_points[::-1]).copy()
+        for repeat_index in range(REPEAT_COUNT)
+    ]
     path_points = np.vstack(passes)
 
     target_schedule = [

@@ -27,6 +27,15 @@ class Case100GridRepeatabilityTests(unittest.TestCase):
         for repeat_points in np.split(condition.PATH_POINTS, REPEAT_COUNT):
             self.assertEqual({tuple(point) for point in repeat_points}, expected_points)
 
+        moves = np.diff(condition.PATH_POINTS, axis=0)
+        move_lengths = np.linalg.norm(moves, axis=1)
+        expected_spacing = SQUARE_SIDE_LENGTH / (expected_size - 1)
+        self.assertLessEqual(move_lengths.max(), expected_spacing + 1e-12)
+        self.assertFalse(np.any(
+            (np.abs(moves[:, 0]) > 1e-12)
+            & (np.abs(moves[:, 1]) > 1e-12)
+        ))
+
         validate_target_schedule(condition.TARGET_SCHEDULE)
         self.assertEqual(condition.PARAMS["SEQUENCE_WAIT"], 3.0)
 
