@@ -22,19 +22,11 @@ def build_serpentine_grid(grid_size, side_length=SQUARE_SIDE_LENGTH):
     return np.asarray(rows, dtype=float)
 
 
-def build_grid_test(grid_size, title):
-    """Build a three-pass condition for measuring point repeatability."""
-    grid_points = build_serpentine_grid(grid_size)
-
-    # Reverse direction after each pass. Consecutive passes share their end
-    # point, avoiding a long repositioning move across the square. Every
-    # nonzero move is therefore only one grid spacing.
-    passes = [
-        (grid_points if repeat_index % 2 == 0 else grid_points[::-1]).copy()
-        for repeat_index in range(REPEAT_COUNT)
-    ]
-    path_points = np.vstack(passes)
-
+def build_scheduled_path(path_points, title):
+    """Build condition parameters for an already ordered target path."""
+    path_points = np.asarray(path_points, dtype=float)
+    if path_points.ndim != 2 or path_points.shape[1] != 2 or len(path_points) < 2:
+        raise ValueError("path_points must contain at least two 2D points.")
     target_schedule = [
         (
             index * POINT_HOLD_DURATION,
@@ -68,4 +60,28 @@ def build_grid_test(grid_size, title):
         "PAYLOAD_INITIAL_POS": np.array([10.0, 10.0]),
         "PAYLOAD_INITIAL_VEL": np.array([0.0, 0.0]),
     }
+    return path_points, target_schedule, params
+
+
+def build_path_test(grid_points, title):
+    """Build a three-pass repeatability condition from ordered grid points."""
+    grid_points = np.asarray(grid_points, dtype=float)
+    if grid_points.ndim != 2 or grid_points.shape[1] != 2 or len(grid_points) < 2:
+        raise ValueError("grid_points must contain at least two 2D points.")
+
+    # Reverse direction after each pass. Consecutive passes share their end
+    # point, avoiding a long repositioning move across the square. Every
+    # nonzero move is therefore only one grid spacing.
+    passes = [
+        (grid_points if repeat_index % 2 == 0 else grid_points[::-1]).copy()
+        for repeat_index in range(REPEAT_COUNT)
+    ]
+    path_points, target_schedule, params = build_scheduled_path(
+        np.vstack(passes), title
+    )
     return grid_points, path_points, target_schedule, params
+
+
+def build_grid_test(grid_size, title):
+    """Build a three-pass condition on a centered square grid."""
+    return build_path_test(build_serpentine_grid(grid_size), title)
