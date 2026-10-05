@@ -60,6 +60,19 @@ class UsageLauncherTests(unittest.TestCase):
         self.assertEqual(select_menu.call_count, 2)
         run_usage.assert_called_once_with("1", "all")
 
+    @patch("usage5.main")
+    @patch("usage_launcher.os.system")
+    @patch("usage_launcher.select_menu", side_effect=[5, 1])
+    @patch("usage_launcher.discover_cases", return_value=[
+        ("case_100", ["cond_009_test", "cond_010_test"]),
+    ])
+    def test_usage5_selects_grid_before_file_dialog(
+        self, _discover, select_menu, _system, usage5_main
+    ):
+        self.assertEqual(main(), 0)
+        self.assertEqual(select_menu.call_count, 2)
+        usage5_main.assert_called_once_with(grid_size=5)
+
 
 if __name__ == "__main__":
     unittest.main()

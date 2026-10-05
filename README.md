@@ -1,6 +1,6 @@
 # Magnetic Microrobot Simulation
 
-This project contains five usage scripts:
+This project contains six usage scripts:
 
 - `usage0.py`
   Loads a previously saved magnet-angle sequence and renders its static field plots.
@@ -12,6 +12,8 @@ This project contains five usage scripts:
   Control-input workflow only. It computes the optimized control inputs for all scheduled targets and plots the results. It does not run dynamics simulation.
 - `usage4.py`
   Full workflow. It computes control inputs for all scheduled targets, then runs the payload-aware dynamics simulation and animation.
+- `usage5.py`
+  Selects a 3x3 or 5x5 experiment, opens a tracking-file dialog, extracts stationary dwells, and saves the dwell visits as CSV.
 
 
 ## Case Files
