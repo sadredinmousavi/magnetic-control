@@ -7,6 +7,7 @@ import queue
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -20,6 +21,105 @@ from robot_vision import RobotDetector
 
 
 class OfflineDetectionTests(unittest.TestCase):
+    def robot_calibration_app(self):
+        app = gui004.OfflineDetectionGUI.__new__(gui004.OfflineDetectionGUI)
+        app.current_video_path = Path("example.avi")
+        app.current_frame_bgr = np.zeros((60, 80, 3), dtype=np.uint8)
+        app.current_frame_number = 8
+        app.video_total_frames = 20
+        app.robot_reference_frame_number = 3
+        app.robot_points = [(25, 25), (35, 35)]
+        app.detection_circle = (30, 30, 20)
+        app.learned_robot_color_ranges = [((10, 20, 30), (40, 50, 60))]
+        defaults = ["Color detection", "Learned from clicks", "2", "1", "35",
+                    "1", "3", "12", True, "200", "100"]
+        for name, value in zip(gui004.ROBOT_CALIBRATION_SETTINGS, defaults):
+            variable = SimpleNamespace(value=value)
+            variable.get = lambda variable=variable: variable.value
+            variable.set = lambda value, variable=variable: setattr(variable, "value", value)
+            setattr(app, name, variable)
+        for name in ("detection_circle_enabled", "detection_circle_edit"):
+            variable = SimpleNamespace(value=True)
+            variable.get = lambda variable=variable: variable.value
+            variable.set = lambda value, variable=variable: setattr(variable, "value", value)
+            setattr(app, name, variable)
+        for name in ("robot_status_label", "preview_status", "pause_playback",
+                     "render_calibration_frame", "on_cargo_toggle"):
+            setattr(app, name, Mock())
+        def show_frame(number):
+            app.current_frame_number = number
+            return True
+        app.show_calibration_frame = Mock(side_effect=show_frame)
+        def set_circle(center, radius):
+            app.detection_circle = (*center, radius)
+        app.set_detection_circle = Mock(side_effect=set_circle)
+        return app
+
+    def test_robot_calibration_roundtrip_restores_settings_labels_and_anchor(self):
+        app = self.robot_calibration_app()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                gui004, "INPUT_DIR", Path(directory)), patch.object(
+                gui004.messagebox, "showerror") as showerror:
+            app.save_robot_calibration()
+            path = gui004.robot_calibration_file_for(app.current_video_path)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["reference_frame"], 3)
+            self.assertFalse(gui004.calibration_file_for(app.current_video_path).exists())
+            app.robot_points = []
+            app.robot_count_var.set("9")
+            app.detection_circle = (40, 30, 25)
+            app.learned_robot_color_ranges = None
+            app.load_robot_calibration(automatic=True)
+        showerror.assert_not_called()
+        self.assertEqual(app.robot_points, [(25, 25), (35, 35)])
+        self.assertEqual(app.robot_count_var.get(), "2")
+        self.assertEqual(app.robot_reference_frame_number, 3)
+        self.assertEqual(app.current_frame_number, 3)
+        self.assertEqual(app.detection_circle, (30, 30, 20))
+        self.assertEqual(app.learned_robot_color_ranges, saved["learned_color_ranges"])
+        self.assertTrue(app.cargo_enabled_var.get())
+        self.assertFalse(app.detection_circle_edit.get())
+
+    def test_robot_calibration_rejects_incompatible_or_corrupt_files_without_mutation(self):
+        app = self.robot_calibration_app()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                gui004, "INPUT_DIR", Path(directory)), patch.object(
+                gui004.messagebox, "showerror") as showerror:
+            app.save_robot_calibration()
+            path = gui004.robot_calibration_file_for(app.current_video_path)
+            original = path.read_text(encoding="utf-8")
+            for key, value in (("video_size_px", [800, 600]),
+                               ("reference_frame", 100),
+                               ("robot_points_px", [[-1, 5]]),
+                               ("detection_circle_px", [30, 30, float("nan")]),
+                               ("learned_color_ranges", [[[0, 0, 0], [200, 255, 255]]])):
+                with self.subTest(key=key):
+                    data = json.loads(original)
+                    data[key] = value
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    app.load_robot_calibration()
+                    self.assertEqual(app.robot_points, [(25, 25), (35, 35)])
+                    self.assertEqual(app.current_frame_number, 8)
+            path.write_text("{broken", encoding="utf-8")
+            app.load_robot_calibration()
+            self.assertEqual(showerror.call_count, 6)
+            app.show_calibration_frame.assert_not_called()
+
+    def test_robot_calibration_supports_circle_setup_without_selected_robots(self):
+        app = self.robot_calibration_app()
+        app.robot_points = []
+        app.robot_reference_frame_number = None
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                gui004, "INPUT_DIR", Path(directory)), patch.object(
+                gui004.messagebox, "showerror") as showerror:
+            app.save_robot_calibration()
+            app.load_robot_calibration()
+        showerror.assert_not_called()
+        self.assertEqual(app.robot_points, [])
+        self.assertIsNone(app.robot_reference_frame_number)
+        self.assertEqual(app.current_frame_number, 8)
+        self.assertTrue(app.detection_circle_enabled.get())
+
     def test_annotation_bgra_makes_black_transparent_and_preserves_antialias_color(self):
         annotation = np.zeros((2, 2, 3), dtype=np.uint8)
         annotation[0, 0] = (0, 128, 0)

@@ -34,6 +34,77 @@ def calibration_file_for(video_path):
     return INPUT_DIR / f"{Path(video_path).stem}_camera_calibration.json"
 
 
+def robot_calibration_file_for(video_path):
+    """Keep Phase 2 calibration separate from the four camera points."""
+    return INPUT_DIR / f"{Path(video_path).stem}_robot_calibration.json"
+
+
+# Variable names are also the keys in the Phase 2 calibration file.
+ROBOT_CALIBRATION_SETTINGS = {
+    "robot_finding_mode_var": ("Manual selection", "Color detection"),
+    "detection_color_var": ("Learned from clicks", *RobotDetector.COLOR_RANGES),
+    "robot_count_var": (int, 1),
+    "minimum_area_var": (float, 0),
+    "robot_search_radius_var": (int, 1),
+    "robot_snap_minimum_area_var": (float, 0),
+    "detection_filter_size_var": ("1", "3", "5"),
+    "calibration_exclusion_radius_var": (float, 0),
+    "cargo_enabled_var": (bool,),
+    "cargo_minimum_area_var": (float, 0),
+    "cargo_tracking_radius_var": (float, 0),
+}
+
+
+def validate_robot_calibration(data, width, height, frame_count):
+    """Validate the whole saved setup before changing any live GUI state."""
+    if data["version"] != 1 or data["video_size_px"] != [width, height]:
+        raise ValueError("Saved robot calibration does not match this video size.")
+    settings = data["settings"]
+    for name, rule in ROBOT_CALIBRATION_SETTINGS.items():
+        value = settings[name]
+        if rule[0] is bool:
+            if type(value) is not bool:
+                raise ValueError(f"Invalid setting: {name}")
+        elif rule[0] in (int, float):
+            if not isinstance(value, str):
+                raise ValueError(f"Invalid setting: {name}")
+            number = rule[0](value)
+            if (not np.isfinite(number) or number < rule[1]
+                    or (number == 0 and name != "calibration_exclusion_radius_var")):
+                raise ValueError(f"Invalid setting: {name}")
+        elif value not in rule:
+            raise ValueError(f"Invalid setting: {name}")
+    points = np.asarray(data["robot_points_px"], dtype=float)
+    if not points.size and data["robot_points_px"] != []:
+        raise ValueError("Saved robot positions must contain pairs of coordinates.")
+    if points.size:
+        if (points.ndim != 2 or points.shape[1] != 2
+                or not np.isfinite(points).all()
+                or not np.equal(points, np.floor(points)).all()
+                or np.any(points < 0) or np.any(points[:, 0] >= width)
+                or np.any(points[:, 1] >= height)
+                or len(points) > int(settings["robot_count_var"])):
+            raise ValueError("Saved robot positions are invalid for this video.")
+    frame = data["reference_frame"]
+    if type(frame) is not int or not 0 <= frame < frame_count:
+        raise ValueError("Saved reference frame is outside this video.")
+    circle = np.asarray(data["detection_circle_px"], dtype=float)
+    if (circle.shape != (3,) or not np.isfinite(circle).all()
+            or not 1 <= circle[2] <= min(width, height) // 2
+            or not circle[2] <= circle[0] <= width - circle[2]
+            or not circle[2] <= circle[1] <= height - circle[2]
+            or type(data["circle_enabled"]) is not bool):
+        raise ValueError("Saved detection circle is invalid for this video.")
+    ranges = data["learned_color_ranges"]
+    if ranges is not None:
+        hsv = np.asarray(ranges, dtype=float)
+        if (hsv.ndim != 3 or hsv.shape[1:] != (2, 3) or not len(hsv)
+                or not np.isfinite(hsv).all() or np.any(hsv < 0)
+                or np.any(hsv > [179, 255, 255])
+                or np.any(hsv[:, 0] > hsv[:, 1])):
+            raise ValueError("Saved learned robot colors are invalid.")
+
+
 def robot_center_for(detections, expected_count=None):
     """Equal-weight position centroid; no temporal filtering or area weights."""
     if not detections or (expected_count is not None
@@ -1358,6 +1429,16 @@ class OfflineDetectionGUI:
         self.robot_status_label.grid(
             row=3, column=0, columnspan=6, sticky="ew", pady=4
         )
+        calibration_actions = ttk.Frame(robot_finding)
+        calibration_actions.grid(row=6, column=0, columnspan=6, sticky="e", pady=4)
+        ttk.Button(
+            calibration_actions, text="Load calibration",
+            command=self.load_robot_calibration,
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            calibration_actions, text="Save calibration",
+            command=self.save_robot_calibration,
+        ).pack(side="left", padx=4)
 
         cargo_controls = ttk.LabelFrame(robot_finding, text="Optional red cargo", padding=5)
         cargo_controls.grid(row=4, column=0, columnspan=6, sticky="ew", pady=(2, 4))
@@ -1659,6 +1740,7 @@ class OfflineDetectionGUI:
         self.post_timeline.config(to=max(self.video_total_frames - 1, 1))
         self.load_saved_calibration(video_path, width, height)
         self.show_calibration_frame(0)
+        self.load_robot_calibration(automatic=True)
         self.phase_notebook.select(0)
 
     def choose_post_detections(self):
@@ -2334,14 +2416,14 @@ class OfflineDetectionGUI:
 
     def show_calibration_frame(self, frame_number, sequential=False):
         if self.preview_capture is None:
-            return
+            return False
         frame_number = max(0, min(int(frame_number), max(self.video_total_frames - 1, 0)))
         if not sequential:
             self.preview_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
         success, frame_bgr = self.preview_capture.read()
         if not success:
             self.pause_playback()
-            return
+            return False
 
         self.current_frame_number = frame_number
         self.current_frame_bgr = frame_bgr
@@ -2358,6 +2440,7 @@ class OfflineDetectionGUI:
             text=f"{self.format_time(current_seconds)} / {self.format_time(total_seconds)}"
         )
         self.render_calibration_frame()
+        return True
 
     @staticmethod
     def format_time(seconds):
@@ -3028,6 +3111,80 @@ class OfflineDetectionGUI:
         self.calibration_status_label.config(
             text=f"Calibration saved: {calibration_file}", fg="green"
         )
+
+    def save_robot_calibration(self):
+        if self.current_video_path is None or self.current_frame_bgr is None:
+            messagebox.showerror("Robot Calibration Error", "Choose a video first.")
+            return
+        height, width = self.current_frame_bgr.shape[:2]
+        data = {
+            "version": 1,
+            "video_size_px": [width, height],
+            "reference_frame": (self.robot_reference_frame_number
+                                if self.robot_reference_frame_number is not None
+                                else self.current_frame_number),
+            "robot_points_px": [list(point) for point in self.robot_points],
+            "detection_circle_px": list(self.detection_circle),
+            "circle_enabled": self.detection_circle_enabled.get(),
+            "learned_color_ranges": self.learned_robot_color_ranges,
+            "settings": {name: getattr(self, name).get()
+                         for name in ROBOT_CALIBRATION_SETTINGS},
+        }
+        path = robot_calibration_file_for(self.current_video_path)
+        try:
+            validate_robot_calibration(data, width, height, self.video_total_frames)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n",
+                            encoding="utf-8")
+        except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+            messagebox.showerror("Robot Calibration Error", str(error))
+            return
+        self.robot_status_label.config(text=f"Robot calibration saved: {path}", fg="green")
+
+    def load_robot_calibration(self, automatic=False):
+        if self.current_video_path is None or self.current_frame_bgr is None:
+            if not automatic:
+                messagebox.showerror("Robot Calibration Error", "Choose a video first.")
+            return
+        path = robot_calibration_file_for(self.current_video_path)
+        if automatic and not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            height, width = self.current_frame_bgr.shape[:2]
+            validate_robot_calibration(data, width, height, self.video_total_frames)
+        except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+            if automatic:
+                self.robot_status_label.config(
+                    text=f"Saved robot calibration could not be loaded: {error}", fg="red")
+            else:
+                messagebox.showerror("Robot Calibration Error", str(error))
+            return
+        self.pause_playback()
+        # Read the anchor before applying settings or robot coordinates.
+        if not self.show_calibration_frame(data["reference_frame"]):
+            self.robot_status_label.config(text="Could not read the saved reference frame.", fg="red")
+            return
+        for name, value in data["settings"].items():
+            if name in ROBOT_CALIBRATION_SETTINGS:
+                getattr(self, name).set(value)
+        self.robot_points = [tuple(map(int, point)) for point in data["robot_points_px"]]
+        self.robot_reference_frame_number = data["reference_frame"] if self.robot_points else None
+        self.learned_robot_color_ranges = data["learned_color_ranges"]
+        self.set_detection_circle(data["detection_circle_px"][:2], data["detection_circle_px"][2])
+        self.detection_circle_enabled.set(data["circle_enabled"])
+        self.detection_circle_edit.set(False)
+        self.detection_drag = None
+        self.current_cargo_detection = None
+        self.on_cargo_toggle()
+        self.robot_status_label.config(
+            text=f"Loaded robot calibration: {len(self.robot_points)} robots; "
+                 f"reference frame {data['reference_frame']}. Verify the R labels.",
+            fg="green",
+        )
+        self.preview_status.config(
+            text=f"Loaded {len(self.robot_points)}/{self.robot_count_var.get()} robots")
+        self.render_calibration_frame()
 
     def read_geometry_values(self):
         try:

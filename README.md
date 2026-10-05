@@ -286,6 +286,13 @@ circle** to drag its center or edge, the diameter slider to resize, or **Fit to
 workspace** for an initial placement. **Fit to workspace** returns directly to
 robot-selection mode. When manually adjusting, uncheck **Adjust circle (blocks
 selection)** before selecting robots.
+Use Phase 2 **Save calibration** to save the finding settings, circular area,
+selected robot positions in R-label order, reference frame, learned colors, and
+optional cargo settings to `inputs/<video_name>_robot_calibration.json`.
+Reopening that video automatically restores this setup and seeks to the saved
+reference frame; **Load calibration** restores it again after changes. Check the
+R labels before processing. You can also save a circle and settings before
+selecting robots. The Phase 1 camera calibration is saved separately.
 The circle limits where color candidates may be found; it does not by itself
 make every matching blob a robot. Phase 2 marks the accepted references as
 `R1`, `R2`, and so on, and reports both the selected-robot count and the raw
