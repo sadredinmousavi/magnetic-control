@@ -22,7 +22,7 @@ A condition therefore does not need to repeat every required option.
 | Usage 2 | Optimize targets and save angle sequences | Core options, targets, optimization |
 | Usage 3 | Optimize targets and save static field plots | Usage 2 plus plot options |
 | Usage 4 | Optimize, simulate dynamics, and save animation | All dynamics, payload, wall, solver, and animation options |
-| Usage 5 | Extract 3x3/5x5 stationary dwells | Tracking CSV/Excel input; no case parameters |
+| Usage 5 | Recover XY and fit radial compensation | GUI004 dwell CSV; Case 100 conditions 013–015 target schedules |
 
 `Required` below means the merged base-case and condition dictionaries must
 contain the key. A condition may inherit it from `case.py`.

@@ -549,6 +549,122 @@ def read_detections_csv(csv_path):
     return by_frame
 
 
+def find_track_dwells(center_track, fps, window_frames=45,
+                     minimum_frames=30, threshold_px=2.5):
+    """Find stationary visits without bridging missing or invalid frames."""
+    if (window_frames < 2 or minimum_frames < 1
+            or not np.isfinite(threshold_px) or threshold_px <= 0
+            or not np.isfinite(fps) or fps <= 0):
+        raise ValueError("Window must be at least 2 frames; minimum duration, "
+                         "threshold, and video FPS must be positive.")
+    runs = []
+    run = []
+    previous = None
+    for frame, center in sorted(center_track, key=lambda item: item[0]):
+        valid = center is not None and np.asarray(center).shape == (2,) \
+            and np.isfinite(center).all()
+        if not valid or (previous is not None and frame != previous + 1):
+            if run:
+                runs.append(run)
+            run = []
+        if valid:
+            run.append((frame, center))
+        previous = frame
+    if run:
+        runs.append(run)
+
+    dwells = []
+    for run in runs:
+        if len(run) < window_frames:
+            continue
+        frames = np.array([item[0] for item in run])
+        positions = np.array([item[1] for item in run], dtype=float)
+        # Prefix sums keep the rolling standard deviation linear in video length.
+        offsets = positions - positions[0]
+        sums = np.vstack((np.zeros(2), np.cumsum(offsets, axis=0)))
+        squares = np.vstack((np.zeros(2), np.cumsum(offsets ** 2, axis=0)))
+        window_sum = sums[window_frames:] - sums[:-window_frames]
+        window_square = squares[window_frames:] - squares[:-window_frames]
+        variance = np.maximum(
+            (window_square - window_sum ** 2 / window_frames)
+            / (window_frames - 1), 0.0,
+        )
+        stationary = np.zeros(len(run), dtype=bool)
+        first = window_frames // 2
+        stationary[first:first + len(variance)] = (
+            np.sqrt(variance.sum(axis=1)) < threshold_px
+        )
+        boundaries = np.flatnonzero(np.diff(
+            np.r_[False, stationary, False].astype(int)
+        ))
+        for start, stop in zip(boundaries[::2], boundaries[1::2]):
+            if stop - start < minimum_frames:
+                continue
+            section = positions[start:stop]
+            start_frame, end_frame = int(frames[start]), int(frames[stop - 1])
+            dwells.append({
+                "id": len(dwells) + 1,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "start_s": start_frame / fps,
+                "end_s": end_frame / fps,
+                "duration_s": (end_frame - start_frame) / fps,
+                "center": tuple(np.median(section, axis=0)),
+                "std_px": float(np.linalg.norm(section.std(axis=0, ddof=1)))
+                    if len(section) > 1 else 0.0,
+                "frames": stop - start,
+            })
+    return dwells
+
+
+def draw_dwell_points(frame_bgr, dwells, selected_id=None):
+    """Show all median dwell positions in the original video coordinates."""
+    annotated = frame_bgr.copy()
+    for dwell in dwells:
+        center = tuple(int(round(value)) for value in dwell["center"])
+        color = (0, 255, 255) if dwell["id"] == selected_id else (255, 0, 255)
+        cv2.circle(annotated, center, 7, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.circle(annotated, center, 7, color, 2, cv2.LINE_AA)
+        label_position = (center[0] + 10, center[1] - 8)
+        label = str(dwell["id"])
+        cv2.putText(annotated, label, label_position, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(annotated, label, label_position, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, color, 1, cv2.LINE_AA)
+    return annotated
+
+
+def calibrated_dwell_coordinates(dwells, corners_px, width_cm, height_cm):
+    """Map video pixels to the dot plane: rectangle center, X right, Y up."""
+    corners = np.asarray(corners_px, dtype=np.float32)
+    if (corners.shape != (4, 2) or not np.isfinite(corners).all()
+            or not np.isfinite([width_cm, height_cm]).all()
+            or width_cm <= 0 or height_cm <= 0):
+        raise ValueError("Select four corners and enter positive rectangle sizes in Phase 1.")
+    if (not cv2.isContourConvex(corners.reshape(-1, 1, 2))
+            or abs(cv2.contourArea(corners)) < 1):
+        raise ValueError("The Phase 1 corners must form a non-degenerate rectangle.")
+    destination = np.float32([
+        [-width_cm / 2, height_cm / 2],
+        [width_cm / 2, height_cm / 2],
+        [width_cm / 2, -height_cm / 2],
+        [-width_cm / 2, -height_cm / 2],
+    ])
+    transform = cv2.getPerspectiveTransform(corners, destination)
+    if not np.isfinite(transform).all() or np.linalg.matrix_rank(transform) < 3:
+        raise ValueError("The Phase 1 calibration cannot be transformed.")
+    if not dwells:
+        return np.empty((0, 2))
+    positions = np.array([dwell["center"] for dwell in dwells], dtype=float)
+    homogeneous = np.column_stack((positions, np.ones(len(positions)))) @ transform.T
+    if np.any(np.abs(homogeneous[:, 2]) < 1e-10):
+        raise ValueError("A dwell position is outside the usable calibration projection.")
+    coordinates = homogeneous[:, :2] / homogeneous[:, 2:3]
+    if not np.isfinite(coordinates).all():
+        raise ValueError("The calibrated dwell coordinates are not finite.")
+    return coordinates
+
+
 def read_detection_summary_csv(csv_path):
     """Read saved swarm centers/count, with inference for legacy CSV files."""
     saved_centers = {}
@@ -1213,6 +1329,7 @@ class OfflineDetectionGUI:
         self.timeline_is_updating = False
         self.post_detections = {}
         self.post_center_track = []
+        self.dwell_points = []
         self.post_cargo_detections = {}
         self.post_cargo_track = []
         self.post_frame_number = 0
@@ -1249,10 +1366,12 @@ class OfflineDetectionGUI:
         robot_finding = tk.Frame(self.phase_notebook, padx=10, pady=8)
         processing = tk.Frame(self.phase_notebook, padx=10, pady=8)
         post_processing = tk.Frame(self.phase_notebook, padx=10, pady=8)
+        dwell_processing = tk.Frame(self.phase_notebook, padx=10, pady=8)
         self.phase_notebook.add(calibration, text="Phase 1 - Calibration")
         self.phase_notebook.add(robot_finding, text="Phase 2 - Find robots")
         self.phase_notebook.add(processing, text="Phase 3 - Process")
         self.phase_notebook.add(post_processing, text="Phase 4 - Post-process")
+        self.phase_notebook.add(dwell_processing, text="Phase 5 - Dwell points")
         calibration.columnconfigure(1, weight=1)
         robot_finding.columnconfigure(1, weight=1)
         processing.columnconfigure(1, weight=1)
@@ -1664,6 +1783,63 @@ class OfflineDetectionGUI:
                   ).grid(row=7, column=2, columnspan=4, sticky="w")
         self.robot_count_var.trace_add("write", self.on_center_count_changed)
 
+        dwell_processing.columnconfigure(0, weight=1)
+        dwell_controls = ttk.Frame(dwell_processing)
+        dwell_controls.grid(row=0, column=0, sticky="ew")
+        ttk.Button(dwell_controls, text="Load detections",
+                   command=self.choose_post_detections).grid(row=0, column=0, padx=4)
+        ttk.Button(dwell_controls, text="Find dwell points",
+                   command=self.find_loaded_dwell_points).grid(row=0, column=1, padx=4)
+        self.show_dwell_points_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dwell_controls, text="Show points",
+                        variable=self.show_dwell_points_var,
+                        command=self.render_dwell_frame).grid(row=0, column=2, padx=4)
+        self.dwell_unit_var = tk.StringVar(value="mm")
+        ttk.Label(dwell_controls, text="Coordinates").grid(row=0, column=3, padx=4)
+        dwell_units = ttk.Combobox(dwell_controls, textvariable=self.dwell_unit_var,
+                                   values=("mm", "cm", "px"), state="readonly", width=5)
+        dwell_units.grid(row=0, column=4, padx=4)
+        dwell_units.bind("<<ComboboxSelected>>", self.refresh_dwell_table)
+        ttk.Button(dwell_controls, text="Export dwell CSV",
+                   command=self.export_dwell_coordinates).grid(row=0, column=5, padx=4)
+        self.dwell_window_var = tk.StringVar(value="45")
+        self.dwell_minimum_var = tk.StringVar(value="30")
+        self.dwell_threshold_var = tk.StringVar(value="2.5")
+        for column, (label, variable) in enumerate((
+                ("Window (frames)", self.dwell_window_var),
+                ("Minimum dwell (frames)", self.dwell_minimum_var),
+                ("Stationary threshold (px)", self.dwell_threshold_var))):
+            ttk.Label(dwell_controls, text=label).grid(row=1, column=column * 2,
+                                                      sticky="w", pady=6)
+            ttk.Entry(dwell_controls, textvariable=variable, width=7).grid(
+                row=1, column=column * 2 + 1, padx=4)
+        self.dwell_status_label = ttk.Label(
+            dwell_processing, text="Load detections in Phase 4 or here, then find dwell points."
+        )
+        self.dwell_status_label.grid(row=1, column=0, sticky="w", pady=4)
+        columns = ("id", "start", "end", "duration", "x", "y", "std")
+        self.dwell_tree = ttk.Treeview(dwell_processing, columns=columns,
+                                       show="headings", height=5, selectmode="browse")
+        for column, heading in zip(columns, (
+                "Point", "Start (s)", "End (s)", "Duration (s)",
+                "X (mm)", "Y (mm)", "Std (px)")):
+            self.dwell_tree.heading(column, text=heading)
+            self.dwell_tree.column(column, width=100, anchor="center")
+        self.dwell_tree.grid(row=2, column=0, sticky="ew")
+        dwell_scrollbar = ttk.Scrollbar(dwell_processing, orient="vertical",
+                                       command=self.dwell_tree.yview)
+        dwell_scrollbar.grid(row=2, column=1, sticky="ns")
+        self.dwell_tree.configure(yscrollcommand=dwell_scrollbar.set)
+        self.dwell_tree.bind("<<TreeviewSelect>>", self.on_dwell_selected)
+        ttk.Label(dwell_processing,
+                  text="Select a row to view that stop. Points are swarm-center medians; gaps are excluded."
+                  ).grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Label(dwell_processing,
+                  text="Origin (0,0): center of the Phase 1 calibration rectangle, not the first dwell point.\n"
+                       "Coordinates are on the calibration-dot plane. X increases right; Y increases up.",
+                  justify="left"
+                  ).grid(row=4, column=0, sticky="w")
+
         self.status_label = tk.Label(
             self.root,
             text="Choose a recorded video, configure detection, and press Process Video.",
@@ -1734,6 +1910,7 @@ class OfflineDetectionGUI:
         self.learned_robot_color_ranges = None
         self.post_detections = {}
         self.post_center_track = []
+        self.clear_dwell_points()
         self.post_cargo_detections = {}
         self.post_cargo_track = []
         self.post_frame_number = 0
@@ -1787,11 +1964,20 @@ class OfflineDetectionGUI:
             if self.video_fps <= 0:
                 self.video_fps = 30.0
             self.video_total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.calibration_points = []
+            self.load_saved_calibration(
+                video_path, int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            )
             self.timeline.config(to=max(self.video_total_frames - 1, 1))
         self.pause_post_playback()
         if saved_expected_count is not None:
             self.robot_count_var.set(str(saved_expected_count))
         self.post_detections = detections
+        self.clear_dwell_points()
+        self.dwell_status_label.config(
+            text=f"Loaded {Path(csv_path).name}. Press Find dwell points."
+        )
         self.post_cargo_detections = cargo_detections
         center_frames = sorted(set(detections) | set(saved_centers))
         self.post_center_track = [
@@ -1833,8 +2019,144 @@ class OfflineDetectionGUI:
             )
         self.post_frame_number = 0
         self.post_timeline.config(to=max(self.video_total_frames - 1, 1))
-        self.phase_notebook.select(3)
+        if self.phase_notebook.index(self.phase_notebook.select()) != 4:
+            self.phase_notebook.select(3)
         self.show_post_frame(0)
+
+    def clear_dwell_points(self):
+        self.dwell_points = []
+        if hasattr(self, "dwell_tree"):
+            for row in self.dwell_tree.get_children():
+                self.dwell_tree.delete(row)
+            self.dwell_status_label.config(
+                text="Find dwell points using the loaded detections."
+            )
+
+    def find_loaded_dwell_points(self):
+        if not self.post_center_track:
+            messagebox.showinfo("Dwell points", "Load detections first.")
+            return
+        try:
+            dwells = find_track_dwells(
+                self.post_center_track, self.video_fps,
+                int(self.dwell_window_var.get()),
+                int(self.dwell_minimum_var.get()),
+                float(self.dwell_threshold_var.get()),
+            )
+        except ValueError as exc:
+            messagebox.showerror("Dwell points", f"Invalid dwell settings: {exc}")
+            return
+        self.clear_dwell_points()
+        self.dwell_points = dwells
+        self.dwell_status_label.config(text=(
+            f"Found {len(dwells)} dwell points. Select a row to inspect a stop."
+            if dwells else "No dwells found. Check the expected robot count in Phase 4 or adjust the dwell settings."
+        ))
+        self.refresh_dwell_table()
+        self.show_dwell_points_var.set(True)
+        self.render_dwell_frame()
+
+    def dwell_coordinates_cm(self):
+        try:
+            width = float(self.rectangle_width_var.get())
+            height = float(self.rectangle_height_var.get())
+        except ValueError as exc:
+            raise ValueError("Enter positive rectangle dimensions in Phase 1.") from exc
+        return calibrated_dwell_coordinates(
+            self.dwell_points, self.calibration_points, width, height,
+        )
+
+    def refresh_dwell_table(self, _event=None):
+        selected = self.dwell_tree.selection()
+        unit = self.dwell_unit_var.get()
+        coordinates = np.array([item["center"] for item in self.dwell_points])
+        if self.dwell_points and unit != "px":
+            try:
+                coordinates = self.dwell_coordinates_cm() * (10 if unit == "mm" else 1)
+                self.dwell_status_label.config(
+                    text=f"Found {len(self.dwell_points)} dwell points. Coordinates in {unit}, from Phase 1."
+                )
+            except ValueError as exc:
+                # Keep the detected points available, but never label pixels as mm/cm.
+                coordinates = np.full((len(self.dwell_points), 2), np.nan)
+                self.dwell_status_label.config(text=f"Physical coordinates unavailable: {exc}")
+        elif self.dwell_points:
+            self.dwell_status_label.config(text=f"Found {len(self.dwell_points)} dwell points. Pixel coordinates.")
+        self.dwell_tree.heading("x", text=f"X ({unit})")
+        self.dwell_tree.heading("y", text=f"Y ({unit})")
+        for row in self.dwell_tree.get_children():
+            self.dwell_tree.delete(row)
+        for dwell, coordinate in zip(self.dwell_points, coordinates):
+            x, y = (f"{value:.3f}" if np.isfinite(value) else "—" for value in coordinate)
+            self.dwell_tree.insert("", "end", iid=str(dwell["id"]), values=(
+                dwell["id"], f'{dwell["start_s"]:.3f}', f'{dwell["end_s"]:.3f}',
+                f'{dwell["duration_s"]:.3f}', x, y, f'{dwell["std_px"]:.2f}',
+            ))
+        if selected and self.dwell_tree.exists(selected[0]):
+            self.dwell_tree.selection_set(selected[0])
+
+    def export_dwell_coordinates(self):
+        if not self.dwell_points:
+            messagebox.showinfo("Dwell CSV", "Find dwell points first.")
+            return
+        try:
+            coordinates = self.dwell_coordinates_cm()
+        except ValueError as exc:
+            messagebox.showerror("Dwell CSV", str(exc))
+            return
+        stem = self.current_video_path.stem if self.current_video_path else "video"
+        filename = filedialog.asksaveasfilename(
+            title="Export calibrated dwell coordinates", defaultextension=".csv",
+            initialfile=f"{stem}_dwell_points.csv",
+            filetypes=[("CSV files", "*.csv")],
+        )
+        if not filename:
+            return
+        columns = ("dwell_id", "start_s", "end_s", "duration_s", "frames",
+                   "median_x_px", "median_y_px", "std_px", "x_cm", "y_cm",
+                   "x_mm", "y_mm", "radius_mm", "rectangle_width_cm",
+                   "rectangle_height_cm", "coordinate_system")
+        try:
+            with Path(filename).open("w", newline="", encoding="utf-8") as output:
+                writer = csv.DictWriter(output, fieldnames=columns)
+                writer.writeheader()
+                for dwell, (x, y) in zip(self.dwell_points, coordinates):
+                    writer.writerow({
+                        "dwell_id": dwell["id"], "start_s": dwell["start_s"],
+                        "end_s": dwell["end_s"], "duration_s": dwell["duration_s"],
+                        "frames": dwell["frames"], "median_x_px": dwell["center"][0],
+                        "median_y_px": dwell["center"][1], "std_px": dwell["std_px"],
+                        "x_cm": x, "y_cm": y, "x_mm": 10 * x, "y_mm": 10 * y,
+                        "radius_mm": 10 * np.hypot(x, y),
+                        "rectangle_width_cm": float(self.rectangle_width_var.get()),
+                        "rectangle_height_cm": float(self.rectangle_height_var.get()),
+                        "coordinate_system": "dot_plane_rectangle_center_x_right_y_up",
+                    })
+        except OSError as exc:
+            messagebox.showerror("Dwell CSV", f"Could not save CSV: {exc}")
+            return
+        self.dwell_status_label.config(text=f"Saved dwell coordinates: {filename}")
+
+    def on_dwell_selected(self, _event=None):
+        selected = self.dwell_tree.selection()
+        if selected:
+            dwell = next((item for item in self.dwell_points
+                          if str(item["id"]) == selected[0]), None)
+            if dwell is not None:
+                self.show_post_frame((dwell["start_frame"] + dwell["end_frame"]) // 2)
+
+    def render_dwell_frame(self):
+        if self.current_frame_bgr is None or self.phase_notebook.index(
+                self.phase_notebook.select()) != 4:
+            return
+        selected = self.dwell_tree.selection()
+        annotated = draw_dwell_points(
+            self.current_frame_bgr,
+            self.dwell_points if self.show_dwell_points_var.get() else [],
+            int(selected[0]) if selected else None,
+        )
+        self.show_preview(Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)))
+        self.detection_label.config(text=f"Dwell points: {len(self.dwell_points)}")
 
     def show_post_frame(self, frame_number, sequential=False):
         if self.preview_capture is None:
@@ -1859,6 +2181,9 @@ class OfflineDetectionGUI:
         self.render_post_frame()
 
     def render_post_frame(self):
+        if self.phase_notebook.index(self.phase_notebook.select()) == 4:
+            self.render_dwell_frame()
+            return
         if self.current_frame_bgr is None or self.phase_notebook.index(
                 self.phase_notebook.select()) != 3:
             return
@@ -1907,6 +2232,7 @@ class OfflineDetectionGUI:
             (frame, robot_center_for(items, expected))
             for frame, items in sorted(self.post_detections.items())
         ]
+        self.clear_dwell_points()
         if hasattr(self, "canvas"):
             self.render_post_frame()
 
@@ -3222,7 +3548,9 @@ class OfflineDetectionGUI:
                 self.show_calibration_frame(self.current_frame_number)
             else:
                 self.render_calibration_frame()
-        elif phase == 3 and self.preview_capture is not None:
+        elif phase in (3, 4) and self.preview_capture is not None:
+            if phase == 4:
+                self.refresh_dwell_table()
             self.show_post_frame(self.post_frame_number)
 
     def on_canvas_resize(self, _event=None):
@@ -3231,7 +3559,7 @@ class OfflineDetectionGUI:
         phase = self.phase_notebook.index(self.phase_notebook.select())
         if phase in (0, 1):
             self.render_calibration_frame()
-        elif phase == 3:
+        elif phase in (3, 4):
             self.render_post_frame()
 
     def start_processing(self):
@@ -3793,7 +4121,7 @@ class OfflineDetectionGUI:
 
         if item is not None:
             if item["kind"] == "frame":
-                if self.phase_notebook.index(self.phase_notebook.select()) != 3:
+                if self.phase_notebook.index(self.phase_notebook.select()) not in (3, 4):
                     self.show_preview(item["image"])
                 self.detection_label.config(text=item["summary"])
                 self.progress["value"] = item["progress"]

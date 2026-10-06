@@ -13,7 +13,7 @@ USAGES = (
     ("2", "Usage 2 - optimize and save a sequence"),
     ("3", "Usage 3 - optimize and create static plots"),
     ("4", "Usage 4 - optimize, simulate, and create animation"),
-    ("5", "Usage 5 - extract 3x3/5x5 dwell points"),
+    ("5", "Usage 5 - recover XY and extract compensation coefficients"),
 )
 ALL_CASES_LABEL = "All cases and conditions"
 
@@ -163,14 +163,14 @@ def main():
     usage_number = USAGES[usage_index][0]
 
     if usage_number == "5":
-        grid_index = select_menu("Choose the experiment grid", ["3 x 3", "5 x 5"])
-        if grid_index is None:
-            return main()
-        grid_size = (3, 5)[grid_index]
-        os.system("cls" if os.name == "nt" else "clear")
-        print(f"Starting Usage 5 for a {grid_size} x {grid_size} grid...\n")
         module = importlib.import_module("usage5")
-        module.main(grid_size=grid_size)
+        condition_index = select_menu("Choose compensation experiment", module.CONDITION_LABELS)
+        if condition_index is None:
+            return main()
+        case_name = "all" if condition_index == 3 else module.COMPENSATION_CONDITIONS[condition_index]
+        os.system("cls" if os.name == "nt" else "clear")
+        print(f"Starting Usage 5 for {case_name}...\n")
+        module.main(case_name=case_name)
         return 0
 
     while True:

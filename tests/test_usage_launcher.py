@@ -66,12 +66,14 @@ class UsageLauncherTests(unittest.TestCase):
     @patch("usage_launcher.discover_cases", return_value=[
         ("case_100", ["cond_009_test", "cond_010_test"]),
     ])
-    def test_usage5_selects_grid_before_file_dialog(
+    def test_usage5_selects_compensation_condition_before_file_dialog(
         self, _discover, select_menu, _system, usage5_main
     ):
         self.assertEqual(main(), 0)
         self.assertEqual(select_menu.call_count, 2)
-        usage5_main.assert_called_once_with(grid_size=5)
+        usage5_main.assert_called_once_with(
+            case_name="case_100.cond_014_test_extract_compensator"
+        )
 
 
 if __name__ == "__main__":
