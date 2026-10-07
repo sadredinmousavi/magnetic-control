@@ -167,7 +167,7 @@ def main():
         condition_index = select_menu("Choose compensation experiment", module.CONDITION_LABELS)
         if condition_index is None:
             return main()
-        case_name = "all" if condition_index == 3 else module.COMPENSATION_CONDITIONS[condition_index]
+        case_name = module.CONDITION_CHOICES[condition_index]
         os.system("cls" if os.name == "nt" else "clear")
         print(f"Starting Usage 5 for {case_name}...\n")
         module.main(case_name=case_name)

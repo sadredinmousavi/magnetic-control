@@ -13,20 +13,25 @@ This project contains six usage scripts:
 - `usage4.py`
   Full workflow. It computes control inputs for all scheduled targets, then runs the payload-aware dynamics simulation and animation.
 - `usage5.py`
-  Uses GUI004 Phase 5 dwell exports from Case 100 conditions 013–015 to recover robot-frame X/Y, measure target errors, and fit radial compensation coefficients.
+  Uses GUI004 Phase 5 dwell exports from Case 100 conditions 013–016 to recover robot-frame X/Y, measure target errors, and fit radial compensation coefficients.
 
-Usage 5 expects exactly 28 dwells per condition in acquisition order: the first
-three define `(0,0)`, `(0,10)` and `(10,0)` mm; the remaining 25 follow the square
-targets from the selected condition (0.06, 0.10 or 0.14 m side length). Export
+Usage 5 expects exactly 28 dwells for each square condition (013–015), or
+72 dwells for Cartesian calibration (016), in acquisition order. The first
+three define `(0,0)`, `(0,10)` and `(10,0)` mm. The remaining 25 square points
+or 69 Cartesian points are matched to the selected condition's target schedule.
+Export
 the dwells using GUI004 Phase 5's **Export dwell CSV**, then choose a condition
 in the launcher, or run:
 
 ```powershell
 python usage5.py 13 path/to/dwell_points.csv
+python usage5.py 16 path/to/cartesian_dwell_points.csv
 python usage5.py all small_dwells.csv medium_dwells.csv large_dwells.csv
 ```
 
 With no CSV arguments it opens a file picker for each selected condition.
+The `all` option continues to combine the three square conditions (013–015);
+select `16` to analyze the Cartesian calibration separately.
 It prefers the exported Phase 1 perspective-corrected coordinates, then uses
 the first three measured dwells to define the robot origin, axes and 10 mm
 axis scales. Their errors are absorbed into this frame, so these are local
@@ -91,7 +96,7 @@ outputs/case_003_cond_002/plot_001.png
 ## How Case Loading Works
 
 Usage scripts load a case by module name; Usage 5 also accepts `13`, `14`,
-`15`, or `all` for its three compensation experiments.
+`15`, `16`, or `all` for its compensation experiments.
 
 There is no hard-coded default case. If no case is supplied, a file-selection
 dialog opens so an unintended case is not run silently.

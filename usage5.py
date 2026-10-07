@@ -14,11 +14,13 @@ PROJECT_DIR = Path(__file__).resolve().parent
 COMPENSATION_CONDITIONS = tuple(
     f"case_100.cond_{number:03d}_test_extract_compensator"
     for number in (13, 14, 15)
-)
+) + ("case_100.cond_016_calibration_cartesian",)
+CONDITION_CHOICES = (*COMPENSATION_CONDITIONS, "all")
 CONDITION_LABELS = (
     "Condition 013 - 0.06 m square",
     "Condition 014 - 0.10 m square",
     "Condition 015 - 0.14 m square",
+    "Condition 016 - Cartesian calibration, r < 5 cm",
     "All three conditions - combined compensation",
 )
 
@@ -27,11 +29,11 @@ def resolve_condition(case_name):
     text = str(case_name).strip()
     if text.lower() == "all":
         return "all"
-    if text in ("13", "14", "15"):
+    if text in ("13", "14", "15", "16"):
         return COMPENSATION_CONDITIONS[int(text) - 13]
     name = normalize_case_name(text)
     if name not in COMPENSATION_CONDITIONS:
-        raise ValueError("Usage 5 supports only compensation conditions 013–015 or 'all'.")
+        raise ValueError("Usage 5 supports conditions 013-016 or 'all' (the three square conditions).")
     return name
 
 
@@ -41,7 +43,7 @@ def choose_condition():
     selected = select_menu("Choose compensation experiment", CONDITION_LABELS)
     if selected is None:
         raise SystemExit("No compensation experiment selected.")
-    return "all" if selected == 3 else COMPENSATION_CONDITIONS[selected]
+    return CONDITION_CHOICES[selected]
 
 
 def choose_dwell_file(condition):
@@ -63,19 +65,19 @@ def choose_dwell_file(condition):
     return Path(selected)
 
 
-def load_dwell_positions(filename):
+def load_dwell_positions(filename, expected_count=28):
     """Keep visits in acquisition order and prefer perspective-corrected cm."""
     frame = pd.read_csv(filename)
-    if len(frame) != 28:
+    if len(frame) != expected_count:
         raise ValueError(
-            f"{Path(filename).name}: expected exactly 28 dwells (3 calibration + "
-            f"25 square points), found {len(frame)}. Correct missing/extra dwells "
+            f"{Path(filename).name}: expected exactly {expected_count} dwells (3 calibration + "
+            f"{expected_count - 3} path points), found {len(frame)}. Correct missing/extra dwells "
             "in GUI004 first; row-to-target matching would otherwise be ambiguous."
         )
     if "dwell_id" in frame:
         ids = pd.to_numeric(frame["dwell_id"], errors="raise").to_numpy()
-        if not np.array_equal(ids, np.arange(1, 29)):
-            raise ValueError("Dwell IDs must be 1–28 in acquisition order.")
+        if not np.array_equal(ids, np.arange(1, expected_count + 1)):
+            raise ValueError(f"Dwell IDs must be 1-{expected_count} in acquisition order.")
     if "start_s" in frame:
         times = pd.to_numeric(frame["start_s"], errors="raise").to_numpy()
         if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
@@ -113,19 +115,26 @@ def analyze_condition(case_name, filename):
         raise ValueError("Analyze one condition at a time.")
     params = load_case(case_name)
     targets = np.asarray([entry[1] for entry in params["TARGET_SCHEDULE"]]) * 1000.0
-    if targets.shape != (28, 2) or not np.allclose(targets[:3], [[0, 0], [0, 10], [10, 0]]):
-        raise ValueError(f"{case_name} must have 3 calibration targets followed by 25 square targets.")
-    source, positions, space = load_dwell_positions(filename)
+    if (targets.ndim != 2 or targets.shape[1] != 2 or len(targets) < 4
+            or not np.allclose(targets[:3], [[0, 0], [0, 10], [10, 0]])):
+        raise ValueError(f"{case_name} must start with the three calibration targets.")
+    point_count = len(targets)
+    source, positions, space = load_dwell_positions(filename, point_count)
+    roles = ["center", "y_axis", "x_axis"]
+    if case_name == COMPENSATION_CONDITIONS[3]:
+        roles += ["cartesian"] * (point_count - 3)
+    else:
+        roles += ["square"] * (point_count - 4) + ["closure"]
     measured = recover_xy_mm(positions)
     errors = measured - targets
     commanded_r = np.linalg.norm(targets, axis=1)
     measured_r = np.linalg.norm(measured, axis=1)
-    factors = np.divide(commanded_r, measured_r, out=np.ones(28), where=measured_r > 1e-9)
+    factors = np.divide(commanded_r, measured_r, out=np.ones(point_count), where=measured_r > 1e-9)
     factors[(commanded_r > 0) & (measured_r <= 1e-9)] = np.nan
     result = pd.DataFrame({
         "condition": case_name, "source_csv": str(Path(filename).resolve()),
-        "point_id": np.arange(1, 29),
-        "role": ["center", "y_axis", "x_axis"] + ["square"] * 24 + ["closure"],
+        "point_id": np.arange(1, point_count + 1),
+        "role": roles,
         "target_x_mm": targets[:, 0], "target_y_mm": targets[:, 1],
         "measured_x_mm": measured[:, 0], "measured_y_mm": measured[:, 1],
         "measured_x_cm": measured[:, 0] / 10, "measured_y_cm": measured[:, 1] / 10,
@@ -136,7 +145,7 @@ def analyze_condition(case_name, filename):
         "radial_compensation_factor": factors,
         "tangential_error_mm": np.divide(
             targets[:, 0] * measured[:, 1] - targets[:, 1] * measured[:, 0],
-            commanded_r, out=np.zeros(28), where=commanded_r > 0,
+            commanded_r, out=np.zeros(point_count), where=commanded_r > 0,
         ),
     })
     for column in ("start_s", "end_s", "duration_s", "std_px", "frames"):
@@ -189,7 +198,7 @@ def fit_radial_compensation(points):
         "sample_fit_rmse_mm": float(np.sqrt(np.mean(sample_residual ** 2))),
         "tangential_error_rmse_mm": float(np.sqrt(np.mean(samples["tangential_error_mm"] ** 2))),
         "calibration_assumption": "First three measured dwells are assigned exactly (0,0), (0,10), (10,0) mm; their error is absorbed into the coordinate frame.",
-        "closure_policy": "Closing corner retained in XY results but excluded from the fit.",
+        "closure_policy": "Square closing corners are excluded from the fit; all Cartesian grid visits are retained.",
     }
     return table, model
 
@@ -212,14 +221,14 @@ def save_error_plot(points, filename):
 
     figure, axes = plt.subplots(1, 2, figsize=(12, 5))
     for condition, section in points.groupby("condition", sort=False):
-        square = section[section["role"].isin(("square", "closure"))]
-        label = condition.split(".")[1].split("_test")[0]
-        axes[0].plot(square["target_x_mm"], square["target_y_mm"], "--", alpha=0.5)
-        axes[0].scatter(square["measured_x_mm"], square["measured_y_mm"], s=18, label=label)
-        axes[0].quiver(square["target_x_mm"], square["target_y_mm"],
-                       square["error_x_mm"], square["error_y_mm"],
+        path = section[section["role"].isin(("square", "closure", "cartesian"))]
+        label = "_".join(condition.split(".")[1].split("_")[:2])
+        axes[0].plot(path["target_x_mm"], path["target_y_mm"], "--", alpha=0.5)
+        axes[0].scatter(path["measured_x_mm"], path["measured_y_mm"], s=18, label=label)
+        axes[0].quiver(path["target_x_mm"], path["target_y_mm"],
+                       path["error_x_mm"], path["error_y_mm"],
                        angles="xy", scale_units="xy", scale=1, width=0.003)
-        axes[1].scatter(square["commanded_radius_mm"], square["radial_error_mm"], s=18, label=label)
+        axes[1].scatter(path["commanded_radius_mm"], path["radial_error_mm"], s=18, label=label)
     axes[0].set(xlabel="X (mm)", ylabel="Y (mm)", title="Targets to measured dwell positions", aspect="equal")
     axes[1].set(xlabel="Commanded radius (mm)", ylabel="Measured minus commanded radius (mm)", title="Radial position error")
     axes[1].axhline(0, color="gray", linewidth=0.8)
@@ -233,7 +242,7 @@ def save_error_plot(points, filename):
 
 def main(case_name=None, input_filename=None, output_filename=None):
     selected = resolve_condition(case_name) if case_name else choose_condition()
-    conditions = COMPENSATION_CONDITIONS if selected == "all" else (selected,)
+    conditions = COMPENSATION_CONDITIONS[:3] if selected == "all" else (selected,)
     if input_filename is None:
         files = [choose_dwell_file(condition) for condition in conditions]
     else:
@@ -275,7 +284,7 @@ def main(case_name=None, input_filename=None, output_filename=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("condition", nargs="?", help="13, 14, 15, all, or a full compensation case name")
+    parser.add_argument("condition", nargs="?", help="13, 14, 15, 16, all (three squares), or a full case name")
     parser.add_argument("dwell_csv", nargs="*", help="GUI004 Phase 5 export(s), in condition order")
     parser.add_argument("--output", type=Path, help="Output XY CSV path")
     args = parser.parse_args()
