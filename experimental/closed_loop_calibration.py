@@ -38,7 +38,7 @@ class MovingROICalibration:
     """Frame-by-frame tracking shared by live preview and movie playback."""
 
     def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area, axis_samples=None,
-                 contrast_threshold=10):
+                 contrast_threshold=10, strict_single=False):
         calibrated_dwell_coordinates([], corners, width_cm, height_cm)
         if count < 1 or not np.isfinite(minimum_area) or minimum_area <= 0:
             raise ValueError("Robot count and minimum area must be positive.")
@@ -51,6 +51,8 @@ class MovingROICalibration:
         self.radius = float(circle[2])
         self.count, self.minimum_area = count, minimum_area
         self.references = []
+        self.strict_single = strict_single
+        self.selection_error = None
         self.detector = RobotDetector()
         self.axes = RobotAxes(corners, width_cm, height_cm, axis_samples) if axis_samples else None
         self.contrast_threshold = float(contrast_threshold)
@@ -74,6 +76,7 @@ class MovingROICalibration:
             dark_contrast_threshold=self.contrast_threshold,
         )
         candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
+        self.selection_error = None
         if self.references:
             selected = match_compact_swarm_candidates(
                 candidates, self.references, self.count, self.radius,
@@ -82,6 +85,26 @@ class MovingROICalibration:
         else:
             selected = [dict(item, robot_id=index + 1)
                         for index, item in enumerate(candidates[:self.count])]
+        if self.strict_single and selected:
+            # Reuse normal selection, but don't silently acquire/switch between
+            # similarly strong blobs without a clear previous-position match.
+            chosen = selected[0]
+            for other in candidates:
+                if other["center"] == chosen["center"]:
+                    continue
+                comparable = other["area"] >= .8 * chosen["area"]
+                if not self.references:
+                    ambiguous = comparable
+                else:
+                    previous = np.asarray(self.references[0])
+                    chosen_distance = np.linalg.norm(np.asarray(chosen["center"]) - previous)
+                    other_distance = np.linalg.norm(np.asarray(other["center"]) - previous)
+                    ambiguous = (comparable and other_distance <= chosen_distance + 5) or (
+                        other["area"] >= .5 * chosen["area"] and other_distance + 5 < chosen_distance)
+                if ambiguous:
+                    self.selection_error = "Robot identity is ambiguous between multiple strong candidates. Adjust the ROI or detection settings; capture has not been saved."
+                    selected = []
+                    break
         center = robot_center_for(selected, self.count)
         # Only a complete group moves the ROI or produces a valid group XY.
         # Missing robots leave a gap rather than shifting toward a partial group.
@@ -125,6 +148,9 @@ class CalibrationTab:
         self.axis_after = None
         self.frame_received_at = None
         self.axis_ready_at = None
+        self.axis_tracker = None
+        self.axis_detections = []
+        self.axis_processed_at = None
 
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
@@ -209,7 +235,7 @@ class CalibrationTab:
             "Only the case.py hardware model is used; no condition or sequence file is needed."
         ), wraplength=1000).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.axis_status = tk.Label(axes_bar, anchor="w", text=(
-            "Ratio = 1. Use one robot and an ROI covering all three positions. Move to Center, +X (10 mm), then +Y (10 mm). "
+            "Ratio = 1. Place the ROI around one robot; it follows the robot during moves. Move to Center, +X (10 mm), then +Y (10 mm). "
             "After each move, visually confirm the robot has settled and press Capture settled robot. No mouse marking."
         ), wraplength=1000)
         self.axis_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
@@ -229,7 +255,7 @@ class CalibrationTab:
             variable.trace_add("write", self.on_metric_size_changed)
 
     def on_metric_size_changed(self, *args):
-        if self.axis_samples or self.axis_busy or self.axis_pending:
+        if self.axis_samples or self.axis_busy or self.axis_pending or getattr(self, "axis_tracker", None) is not None:
             self.reset_axes()
             self.axis_status.config(text="Rectangle size or control case changed. Recalibrate the robot axes.")
 
@@ -253,6 +279,9 @@ class CalibrationTab:
         self.axis_pending = None
         self.axis_ready_at = None
         self.axis_samples = {}
+        self.axis_tracker = None
+        self.axis_detections = []
+        self.axis_processed_at = None
         for button in self.axis_buttons:
             button.config(state="normal")
         if hasattr(self, "axis_capture_button"):
@@ -283,6 +312,16 @@ class CalibrationTab:
             if self.axis_move is None:
                 raise ValueError("Controller movement is unavailable.")
             calibrated_dwell_coordinates([], self.corners, float(self.width_var.get()), float(self.height_var.get()))
+            if self.axis_tracker is None:
+                circle = self.circle if self.tracker is None else (*self.tracker.center, self.tracker.radius)
+                self.axis_tracker = MovingROICalibration(
+                    self.corners, float(self.width_var.get()), float(self.height_var.get()),
+                    (*circle[:2], float(self.radius_var.get())), 1, float(self.area_var.get()),
+                    contrast_threshold=self.read_contrast_threshold(), strict_single=True,
+                )
+            self.update_axis_tracking()
+            if not self.axis_detections:
+                raise ValueError(self.axis_tracker.selection_error or "Robot not acquired. Check Show detection mask and the ROI before commanding a move.")
         except ValueError as error:
             messagebox.showerror("Robot axes", str(error))
             return
@@ -363,19 +402,19 @@ class CalibrationTab:
         area, radius = float(self.area_var.get()), float(self.radius_var.get())
         if not np.isfinite(area) or area <= 0 or not np.isfinite(radius) or radius <= 0:
             raise ValueError("Minimum area and ROI radius must be positive finite numbers.")
-        mask = circle_detection_mask(self.frame.shape[:2], (*self.circle[:2], radius))
-        mask = cv2.bitwise_and(mask, workspace_detection_mask(self.frame.shape[:2], self.corners))
-        _, candidates = self.detector.process(
-            self.frame, mode="Color blobs", color="Dark contrast", minimum_area=area,
-            morphology_kernel_size=1, draw_annotations=False, detection_mask=mask,
-            dark_contrast_threshold=self.read_contrast_threshold(),
-        )
-        candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
-        if not candidates:
-            raise ValueError("No robot detected inside the ROI. Check it is inside the ROI, lower the dark contrast threshold or minimum area, and use Show detection mask before retrying.")
-        if len(candidates) != 1:
-            raise ValueError(f"Found {len(candidates)} candidates inside the ROI; cannot choose safely. Remove extra robots/noise or adjust the ROI and detection settings, then retry.")
-        center = candidates[0]["center"]
+        if getattr(self, "axis_tracker", None) is None:
+            self.axis_tracker = MovingROICalibration(
+                self.corners, float(self.width_var.get()), float(self.height_var.get()),
+                (*self.circle[:2], radius), 1, area,
+                contrast_threshold=self.read_contrast_threshold(), strict_single=True,
+            )
+        settings = (area, radius, self.read_contrast_threshold())
+        if (getattr(self, "axis_processed_at", None) != received
+                or getattr(self, "axis_processed_settings", None) != settings):
+            self.update_axis_tracking()
+        if not self.axis_detections:
+            raise ValueError(self.axis_tracker.selection_error or "No robot detected in the following ROI. Check the camera, ROI and Show detection mask; capture has not been saved.")
+        center = self.axis_detections[0]["center"]
         if self.axis_pending != "Origin" and "Origin" not in self.axis_samples:
             raise ValueError("Capture Center first.")
         if self.axis_pending != "Origin" and np.linalg.norm(np.asarray(center) - self.axis_samples["Origin"]) < 2:
@@ -396,11 +435,35 @@ class CalibrationTab:
             self.axis_capture_button.config(state="disabled")
         for button in self.axis_buttons:
             button.config(state="normal")
-        # Keep the user's ROI fixed for all three calibration captures.
+        self.circle = (*self.axis_tracker.center, self.axis_tracker.radius)
         self.render()
+
+    def update_axis_tracking(self):
+        """Same moving-ROI detector as normal tracking, without exporting rows."""
+        self.axis_tracker.contrast_threshold = self.read_contrast_threshold()
+        self.axis_tracker.minimum_area = float(self.area_var.get())
+        self.axis_tracker.radius = float(self.radius_var.get())
+        if (not np.isfinite(self.axis_tracker.minimum_area) or self.axis_tracker.minimum_area <= 0
+                or not np.isfinite(self.axis_tracker.radius) or self.axis_tracker.radius <= 0):
+            raise ValueError("Minimum area and ROI radius must be positive finite numbers.")
+        self.axis_detections, center, _ = self.axis_tracker.process(self.frame)
+        self.axis_processed_at = self.frame_received_at
+        self.axis_processed_settings = (self.axis_tracker.minimum_area, self.axis_tracker.radius,
+                                        self.axis_tracker.contrast_threshold)
+        self.detections = self.axis_detections
+        if center is not None:
+            self.circle = (*center, self.axis_tracker.radius)
+        self.status.config(text=(
+            "Axis tracking: robot found; ROI follows it. Confirm settling before Capture."
+            if center is not None else self.axis_tracker.selection_error or
+            "Axis tracking: robot lost; ROI held at the last position. Capture is blocked until it is found again."
+        ))
 
     def close_capture(self):
         self.playing = False
+        self.axis_tracker = None
+        self.axis_detections = []
+        self.axis_processed_at = None
         if self.after_id is not None:
             self.parent.after_cancel(self.after_id)
             self.after_id = None
@@ -452,6 +515,13 @@ class CalibrationTab:
             self.status.config(text="Frame size changed. Select four points and place the ROI again.")
         self.frame = frame.copy()
         self.frame_received_at = time.monotonic()
+        if getattr(self, "axis_tracker", None) is not None and self.tracker is None:
+            try:
+                self.update_axis_tracking()
+            except (ValueError, TypeError) as error:
+                self.axis_detections = []
+                self.axis_processed_at = None
+                self.status.config(text=f"Axis tracking unavailable: {error}")
         if self.tracker is not None:
             try:
                 self.tracker.contrast_threshold = self.read_contrast_threshold()
@@ -553,6 +623,9 @@ class CalibrationTab:
                 if not np.isfinite(radius) or radius <= 0:
                     raise ValueError("ROI radius must be positive.")
                 self.circle = (*point, radius)
+                self.axis_tracker = None
+                self.axis_detections = []
+                self.axis_processed_at = None
                 self.status.config(text="ROI placed. Start tracking to detect robots and follow their center.")
             self.detections = []
             self.render()
@@ -670,6 +743,9 @@ class CalibrationTab:
             return
         self.clear_tracking()
         self.tracker = tracker
+        self.axis_tracker = None
+        self.axis_detections = []
+        self.axis_processed_at = None
         self.live_started = time.monotonic()
         self.frozen = False
         self.accept_frame(self.frame)

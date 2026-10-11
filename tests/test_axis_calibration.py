@@ -111,10 +111,75 @@ class RobotAxisTests(unittest.TestCase):
             app.record_axis_from_roi()
         cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
         cv2.circle(app.frame, (115, 100), 3, (20, 20, 20), -1)
-        with self.assertRaisesRegex(ValueError, "2 candidates"):
+        app.frame_received_at += .01
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
             app.record_axis_from_roi()
         self.assertEqual(app.axis_samples, {})
         self.assertEqual(app.axis_pending, "Origin")
+
+    def test_axis_tracking_captures_robot_despite_smaller_noise_blob(self):
+        app = self.app()
+        app.axis_samples = {}
+        app.axis_pending = "Origin"
+        cv2.circle(app.frame, (100, 100), 4, (20, 20, 20), -1)
+        cv2.circle(app.frame, (115, 100), 1, (20, 20, 20), -1)
+        normal = MovingROICalibration(CORNERS, 10, 10, app.circle, 1, 2)
+        expected, _, _ = normal.process(app.frame)
+        app.record_axis_from_roi()
+        self.assertEqual(app.axis_samples["Origin"], list(expected[0]["center"]))
+
+    def test_axis_move_acquires_robot_before_starting_worker(self):
+        app = self.app()
+        app.axis_tracker = None
+        app.axis_after = None
+        app.axis_wait_var = Mock(get=Mock(return_value="3"))
+        app.axis_move = Mock()
+        app.parent = Mock()
+        cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
+        with patch("closed_loop_calibration.threading.Thread") as thread:
+            app.move_axis("Origin")
+        self.assertTrue(app.axis_busy)
+        self.assertIsNotNone(app.axis_tracker)
+        self.assertEqual(app.axis_tracker.references, [(100, 100)])
+        thread.return_value.start.assert_called_once()
+        app.axis_move.assert_not_called()
+
+    def test_axis_roi_follows_movement_outside_initial_roi_and_never_captures_lost_frame(self):
+        app = self.app()
+        app.axis_samples = {"Origin": [100, 100]}
+        app.axis_pending = "+X"
+        app.frame_number = 0
+        app.axis_tracker = MovingROICalibration(CORNERS, 10, 10, app.circle, 1, 2, strict_single=True)
+        for x in (100, 120, 140, 160):
+            frame = np.full((220, 220, 3), 240, np.uint8)
+            cv2.circle(frame, (x, 100), 3, (20, 20, 20), -1)
+            cv2.circle(frame, (x + 10, 110), 1, (20, 20, 20), -1)
+            app.accept_frame(frame)
+            self.assertEqual(tuple(app.axis_tracker.center), (x, 100))
+        app.accept_frame(np.full((220, 220, 3), 240, np.uint8))
+        with self.assertRaisesRegex(ValueError, "No robot detected"):
+            app.record_axis_from_roi()
+        self.assertNotIn("+X", app.axis_samples)
+        self.assertEqual(tuple(app.axis_tracker.center), (160, 100))
+        frame = np.full((220, 220, 3), 240, np.uint8)
+        cv2.circle(frame, (160, 100), 3, (20, 20, 20), -1)
+        app.accept_frame(frame)
+        app.record_axis_from_roi()
+        self.assertEqual(app.axis_samples["+X"], [160, 100])
+
+    def test_axis_tracking_blocks_ambiguous_identity_without_moving_roi(self):
+        tracker = MovingROICalibration(CORNERS, 10, 10, (100, 100, 30), 1, 2, strict_single=True)
+        frame = np.full((220, 220, 3), 240, np.uint8)
+        cv2.circle(frame, (100, 100), 3, (20, 20, 20), -1)
+        tracker.process(frame)
+        frame = np.full((220, 220, 3), 240, np.uint8)
+        cv2.circle(frame, (90, 100), 3, (20, 20, 20), -1)
+        cv2.circle(frame, (110, 100), 3, (20, 20, 20), -1)
+        selected, center, _ = tracker.process(frame)
+        self.assertEqual(selected, [])
+        self.assertIsNone(center)
+        self.assertIn("ambiguous", tracker.selection_error)
+        self.assertEqual(tuple(tracker.center), (100, 100))
 
     def test_roi_capture_rejects_stale_frozen_unmoved_and_uncommanded_frames(self):
         app = self.app()
@@ -175,7 +240,7 @@ class RobotAxisTests(unittest.TestCase):
             app.record_axis_from_roi()
         data = json.loads(json.dumps(app.setup_data()))
         self.assertEqual(data["coordinate_system"], "robot_axes")
-        self.assertEqual(data["roi_circle_px"], [100, 100, 30])
+        self.assertEqual(data["roi_circle_px"], [100, 120, 30])
         self.assertEqual(data["control_case"], "case_100")
         restored = MovingROICalibration(data["corners_px"], data["rectangle_width_cm"],
                                         data["rectangle_height_cm"], data["roi_circle_px"],
