@@ -62,20 +62,47 @@ def read_xy_sequence(path, units="auto"):
     return steps
 
 
-def project_sequence(steps, setup):
+def project_sequence(steps, setup, *, validate=True):
     if setup.get("coordinate_system") != "robot_axes":
         raise ValueError("Capture Center, +X and +Y in Calibration, or load a complete saved setup first.")
     axes = RobotAxes(setup["corners_px"], setup["rectangle_width_cm"],
                      setup["rectangle_height_cm"], setup["axis_samples_px"])
     pixels = axes.pixel_positions(np.asarray([step.target_xy_m for step in steps]) * 100)
+    if validate:
+        validate_projected_points(steps, setup, pixels)
+    return pixels
+
+
+def point_limits(pixels, setup):
     polygon = np.asarray(setup["corners_px"], np.float32)
     width, height = setup["video_size_px"]
-    for index, point in enumerate(pixels, 1):
-        if (np.any(point < 0) or np.any(point >= [width, height])
-                or cv2.pointPolygonTest(polygon, tuple(point), True) < -1e-3):
-            target = np.asarray(steps[index - 1].target_xy_m) * 1000
-            raise ValueError(f"Point {index}, XY ({target[0]:g}, {target[1]:g}) mm, is outside the calibrated four-pin workspace. Check Sequence units, robot axes and rectangle dimensions (cm).")
-    return pixels
+    outside_pins = np.array([cv2.pointPolygonTest(polygon, tuple(point), True) < -1e-3 for point in pixels])
+    outside_frame = np.array([np.any(point < 0) or np.any(point >= [width, height]) for point in pixels])
+    return outside_pins, outside_frame
+
+
+def sequence_diagnostics(steps, setup, pixels):
+    axes = RobotAxes(setup["corners_px"], setup["rectangle_width_cm"], setup["rectangle_height_cm"], setup["axis_samples_px"])
+    corners_mm = axes.coordinates(setup["corners_px"]) * 10
+    xy_mm = np.asarray([step.target_xy_m for step in steps]) * 1000
+    return (f"Sequence range: X [{xy_mm[:, 0].min():g}, {xy_mm[:, 0].max():g}], Y [{xy_mm[:, 1].min():g}, {xy_mm[:, 1].max():g}] mm. "
+            f"Pin extents in robot XY: X [{corners_mm[:, 0].min():.2f}, {corners_mm[:, 0].max():.2f}], "
+            f"Y [{corners_mm[:, 1].min():.2f}, {corners_mm[:, 1].max():.2f}] mm. "
+            "XY zero is captured Center, not necessarily the pin rectangle's center.")
+
+
+def validate_projected_points(steps, setup, pixels, *, indices=None, allow_outside_pins=False):
+    outside_pins, outside_frame = point_limits(pixels, setup)
+    for index in range(len(steps)) if indices is None else indices:
+        target = np.asarray(steps[index].target_xy_m) * 1000
+        description = f"Point {index + 1}, XY ({target[0]:g}, {target[1]:g}) mm"
+        if outside_frame[index]:
+            raise ValueError(f"{description} is outside the camera frame. Check Sequence units, origin and calibration. "
+                             + sequence_diagnostics(steps, setup, pixels))
+        if outside_pins[index] and not allow_outside_pins:
+            raise ValueError(f"{description} is outside the four-pin rectangle. "
+                             "Choose an inside point, use a smaller sequence, or explicitly allow extrapolation beyond pins. "
+                             + sequence_diagnostics(steps, setup, pixels))
 
 
 def execute_xy_sequence(steps, commander, case_name, *, active, report):

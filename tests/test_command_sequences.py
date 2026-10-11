@@ -3,6 +3,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -10,7 +11,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
 from axis_calibration import RobotAxes
-from command_sequences import XYStep, read_xy_sequence, resolve_xy_units, project_sequence, execute_xy_sequence
+from command_sequences import (
+    XYStep, read_xy_sequence, resolve_xy_units, project_sequence, execute_xy_sequence,
+    point_limits, sequence_diagnostics, validate_projected_points,
+)
 from command_tab import CommandTab
 from point_control import PointCommander
 
@@ -160,7 +164,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.events, app.job, app.running = queue.Queue(), 1, True
         app.steps = [XYStep((0, 0), 3, 180)]
         app.active_index = None
-        for name in ("table", "status", "render", "set_running", "load_button", "calibration_button", "run_button", "stop_button", "units_combo"):
+        for name in ("table", "status", "render", "set_running", "load_button", "calibration_button", "run_button", "run_selected_button", "extrapolation_check", "stop_button", "units_combo"):
             setattr(app, name, Mock())
         app.events.put((1, "sent", 0, {"angles_deg": [60, 70]}))
         app.events.put((1, "completed", 0, {"angles_deg": [60, 70]}))
@@ -182,6 +186,112 @@ class CommandSequenceTests(unittest.TestCase):
         app.frame = np.zeros((480, 640, 3), np.uint8)
         with self.assertRaisesRegex(ValueError, "size differs"):
             app.prepare()
+
+    def test_preview_remains_visible_when_some_points_are_outside_pins(self):
+        steps = [XYStep((0, 0), 0, 180), XYStep((.07, 0), 0, 180)]
+        data = setup()
+        data["video_size_px"] = [400, 400]
+        pixels = project_sequence(steps, data, validate=False)
+        outside, off_camera = point_limits(pixels, data)
+        np.testing.assert_array_equal(outside, [False, True])
+        np.testing.assert_array_equal(off_camera, [False, False])
+        validate_projected_points(steps, data, pixels, indices=(0,))
+        with self.assertRaisesRegex(ValueError, "Point 2.*four-pin"):
+            validate_projected_points(steps, data, pixels)
+        validate_projected_points(steps, data, pixels, allow_outside_pins=True)
+        self.assertIn("Sequence range", sequence_diagnostics(steps, data, pixels))
+
+    def test_extrapolation_permission_never_allows_outside_camera(self):
+        steps = [XYStep((.2, 0), 0, 180)]
+        data = setup()
+        pixels = project_sequence(steps, data, validate=False)
+        with self.assertRaisesRegex(ValueError, "outside the camera frame"):
+            validate_projected_points(steps, data, pixels, allow_outside_pins=True)
+
+    def test_shifted_origin_shifts_limits_not_units(self):
+        data = setup({"Origin": [120, 110], "+X": [140, 110], "+Y": [120, 90]})
+        steps = [XYStep((.05, 0), 0, 180)]
+        pixels = project_sequence(steps, data, validate=False)
+        outside, _ = point_limits(pixels, data)
+        self.assertTrue(outside[0])
+        self.assertIn("X [-55.00, 45.00]", sequence_diagnostics(steps, data, pixels))
+
+    def run_app(self):
+        app = CommandTab.__new__(CommandTab)
+        app.running, app.job, app.active_index = False, 0, None
+        app.events, app.stop_event = queue.Queue(), threading.Event()
+        app.steps = [XYStep((.07, 0), 0, 180), XYStep((.01, 0), 0, 180)]
+        app.calibration = Mock(capture=None)
+        data = setup()
+        data["video_size_px"] = [400, 400]
+        app.calibration.setup_data.return_value = data
+        app.frame = np.zeros((400, 400, 3), np.uint8)
+        app.frame_received_at = time.monotonic()
+        app.camera_running = lambda: True
+        app.commander = PointCommander(lambda: app.port)
+        app.port = Mock(is_open=True)
+        app.input_units = "mm"
+        app.allow_extrapolation_var = Mock(get=Mock(return_value=False))
+        for name in ("parent", "table", "status", "render", "set_running", "load_button", "calibration_button",
+                     "run_button", "run_selected_button", "stop_button", "units_combo", "extrapolation_check"):
+            setattr(app, name, Mock())
+        app.table.selection.return_value = ("1",)
+        return app
+
+    def test_run_selected_sends_only_that_row_and_uses_original_row_number(self):
+        app = self.run_app()
+        with patch("command_tab.messagebox.askyesno", return_value=True), \
+             patch("command_tab.threading.Thread") as thread, \
+             patch("command_tab.load_hardware_case", return_value={}), \
+             patch.object(app.commander, "calculate", return_value={"angles_deg": [60, 70]}) as calculate, \
+             patch("helpers.moveArray") as move:
+            app.run_selected()
+            thread.call_args.kwargs["target"]()
+            app.poll()
+        calculate.assert_called_once_with("case_100", (.01, 0), ratio=1.0, angle_deg=None)
+        move.assert_called_once()
+        app.table.set.assert_any_call("1", "state", "Completed")
+        self.assertEqual(app.run_indices, (1,))
+
+    def test_run_all_blocks_unapproved_outside_points_before_starting_worker(self):
+        app = self.run_app()
+        with patch("command_tab.messagebox.showerror") as error, patch("command_tab.threading.Thread") as thread:
+            app.run()
+        error.assert_called_once()
+        thread.assert_not_called()
+        self.assertFalse(app.running)
+
+    def test_run_all_can_extrapolate_only_with_explicit_permission_and_warning(self):
+        app = self.run_app()
+        app.allow_extrapolation_var.get.return_value = True
+        with patch("command_tab.messagebox.askyesno", return_value=True) as confirm, \
+             patch("command_tab.threading.Thread") as thread, \
+             patch("command_tab.load_hardware_case", return_value={}), \
+             patch.object(app.commander, "calculate", return_value={"angles_deg": [60, 70]}) as calculate, \
+             patch("helpers.moveArray") as move:
+            app.run()
+            thread.call_args.kwargs["target"]()
+            app.poll()
+        self.assertIn("WARNING", confirm.call_args.args[1])
+        self.assertEqual(calculate.call_count, 2)
+        self.assertEqual(move.call_count, 2)
+        self.assertEqual(app.run_indices, (0, 1))
+
+    def test_show_all_fits_entire_image_and_even_off_frame_targets(self):
+        app = CommandTab.__new__(CommandTab)
+        app.frame = np.full((400, 400, 3), 240, np.uint8)
+        app.setup = setup()
+        app.pixels = np.array([[-40., 100.], [440., 100.]])
+        app.active_index, app.show_all = 1, True
+        app.canvas = Mock()
+        app.canvas.winfo_width.return_value = 800
+        app.canvas.winfo_height.return_value = 500
+        with patch("command_tab.ImageTk.PhotoImage"):
+            app.render()
+        self.assertTrue(np.all(app.screen_points >= 0))
+        self.assertTrue(np.all(app.screen_points < [800, 500]))
+        colors = [call.kwargs.get("outline") for call in app.canvas.create_oval.call_args_list]
+        self.assertIn("#ff9900", colors)
 
 
 if __name__ == "__main__":
