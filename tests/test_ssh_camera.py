@@ -29,6 +29,15 @@ CAMERA_LIST = """Available cameras
     Modes: 'SRGGB12_CSI2P' : 2028x1520 [40.01 fps - (0, 0)/4056x3040 crop]
 """
 
+OV5647_CAMERA_LIST = """Available cameras
+-----------------
+0 : ov5647 [2592x1944 10-bit GBRG] (/base/soc/i2c0mux/i2c@1/ov5647@36)
+    Modes: 'SGBRG10_CSI2P' : 640x480 [58.92 fps - (16, 0)/2560x1920 crop]
+                             1296x972 [46.34 fps - (0, 0)/2592x1944 crop]
+                             1920x1080 [32.81 fps - (348, 434)/1928x1080 crop]
+                             2592x1944 [15.63 fps - (0, 0)/2592x1944 crop]
+"""
+
 
 class SSHCameraTests(unittest.TestCase):
     def test_default_ssh_target_port_and_password(self):
@@ -71,6 +80,20 @@ class SSHCameraTests(unittest.TestCase):
         selected = preferred_camera_mode(parse_camera_modes(CAMERA_LIST))
         self.assertTrue(selected.full_field)
         self.assertEqual(selected.mode_spec, "1640:1232:10:P")
+
+    @patch("ssh_camera.subprocess.run")
+    @patch("ssh_camera.SSHCameraClient.find_ssh_executable", return_value="plink")
+    def test_ov5647_header_with_bit_depth_and_bayer_order(self, executable, run):
+        run.return_value = subprocess.CompletedProcess([], 0, b"", OV5647_CAMERA_LIST.encode())
+        modes = SSHCameraClient.list_modes(SSHCameraSettings())
+        self.assertEqual(len(modes), 4)
+        self.assertEqual(modes[0].camera_name, "ov5647")
+        self.assertEqual(modes[0].sensor_size, (2592, 1944))
+        self.assertEqual([mode.full_field for mode in modes], [False, True, False, True])
+        preferred = preferred_camera_mode(modes)
+        self.assertEqual(preferred.mode_spec, "1296:972:10:P")
+        command = build_camera_command(SSHCameraSettings(camera_mode=preferred))
+        self.assertIn("--mode 1296:972:10:P --width 1296 --height 972", command)
 
     def test_stream_uses_selected_camera_native_resolution_and_fps(self):
         mode = parse_camera_modes(CAMERA_LIST)[5]

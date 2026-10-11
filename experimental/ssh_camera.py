@@ -65,7 +65,11 @@ def parse_camera_modes(output):
     pixel_format = None
     modes = []
     for line in output.splitlines():
-        header = re.match(r"\s*(\d+)\s*:\s*(\S+)\s*\[(\d+)x(\d+)\]", line)
+        # Newer camera tools also include depth/Bayer metadata in the brackets,
+        # e.g. "ov5647 [2592x1944 10-bit GBRG]".
+        header = re.match(
+            r"\s*(\d+)\s*:\s*(\S+)\s*\[(\d+)x(\d+)(?:\s+[^\]]*)?\]", line
+        )
         if header:
             index, name, width, height = header.groups()
             camera = (int(index), name, (int(width), int(height)))
