@@ -431,6 +431,34 @@ live** holds a live frame for setup. **Save setup / Load setup** retain the four
 points, physical rectangle size, ROI, robot count and minimum area in JSON.
 **Export XY CSV** saves per-robot and group coordinates for the tracked frames.
 
+GUI005 calibration **Save setup / Load setup** defaults to
+`experimental/setups/`. The suggested setup filename is
+`YYYYMMDD_HHMMSS.json` in Tehran time. It stores the four points, physical
+rectangle dimensions, ROI, robot count and detection minimum area.
+To align XY with the magnetic controller rather than the camera image, use
+one robot and set **Robots** to `1`. Choose the **Control case** matching your
+hardware, then press **Move & mark Origin**: this commands `(0, 0)` metres and
+waits for the settle interval. Click the settled robot; the click snaps to the
+nearest dark blob. Repeat with **Move & mark +X** for `(0.01, 0)` metres (10 mm),
+then **Move & mark +Y** for `(0, 0.001)` metres (1 mm). The preview shows the
+origin and axis directions. Both serial controller and live Pi camera must be
+connected for these moves. **Reset axes** cancels pending calibration steps
+and returns to image-aligned XY; it does not reverse an already sent motor move.
+The four dots and rectangle dimensions establish perspective and physical
+scale. Robot references establish the origin and fit perpendicular positive
+axes, including mirrored camera views. Nominal commanded distances are not
+used to rescale measured positions; actual accuracy depends on the selected
+control model, settling, point selection and rectangle measurements. The
+observed displacements are displayed for checking. **Save setup** includes
+these references and control case in the dated JSON; **Load setup** restores
+the robot coordinate mapping. Older setup files without robot axes still load.
+Usage 2 also exports the desired target coordinates on every sequence export
+to `experimental/xy_sequences/`, using the same filename as its
+magnet-angle sequence. XY text rows use `[x, y] | wait | zero` in metres; a
+multi-target row contains `[[x1, y1], [x2, y2], ...] | wait | zero`. Row order
+and waits match the angle sequence. These are desired points, separate from
+GUI005's CSV of measured robot positions in cm.
+
 On Windows, double-click `04-usage.bat` in the project root. The launcher scans
 `cases/case_*` and provides separate Usage, Case, and Condition menus. Use the
 Up/Down arrow keys and Enter, or type a displayed list number/name and press

@@ -1,10 +1,15 @@
 """GUI005 calibration using GUI004's dark-contrast moving swarm ROI."""
 
 import csv
+from datetime import datetime
 import json
+from pathlib import Path
+import queue
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -16,12 +21,20 @@ from gui004 import (
     robot_center_for, workspace_detection_mask,
 )
 from robot_vision import RobotDetector
+from axis_calibration import AXIS_TARGETS_M, RobotAxes
+
+
+SETUP_DIR = Path(__file__).resolve().parent / "setups"
+
+
+def default_setup_name():
+    return datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y%m%d_%H%M%S.json")
 
 
 class MovingROICalibration:
     """Frame-by-frame tracking shared by live preview and movie playback."""
 
-    def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area):
+    def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area, axis_samples=None):
         calibrated_dwell_coordinates([], corners, width_cm, height_cm)
         if count < 1 or not np.isfinite(minimum_area) or minimum_area <= 0:
             raise ValueError("Robot count and minimum area must be positive.")
@@ -35,6 +48,14 @@ class MovingROICalibration:
         self.count, self.minimum_area = count, minimum_area
         self.references = []
         self.detector = RobotDetector()
+        self.axes = RobotAxes(corners, width_cm, height_cm, axis_samples) if axis_samples else None
+
+    def coordinates(self, points):
+        if self.axes is not None:
+            return self.axes.coordinates(points)
+        return calibrated_dwell_coordinates(
+            [{"center": point} for point in points], self.corners, self.width_cm, self.height_cm,
+        )
 
     def process(self, frame):
         mask = circle_detection_mask(frame.shape[:2], (*self.center, self.radius))
@@ -60,20 +81,15 @@ class MovingROICalibration:
             self.center = np.asarray(center, dtype=float)
             self.references = [item["center"] for item in sorted(
                 selected, key=lambda item: item["robot_id"])]
-        xy = calibrated_dwell_coordinates(
-            [{"center": item["center"]} for item in selected],
-            self.corners, self.width_cm, self.height_cm,
-        )
+        xy = self.coordinates([item["center"] for item in selected])
         for item, coordinates in zip(selected, xy):
             item["xy_cm"] = tuple(coordinates)
-        group_xy = None if center is None else tuple(calibrated_dwell_coordinates(
-            [{"center": center}], self.corners, self.width_cm, self.height_cm,
-        )[0])
+        group_xy = None if center is None else tuple(self.coordinates([center])[0])
         return selected, center, group_xy
 
 
 class CalibrationTab:
-    def __init__(self, parent):
+    def __init__(self, parent, axis_move=None):
         self.parent = parent
         self.frame = None
         self.corners = []
@@ -91,6 +107,13 @@ class CalibrationTab:
         self.after_id = None
         self.source = "Live Pi camera"
         self.detector = RobotDetector()
+        self.axis_move = axis_move
+        self.axis_samples = {}
+        self.axis_pending = None
+        self.axis_busy = False
+        self.axis_events = queue.Queue()
+        self.axis_job = 0
+        self.axis_after = None
 
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
@@ -124,9 +147,33 @@ class CalibrationTab:
         tk.Button(tools, text="Freeze / Resume live", command=self.freeze_live).pack(side="left", padx=4)
         tk.Button(tools, text="Start tracking", command=self.start_tracking).pack(side="left", padx=4)
         tk.Button(tools, text="Stop tracking", command=self.stop_tracking).pack(side="left", padx=4)
+        axes_bar = tk.LabelFrame(parent, text="Robot XY axes — use one robot", padx=5, pady=4)
+        axes_bar.pack(fill="x", padx=8, pady=4)
+        axes_bar.columnconfigure(1, weight=1)
+        self.control_case_var = tk.StringVar(value="")
+        cases_dir = Path(__file__).resolve().parents[1] / "cases"
+        cases = [f"{path.parent.name}.{path.stem}" for path in sorted(cases_dir.glob("case_*/cond_*.py"))]
+        tk.Label(axes_bar, text="Control case").grid(row=0, column=0)
+        ttk.Combobox(axes_bar, textvariable=self.control_case_var, values=cases,
+                     width=39, state="readonly").grid(row=0, column=1, padx=4, sticky="ew")
+        self.axis_wait_var = tk.StringVar(value="3")
+        tk.Label(axes_bar, text="Settle (s)").grid(row=0, column=2)
+        tk.Entry(axes_bar, textvariable=self.axis_wait_var, width=4).grid(row=0, column=3)
+        actions = tk.Frame(axes_bar)
+        actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.axis_buttons = []
+        for name in AXIS_TARGETS_M:
+            button = tk.Button(actions, text=f"Move & mark {name}", command=lambda n=name: self.move_axis(n))
+            button.pack(side="left", padx=3)
+            self.axis_buttons.append(button)
+        tk.Button(actions, text="Reset axes", command=self.reset_axes).pack(side="left", padx=3)
+        self.axis_status = tk.Label(axes_bar, anchor="w", text=(
+            "Choose the hardware control case. Move to Origin, +X (10 mm), then +Y (1 mm); click the settled robot after each move."
+        ), wraplength=1000)
+        self.axis_status.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         tk.Label(parent, anchor="w", text=(
             "Select four corner dots, enter their rectangle size, then place a circular ROI around all robots. "
-            "Dark contrast detection only. XY origin: rectangle center; X right, Y up."
+            "Dark contrast detection only. Calibrate robot axes below to replace the default image-aligned XY."
         ), wraplength=1000).pack(fill="x", padx=10)
         self.status = tk.Label(parent, text="Waiting for a live camera frame or movie.", anchor="w")
         self.status.pack(fill="x", padx=10, pady=4)
@@ -134,12 +181,125 @@ class CalibrationTab:
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.canvas.bind("<Button-1>", self.click)
         self.canvas.bind("<Configure>", lambda event: self.render())
+        for variable in (self.width_var, self.height_var, self.control_case_var):
+            variable.trace_add("write", self.on_metric_size_changed)
+
+    def on_metric_size_changed(self, *args):
+        if self.axis_samples:
+            self.reset_axes()
+            self.axis_status.config(text="Rectangle size or control case changed. Recalibrate the robot axes.")
 
     def clear_tracking(self):
         self.tracker = None
         self.detections = []
         self.rows = []
         self.live_started = None
+
+    def reset_axes(self):
+        self.stop_tracking()
+        self.axis_job += 1
+        self.axis_busy = False
+        self.axis_pending = None
+        self.axis_samples = {}
+        for button in self.axis_buttons:
+            button.config(state="normal")
+        self.axis_status.config(text="Axes reset. Mark Origin, then +X and +Y.")
+        self.render()
+
+    def move_axis(self, name):
+        if self.axis_busy:
+            return
+        try:
+            if self.capture is not None:
+                raise ValueError("Axis movement requires the live Pi camera.")
+            if self.frame is None or self.circle is None or len(self.corners) != 4:
+                raise ValueError("Select four corners and place an ROI around the single robot first.")
+            if int(self.count_var.get()) != 1:
+                raise ValueError("Set Robots to 1 for axis calibration.")
+            if name != "Origin" and "Origin" not in self.axis_samples:
+                raise ValueError("Move and mark Origin first.")
+            if not self.control_case_var.get():
+                raise ValueError("Select the control case matching your hardware geometry first.")
+            wait = float(self.axis_wait_var.get())
+            if not np.isfinite(wait) or wait <= 0:
+                raise ValueError("Settle time must be positive.")
+            if self.axis_move is None:
+                raise ValueError("Controller movement is unavailable.")
+            calibrated_dwell_coordinates([], self.corners, float(self.width_var.get()), float(self.height_var.get()))
+        except ValueError as error:
+            messagebox.showerror("Robot axes", str(error))
+            return
+        self.stop_tracking()
+        self.clear_tracking()
+        if name == "Origin":
+            self.axis_samples = {}
+        self.axis_pending = None
+        self.axis_busy = True
+        self.axis_job += 1
+        job = self.axis_job
+        case = self.control_case_var.get()
+        self.frozen = False
+        for button in self.axis_buttons:
+            button.config(state="disabled")
+        target = AXIS_TARGETS_M[name]
+        self.axis_status.config(text=f"Moving to {name} {target} m. Waiting for the controller and {wait:g} s settling...")
+
+        def worker():
+            try:
+                self.axis_move(target, case, wait, lambda: self.axis_job == job)
+                self.axis_events.put((job, name, None))
+            except Exception as error:
+                self.axis_events.put((job, name, str(error)))
+
+        threading.Thread(target=worker, daemon=True).start()
+        if self.axis_after is None:
+            self.axis_after = self.parent.after(50, self.poll_axis_move)
+
+    def poll_axis_move(self):
+        self.axis_after = None
+        try:
+            while True:
+                job, name, error = self.axis_events.get_nowait()
+                if job != self.axis_job:
+                    continue
+                self.axis_busy = False
+                for button in self.axis_buttons:
+                    button.config(state="normal")
+                if error:
+                    self.axis_status.config(text=f"Movement failed: {error}")
+                    messagebox.showerror("Robot axes", error)
+                else:
+                    self.axis_pending = name
+                    self.axis_status.config(text=f"At {name}: click the settled robot to record its position. The click will snap to the nearest dark blob.")
+        except queue.Empty:
+            pass
+        if self.axis_busy:
+            self.axis_after = self.parent.after(50, self.poll_axis_move)
+
+    def mark_axis(self, point):
+        mask = circle_detection_mask(self.frame.shape[:2], (*point, 25))
+        mask = cv2.bitwise_and(mask, workspace_detection_mask(self.frame.shape[:2], self.corners))
+        _, candidates = self.detector.process(
+            self.frame, mode="Color blobs", color="Dark contrast", minimum_area=float(self.area_var.get()),
+            morphology_kernel_size=1, draw_annotations=False, detection_mask=mask,
+        )
+        candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
+        if not candidates:
+            raise ValueError("No dark robot near this click. Click closer to the robot.")
+        center = min(candidates, key=lambda item: np.linalg.norm(np.asarray(item["center"]) - point))["center"]
+        samples = dict(self.axis_samples, **{self.axis_pending: list(center)})
+        if len(samples) == 3:
+            axes = RobotAxes(self.corners, float(self.width_var.get()), float(self.height_var.get()), samples)
+            self.axis_status.config(text=(
+                f"Robot axes calibrated. Observed X move: {axes.lengths_cm[0] * 10:.2f} mm; "
+                f"Y move: {axes.lengths_cm[1] * 10:.2f} mm. Save setup to retain this calibration."
+            ))
+        else:
+            self.axis_status.config(text=f"{self.axis_pending} marked. {len(samples)}/3 references recorded.")
+        self.axis_samples = samples
+        self.axis_pending = None
+        self.circle = (*center, float(self.radius_var.get()))
+        self.render()
 
     def close_capture(self):
         self.playing = False
@@ -151,6 +311,8 @@ class CalibrationTab:
             self.capture = None
 
     def use_live(self):
+        if self.axis_busy or self.axis_pending:
+            self.reset_axes()
         self.close_capture()
         self.source = "Live Pi camera"
         self.frozen = False
@@ -170,6 +332,8 @@ class CalibrationTab:
             return
         self.close_capture()
         self.capture, self.source = capture, path
+        if self.axis_busy or self.axis_pending:
+            self.reset_axes()
         fps = capture.get(cv2.CAP_PROP_FPS)
         self.fps = fps if np.isfinite(fps) and fps > 0 else 30.0
         self.frame_number = 0
@@ -184,6 +348,7 @@ class CalibrationTab:
     def accept_frame(self, frame):
         if self.frame is not None and self.frame.shape[:2] != frame.shape[:2]:
             self.corners, self.circle = [], None
+            self.reset_axes()
             self.clear_tracking()
             self.status.config(text="Frame size changed. Select four points and place the ROI again.")
         self.frame = frame.copy()
@@ -250,6 +415,9 @@ class CalibrationTab:
             self.status.config(text="First frame. Place ROI on the initial robots, then Start tracking.")
 
     def freeze_live(self):
+        if self.axis_busy or self.axis_pending:
+            self.axis_status.config(text="Keep the live preview running until the robot measurement is recorded.")
+            return
         if self.capture is None:
             self.frozen = not self.frozen
             self.status.config(text="Live frame frozen for setup." if self.frozen else "Live preview resumed.")
@@ -264,6 +432,15 @@ class CalibrationTab:
         point = (round((event.x - ox) / scale), round((event.y - oy) / scale))
         h, w = self.frame.shape[:2]
         if not (0 <= point[0] < w and 0 <= point[1] < h):
+            return
+        if self.axis_busy:
+            self.axis_status.config(text="Wait for the move to finish before marking the robot.")
+            return
+        if self.axis_pending is not None:
+            try:
+                self.mark_axis(point)
+            except ValueError as error:
+                messagebox.showerror("Robot axes", str(error))
             return
         self.playing = False
         self.frozen = True
@@ -282,6 +459,7 @@ class CalibrationTab:
                     point = min(dots, key=lambda item: np.linalg.norm(
                         np.asarray(item["center"]) - point))["center"]
                 self.corners.append(point)
+                self.reset_axes()
                 if len(self.corners) == 4:
                     self.corners = OfflineDetectionGUI.order_corner_points(self.corners)
                 self.status.config(text=f"{len(self.corners)}/4 points. " + (
@@ -298,7 +476,7 @@ class CalibrationTab:
             messagebox.showerror("Calibration", str(error))
 
     def clear_points(self):
-        self.stop_tracking()
+        self.reset_axes()
         self.corners = []
         self.render()
         self.status.config(text="Select the four green corner dots.")
@@ -308,12 +486,15 @@ class CalibrationTab:
             messagebox.showerror("Calibration", "Connect the camera or open a movie first.")
             return
         try:
+            if self.axis_busy or self.axis_pending or 0 < len(self.axis_samples) < 3:
+                raise ValueError("Complete the robot-axis measurements or Reset axes before tracking.")
             if self.circle is None:
                 raise ValueError("Place the ROI around the robots first.")
             circle = (*self.circle[:2], float(self.radius_var.get()))
             tracker = MovingROICalibration(
                 self.corners, float(self.width_var.get()), float(self.height_var.get()),
                 circle, int(self.count_var.get()), float(self.area_var.get()),
+                getattr(self, "axis_samples", None) if len(getattr(self, "axis_samples", {})) == 3 else None,
             )
             detections, center, _ = tracker.process(self.frame)
             if center is None:
@@ -354,6 +535,20 @@ class CalibrationTab:
                        round(float(circle[2])), (255, 255, 0), 1)
         for item in self.detections:
             cv2.drawMarker(annotated, item["center"], (0, 0, 255), cv2.MARKER_CROSS, 10, 1)
+        samples = getattr(self, "axis_samples", {})
+        if "Origin" in samples:
+            origin = tuple(map(int, samples["Origin"]))
+            cv2.drawMarker(annotated, origin, (0, 255, 255), cv2.MARKER_CROSS, 15, 2)
+            cv2.putText(annotated, "O", (origin[0] + 7, origin[1] + 15), 0, .5, (0, 255, 255), 1)
+            for name, color in (("+X", (0, 0, 255)), ("+Y", (255, 180, 0))):
+                if name in samples:
+                    point = tuple(map(int, samples[name]))
+                    delta = np.asarray(point) - origin
+                    length = np.linalg.norm(delta)
+                    end = tuple(np.rint(np.asarray(origin) + delta / max(length, 1) * 60).astype(int))
+                    cv2.arrowedLine(annotated, origin, end, color, 2, tipLength=.15)
+                    cv2.circle(annotated, point, 4, color, 1)
+                    cv2.putText(annotated, name, end, 0, .6, color, 2)
         h, w = annotated.shape[:2]
         cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         scale = min(cw / w, ch / h)
@@ -365,24 +560,40 @@ class CalibrationTab:
         self.canvas.create_image(cw / 2, ch / 2, image=self.photo, anchor="center")
 
     def setup_data(self):
+        if getattr(self, "axis_busy", False) or getattr(self, "axis_pending", None):
+            raise ValueError("Finish the current robot-axis move and click before saving.")
         if self.frame is None or self.circle is None:
             raise ValueError("Select a frame, four points and an ROI first.")
         data = {
-            "version": 1, "video_size_px": list(self.frame.shape[1::-1]),
+            "version": 2, "video_size_px": list(self.frame.shape[1::-1]),
             "corners_px": self.corners, "rectangle_width_cm": float(self.width_var.get()),
             "rectangle_height_cm": float(self.height_var.get()),
-            "roi_circle_px": [*self.circle[:2], float(self.radius_var.get())],
+            "roi_circle_px": [
+                *(self.circle[:2] if self.tracker is None else self.tracker.center),
+                float(self.radius_var.get()) if self.tracker is None else self.tracker.radius,
+            ],
             "robot_count": int(self.count_var.get()), "minimum_area": float(self.area_var.get()),
+            "axis_samples_px": getattr(self, "axis_samples", {}),
+            "axis_targets_m": AXIS_TARGETS_M,
+            "control_case": self.control_case_var.get() if hasattr(self, "control_case_var") else "",
+            "coordinate_system": "robot_axes" if len(getattr(self, "axis_samples", {})) == 3 else "rectangle_center",
         }
+        if data["axis_samples_px"] and len(data["axis_samples_px"]) != 3:
+            raise ValueError("Finish Origin, +X and +Y measurements or Reset axes before saving.")
         MovingROICalibration(data["corners_px"], data["rectangle_width_cm"],
                              data["rectangle_height_cm"], data["roi_circle_px"],
-                             data["robot_count"], data["minimum_area"])
+                             data["robot_count"], data["minimum_area"], data["axis_samples_px"])
         return data
 
     def save_setup(self):
         try:
             data = self.setup_data()
-            path = filedialog.asksaveasfilename(title="Save GUI005 calibration", defaultextension=".json")
+            SETUP_DIR.mkdir(parents=True, exist_ok=True)
+            path = filedialog.asksaveasfilename(
+                title="Save GUI005 calibration", initialdir=str(SETUP_DIR),
+                initialfile=default_setup_name(), defaultextension=".json",
+                filetypes=[("Calibration setup", "*.json")],
+            )
             if path:
                 with open(path, "w", encoding="utf-8") as stream:
                     json.dump(data, stream, indent=2)
@@ -394,32 +605,43 @@ class CalibrationTab:
         if self.frame is None:
             messagebox.showerror("Calibration", "Select a live frame or movie first.")
             return
-        path = filedialog.askopenfilename(title="Load GUI005 calibration", filetypes=[("JSON", "*.json")])
+        SETUP_DIR.mkdir(parents=True, exist_ok=True)
+        path = filedialog.askopenfilename(
+            title="Load GUI005 calibration", initialdir=str(SETUP_DIR),
+            filetypes=[("JSON", "*.json")],
+        )
         if not path:
             return
         try:
             with open(path, encoding="utf-8") as stream:
                 data = json.load(stream)
-            if data["version"] != 1 or data["video_size_px"] != list(self.frame.shape[1::-1]):
+            if data["version"] not in (1, 2) or data["video_size_px"] != list(self.frame.shape[1::-1]):
                 raise ValueError("Calibration does not match the current frame size.")
+            samples = data.get("axis_samples_px", {})
+            if samples and set(samples) != set(AXIS_TARGETS_M):
+                raise ValueError("Saved robot axis references are incomplete.")
             tracker = MovingROICalibration(
                 data["corners_px"], data["rectangle_width_cm"], data["rectangle_height_cm"],
                 data["roi_circle_px"], data["robot_count"], data["minimum_area"],
+                samples,
             )
             h, w = self.frame.shape[:2]
-            points = np.asarray([*tracker.corners, tracker.center], dtype=float)
+            points = np.asarray([*tracker.corners, tracker.center, *samples.values()], dtype=float)
             if np.any(points < 0) or np.any(points >= [w, h]):
                 raise ValueError("Calibration points or ROI center are outside the frame.")
         except (ValueError, TypeError, KeyError, OSError) as error:
             messagebox.showerror("Calibration", str(error))
             return
-        self.stop_tracking()
+        self.reset_axes()
         self.clear_tracking()
         self.corners, self.circle = tracker.corners, tuple(data["roi_circle_px"])
         for variable, value in ((self.width_var, tracker.width_cm), (self.height_var, tracker.height_cm),
                                 (self.radius_var, tracker.radius), (self.count_var, tracker.count),
                                 (self.area_var, tracker.minimum_area)):
             variable.set(str(value))
+        self.control_case_var.set(data.get("control_case", ""))
+        self.axis_samples = samples
+        self.axis_status.config(text="Saved robot origin and XY axes restored." if samples else "Setup has image-aligned XY. Calibrate robot axes if needed.")
         self.render()
         self.status.config(text="Setup loaded. Check four points and ROI, then Start tracking.")
 
@@ -440,4 +662,9 @@ class CalibrationTab:
                 messagebox.showerror("Coordinates", str(error))
 
     def close(self):
+        self.axis_job += 1
+        self.axis_busy = False
+        if self.axis_after is not None:
+            self.parent.after_cancel(self.axis_after)
+            self.axis_after = None
         self.close_capture()

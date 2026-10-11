@@ -1,8 +1,9 @@
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -88,6 +89,30 @@ class MovingROICalibrationTests(unittest.TestCase):
                 self.assertAlmostEqual(app.rows[-1][1], 9 / 20)
             finally:
                 capture.release()
+
+    def test_setup_save_uses_setup_folder_and_contains_four_points_and_roi(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.frame = self.frame([])
+        app.corners = [(10, 10), (190, 10), (190, 190), (10, 190)]
+        app.circle = (80, 100, 30)
+        app.tracker = None
+        app.status = Mock()
+        for name, value in (("width_var", "18"), ("height_var", "18"),
+                            ("radius_var", "30"), ("count_var", "2"), ("area_var", "2")):
+            setattr(app, name, Mock(get=Mock(return_value=value)))
+        with tempfile.TemporaryDirectory() as directory:
+            setup_dir = Path(directory) / "setups"
+            path = setup_dir / "20261011_143025.json"
+            with patch("closed_loop_calibration.SETUP_DIR", setup_dir), \
+                 patch("closed_loop_calibration.default_setup_name", return_value=path.name), \
+                 patch("closed_loop_calibration.filedialog.asksaveasfilename", return_value=str(path)) as dialog:
+                app.save_setup()
+            self.assertEqual(dialog.call_args.kwargs["initialdir"], str(setup_dir))
+            self.assertEqual(dialog.call_args.kwargs["initialfile"], path.name)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["corners_px"], [list(point) for point in app.corners])
+            self.assertEqual(data["roi_circle_px"], [80, 100, 30])
+            self.assertEqual(data["rectangle_width_cm"], 18)
 
 
 if __name__ == "__main__":

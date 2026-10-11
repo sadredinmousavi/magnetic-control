@@ -48,8 +48,22 @@ def main(case_name=None):
     sequence_filename.parent.mkdir(parents=True, exist_ok=True)
     copyfile(output_filename, sequence_filename)
 
+    xy_filename = sequence_filename.parent.parent / "xy_sequences" / sequence_filename.name
+    xy_filename.parent.mkdir(parents=True, exist_ok=True)
+    with open(xy_filename, "w", encoding="utf-8") as output:
+        output.write("# targets_xy_m | wait | zero\n")
+        output.write("# Each row matches the same row of the magnet-angle sequence.\n")
+        for control in result.scheduled_controls:
+            points = [
+                "[" + ", ".join(f"{float(value):.12g}" for value in position) + "]"
+                for position in control.target_positions
+            ]
+            point_text = points[0] if len(points) == 1 else "[" + ", ".join(points) + "]"
+            output.write(f"{point_text} | {sequence_wait:g} | 180\n")
+
     print(f"Wrote {output_filename}")
     print(f"Wrote {sequence_filename}")
+    print(f"Wrote {xy_filename}")
     return output_filename
 
 
