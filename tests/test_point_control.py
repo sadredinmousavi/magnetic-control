@@ -6,19 +6,31 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
-from point_control import PointCommander
+from point_control import PointCommander, hardware_case_name, load_hardware_case
 from control_workflow import calculate_point_control
 
 
 class PointControlTests(unittest.TestCase):
+    def test_only_base_hardware_model_is_loaded_even_for_legacy_conditions(self):
+        params = {"NUM_SOURCES": 8, "RADIUS": .18}
+        with patch("point_control.load_case", return_value=params) as load, \
+             patch("point_control.calculate_point_control") as calculate:
+            for name in ("case_100", "case_100.case", "case_100.cond_013_test_extract_compensator"):
+                PointCommander(lambda: None).calculate(name, (.01, 0))
+                load.assert_called_with("case_100.case")
+                calculate.assert_called_with(params, (.01, 0), ratio=1.0, angle_deg=None)
+                self.assertEqual(hardware_case_name(name), "case_100")
+        with self.assertRaises(ValueError):
+            load_hardware_case("")
+
     def test_moves_calculate_fresh_angles_and_use_existing_motor_protocol(self):
         port = Mock(is_open=True)
         commander = PointCommander(lambda: port)
         with patch.object(commander, "calculate", return_value={"angles_deg": [60] * 8}) as calculate, \
              patch("helpers.moveArray") as move:
             for target in ((0, 0), (.01, 0), (0, .01)):
-                commander.move("case_100.cond_013_test_extract_compensator", target)
-                calculate.assert_called_with("case_100.cond_013_test_extract_compensator", target,
+                commander.move("case_100", target)
+                calculate.assert_called_with("case_100", target,
                                              ratio=1.0, angle_deg=None)
             self.assertEqual(calculate.call_count, 3)
             self.assertEqual(move.call_count, 3)

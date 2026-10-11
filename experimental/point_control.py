@@ -11,8 +11,21 @@ PROJECT_DIR = str(Path(__file__).resolve().parents[1])
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-from case_loader import load_case
+from case_loader import load_case, normalize_case_name
 from control_workflow import calculate_point_control
+
+
+def hardware_case_name(case_name):
+    """Return the case folder, including for older condition-based setups."""
+    return normalize_case_name(case_name).split(".")[0]
+
+
+def load_hardware_case(case_name):
+    """Load only the base hardware model; never import a condition/sequence."""
+    name = hardware_case_name(case_name)
+    if not name:
+        raise ValueError("Select the case matching your physical hardware first.")
+    return load_case(f"{name}.case")
 
 
 class PointCommander:
@@ -24,7 +37,7 @@ class PointCommander:
         self.lock = threading.Lock()
 
     def calculate(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None):
-        return calculate_point_control(load_case(case_name), target_xy_m,
+        return calculate_point_control(load_hardware_case(case_name), target_xy_m,
                                        ratio=ratio, angle_deg=angle_deg)
 
     def move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,

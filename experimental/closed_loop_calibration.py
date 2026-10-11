@@ -22,9 +22,12 @@ from gui004 import (
 )
 from robot_vision import RobotDetector
 from axis_calibration import AXIS_TARGETS_M, AXIS_DISPLAY_NAMES, RobotAxes
+from point_control import hardware_case_name
 
 
 SETUP_DIR = Path(__file__).resolve().parent / "setups"
+DEFAULT_ROBOT_ROI_RADIUS = 300
+DEFAULT_PIN_ROI_RADIUS = 35
 
 
 def default_setup_name():
@@ -99,6 +102,7 @@ class CalibrationTab:
         self.frame = None
         self.corners = []
         self.circle = None
+        self.pin_search_circle = None
         self.transform = None
         self.tracker = None
         self.detections = []
@@ -119,6 +123,8 @@ class CalibrationTab:
         self.axis_events = queue.Queue()
         self.axis_job = 0
         self.axis_after = None
+        self.frame_received_at = None
+        self.axis_ready_at = None
 
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
@@ -133,7 +139,8 @@ class CalibrationTab:
         settings.pack(fill="x", padx=8, pady=3)
         self.width_var = tk.StringVar(value="10")
         self.height_var = tk.StringVar(value="10")
-        self.radius_var = tk.StringVar(value="60")
+        self.radius_var = tk.StringVar(value=str(DEFAULT_ROBOT_ROI_RADIUS))
+        self.pin_radius_var = tk.StringVar(value=str(DEFAULT_PIN_ROI_RADIUS))
         self.count_var = tk.StringVar(value="3")
         self.area_var = tk.StringVar(value="1")
         self.contrast_var = tk.StringVar(value="10")
@@ -160,19 +167,25 @@ class CalibrationTab:
         tools = tk.Frame(parent)
         tools.pack(fill="x", padx=8, pady=4)
         self.mode = tk.StringVar(value="ROI")
-        for label, value in (("Select 4 green points", "Corners"), ("Place ROI center", "ROI")):
-            ttk.Radiobutton(tools, text=label, value=value, variable=self.mode).pack(side="left", padx=4)
+        for label, value in (("Find 4 green pins (small ROI)", "Corners"), ("Place robot ROI center", "ROI")):
+            ttk.Radiobutton(tools, text=label, value=value, variable=self.mode,
+                            command=self.clear_pin_roi).pack(side="left", padx=4)
         tk.Button(tools, text="Clear points", command=self.clear_points).pack(side="left", padx=4)
         tk.Button(tools, text="Freeze / Resume live", command=self.freeze_live).pack(side="left", padx=4)
         tk.Button(tools, text="Start tracking", command=self.start_tracking).pack(side="left", padx=4)
         tk.Button(tools, text="Stop tracking", command=self.stop_tracking).pack(side="left", padx=4)
+        pin_tools = tk.Frame(parent)
+        pin_tools.pack(fill="x", padx=8, pady=2)
+        tk.Label(pin_tools, text="Pin search radius (px)").pack(side="left")
+        tk.Spinbox(pin_tools, from_=3, to=300, textvariable=self.pin_radius_var, width=5).pack(side="left", padx=4)
+        tk.Label(pin_tools, text="Select pin mode, move the small ROI over a green pin, then click to detect it. Repeat for all four.").pack(side="left", padx=4)
         axes_bar = tk.LabelFrame(parent, text="Robot XY axes — use one robot", padx=5, pady=4)
         axes_bar.pack(fill="x", padx=8, pady=4)
         axes_bar.columnconfigure(1, weight=1)
         self.control_case_var = tk.StringVar(value="")
         cases_dir = Path(__file__).resolve().parents[1] / "cases"
-        cases = [f"{path.parent.name}.{path.stem}" for path in sorted(cases_dir.glob("case_*/cond_*.py"))]
-        tk.Label(axes_bar, text="Control case").grid(row=0, column=0)
+        cases = [path.parent.name for path in sorted(cases_dir.glob("case_*/case.py"))]
+        tk.Label(axes_bar, text="Hardware case").grid(row=0, column=0)
         ttk.Combobox(axes_bar, textvariable=self.control_case_var, values=cases,
                      width=39, state="readonly").grid(row=0, column=1, padx=4, sticky="ew")
         self.axis_wait_var = tk.StringVar(value="3")
@@ -182,14 +195,21 @@ class CalibrationTab:
         actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.axis_buttons = []
         for name in AXIS_TARGETS_M:
-            button = tk.Button(actions, text=f"Move & mark {AXIS_DISPLAY_NAMES[name]}", command=lambda n=name: self.move_axis(n))
+            button = tk.Button(actions, text=f"Move to {AXIS_DISPLAY_NAMES[name]}", command=lambda n=name: self.move_axis(n))
             button.pack(side="left", padx=3)
             self.axis_buttons.append(button)
+        self.axis_capture_button = tk.Button(actions, text="Capture settled robot", command=self.capture_axis, state="disabled")
+        self.axis_capture_button.pack(side="left", padx=3)
         tk.Button(actions, text="Reset axes", command=self.reset_axes).pack(side="left", padx=3)
+        tk.Label(axes_bar, anchor="w", justify="left", text=(
+            "Choose the case matching your actual magnet count, ring radius, magnet sizes and magnetic properties. "
+            "Only the case.py hardware model is used; no condition or sequence file is needed."
+        ), wraplength=1000).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.axis_status = tk.Label(axes_bar, anchor="w", text=(
-            "Ratio = 1 (fixed). Choose the hardware case, move to Center, +X (10 mm), then +Y (10 mm); click the settled robot after each move."
+            "Ratio = 1. Use one robot and an ROI covering all three positions. Move to Center, +X (10 mm), then +Y (10 mm). "
+            "After each move, visually confirm the robot has settled and press Capture settled robot. No mouse marking."
         ), wraplength=1000)
-        self.axis_status.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self.axis_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         tk.Label(parent, anchor="w", text=(
             "Select four corner dots, enter their rectangle size, then place a circular ROI around all robots. "
             "Dark contrast detection only. Calibrate robot axes below to replace the default image-aligned XY."
@@ -199,12 +219,14 @@ class CalibrationTab:
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.canvas.bind("<Button-1>", self.click)
+        self.canvas.bind("<Motion>", self.move_pin_roi)
+        self.canvas.bind("<Leave>", self.clear_pin_roi)
         self.canvas.bind("<Configure>", lambda event: self.render())
         for variable in (self.width_var, self.height_var, self.control_case_var):
             variable.trace_add("write", self.on_metric_size_changed)
 
     def on_metric_size_changed(self, *args):
-        if self.axis_samples:
+        if self.axis_samples or self.axis_busy or self.axis_pending:
             self.reset_axes()
             self.axis_status.config(text="Rectangle size or control case changed. Recalibrate the robot axes.")
 
@@ -226,14 +248,20 @@ class CalibrationTab:
         self.axis_job += 1
         self.axis_busy = False
         self.axis_pending = None
+        self.axis_ready_at = None
         self.axis_samples = {}
         for button in self.axis_buttons:
             button.config(state="normal")
-        self.axis_status.config(text="Axes reset. Move and mark Center, then +X and +Y. Ratio is fixed at 1.")
+        if hasattr(self, "axis_capture_button"):
+            self.axis_capture_button.config(state="disabled")
+        self.axis_status.config(text="Axes reset. Move to Center, then capture the settled robot in the ROI. Repeat for +X and +Y. Ratio is 1.")
         self.render()
 
     def move_axis(self, name):
         if self.axis_busy:
+            return
+        if self.axis_pending:
+            messagebox.showerror("Robot axes", "Capture the current settled position before another move, or Reset axes to cancel.")
             return
         try:
             if self.capture is not None:
@@ -243,7 +271,7 @@ class CalibrationTab:
             if int(self.count_var.get()) != 1:
                 raise ValueError("Set Robots to 1 for axis calibration.")
             if name != "Origin" and "Origin" not in self.axis_samples:
-                raise ValueError("Move and mark Center first.")
+                raise ValueError("Move to Center and capture it first.")
             if not self.control_case_var.get():
                 raise ValueError("Select the control case matching your hardware geometry first.")
             wait = float(self.axis_wait_var.get())
@@ -261,6 +289,7 @@ class CalibrationTab:
             self.axis_samples = {}
         self.axis_pending = None
         self.axis_busy = True
+        self.axis_capture_button.config(state="disabled")
         self.axis_job += 1
         job = self.axis_job
         case = self.control_case_var.get()
@@ -296,24 +325,58 @@ class CalibrationTab:
                     messagebox.showerror("Robot axes", error)
                 else:
                     self.axis_pending = name
-                    self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} commanded: click the settled robot to record its observed position.")
+                    self.axis_ready_at = time.monotonic()
+                    for button in self.axis_buttons:
+                        button.config(state="disabled")
+                    self.axis_capture_button.config(state="normal")
+                    self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} commanded. Confirm the robot has stopped inside the ROI, then press Capture settled robot. The wait alone does not prove it settled.")
         except queue.Empty:
             pass
         if self.axis_busy:
             self.axis_after = self.parent.after(50, self.poll_axis_move)
 
-    def mark_axis(self, point):
-        mask = circle_detection_mask(self.frame.shape[:2], (*point, 25))
+    def capture_axis(self):
+        """User confirms settling; ambiguous or stale observations are not saved."""
+        try:
+            self.record_axis_from_roi()
+        except (ValueError, TypeError) as error:
+            self.axis_status.config(text=f"Capture not saved: {error}")
+            messagebox.showerror("Robot axes — capture not saved", str(error))
+
+    def record_axis_from_roi(self):
+        if self.axis_busy or not self.axis_pending:
+            raise ValueError("Move to a calibration position first and wait for the command to finish.")
+        if self.capture is not None or self.frozen:
+            raise ValueError("Capture needs the running live camera, not a movie or frozen frame.")
+        received = self.frame_received_at
+        if self.frame is None or received is None or time.monotonic() - received > 2:
+            raise ValueError("No fresh live frame. Check the camera connection and try again.")
+        if self.axis_ready_at is None or received <= self.axis_ready_at:
+            raise ValueError("Wait for a new camera frame after the move, then capture again.")
+        if int(self.count_var.get()) != 1:
+            raise ValueError("Use exactly one robot and set Robots to 1.")
+        if self.circle is None or len(self.corners) != 4:
+            raise ValueError("Select four corners and place the ROI first.")
+        area, radius = float(self.area_var.get()), float(self.radius_var.get())
+        if not np.isfinite(area) or area <= 0 or not np.isfinite(radius) or radius <= 0:
+            raise ValueError("Minimum area and ROI radius must be positive finite numbers.")
+        mask = circle_detection_mask(self.frame.shape[:2], (*self.circle[:2], radius))
         mask = cv2.bitwise_and(mask, workspace_detection_mask(self.frame.shape[:2], self.corners))
         _, candidates = self.detector.process(
-            self.frame, mode="Color blobs", color="Dark contrast", minimum_area=float(self.area_var.get()),
+            self.frame, mode="Color blobs", color="Dark contrast", minimum_area=area,
             morphology_kernel_size=1, draw_annotations=False, detection_mask=mask,
             dark_contrast_threshold=self.read_contrast_threshold(),
         )
         candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
         if not candidates:
-            raise ValueError("No dark robot near this click. Click closer to the robot.")
-        center = min(candidates, key=lambda item: np.linalg.norm(np.asarray(item["center"]) - point))["center"]
+            raise ValueError("No robot detected inside the ROI. Check it is inside the ROI, lower the dark contrast threshold or minimum area, and use Show detection mask before retrying.")
+        if len(candidates) != 1:
+            raise ValueError(f"Found {len(candidates)} candidates inside the ROI; cannot choose safely. Remove extra robots/noise or adjust the ROI and detection settings, then retry.")
+        center = candidates[0]["center"]
+        if self.axis_pending != "Origin" and "Origin" not in self.axis_samples:
+            raise ValueError("Capture Center first.")
+        if self.axis_pending != "Origin" and np.linalg.norm(np.asarray(center) - self.axis_samples["Origin"]) < 2:
+            raise ValueError("Robot has not moved enough from Center (less than 2 pixels). Check the movement and wait for it to settle; nothing was saved.")
         samples = dict(self.axis_samples, **{self.axis_pending: list(center)})
         if len(samples) == 3:
             axes = RobotAxes(self.corners, float(self.width_var.get()), float(self.height_var.get()), samples)
@@ -322,10 +385,15 @@ class CalibrationTab:
                 f"Y move: {axes.lengths_cm[1] * 10:.2f} mm. Save setup to retain this calibration."
             ))
         else:
-            self.axis_status.config(text=f"{self.axis_pending} marked. {len(samples)}/3 references recorded.")
+            self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[self.axis_pending]} captured at ({center[0]:.1f}, {center[1]:.1f}) px. {len(samples)}/3 references recorded. Move to the next position.")
         self.axis_samples = samples
         self.axis_pending = None
-        self.circle = (*center, float(self.radius_var.get()))
+        self.axis_ready_at = None
+        if hasattr(self, "axis_capture_button"):
+            self.axis_capture_button.config(state="disabled")
+        for button in self.axis_buttons:
+            button.config(state="normal")
+        # Keep the user's ROI fixed for all three calibration captures.
         self.render()
 
     def close_capture(self):
@@ -375,10 +443,12 @@ class CalibrationTab:
     def accept_frame(self, frame):
         if self.frame is not None and self.frame.shape[:2] != frame.shape[:2]:
             self.corners, self.circle = [], None
+            self.pin_search_circle = None
             self.reset_axes()
             self.clear_tracking()
             self.status.config(text="Frame size changed. Select four points and place the ROI again.")
         self.frame = frame.copy()
+        self.frame_received_at = time.monotonic()
         if self.tracker is not None:
             try:
                 self.tracker.contrast_threshold = self.read_contrast_threshold()
@@ -462,13 +532,10 @@ class CalibrationTab:
         if not (0 <= point[0] < w and 0 <= point[1] < h):
             return
         if self.axis_busy:
-            self.axis_status.config(text="Wait for the move to finish before marking the robot.")
+            self.axis_status.config(text="Wait for the move to finish, then use Capture settled robot.")
             return
         if self.axis_pending is not None:
-            try:
-                self.mark_axis(point)
-            except ValueError as error:
-                messagebox.showerror("Robot axes", str(error))
+            self.axis_status.config(text="Use Capture settled robot, not a mouse click. Enlarge ROI radius if needed, or Reset axes to reposition the ROI.")
             return
         self.playing = False
         self.frozen = True
@@ -477,21 +544,7 @@ class CalibrationTab:
                 if len(self.corners) == 4:
                     self.status.config(text="Four points selected. Clear points to select again.")
                     return
-                mask = circle_detection_mask((h, w), (*point, 35))
-                _, dots = self.detector.process(
-                    self.frame, mode="Color blobs", color="Green", minimum_area=1,
-                    morphology_kernel_size=1, draw_annotations=False, detection_mask=mask,
-                )
-                snapped = bool(dots)
-                if dots:
-                    point = min(dots, key=lambda item: np.linalg.norm(
-                        np.asarray(item["center"]) - point))["center"]
-                self.corners.append(point)
-                self.reset_axes()
-                if len(self.corners) == 4:
-                    self.corners = OfflineDetectionGUI.order_corner_points(self.corners)
-                self.status.config(text=f"{len(self.corners)}/4 points. " + (
-                    "Snapped to green dot." if snapped else "No nearby green dot; kept clicked position."))
+                self.capture_pin(point)
             else:
                 radius = float(self.radius_var.get())
                 if not np.isfinite(radius) or radius <= 0:
@@ -501,11 +554,68 @@ class CalibrationTab:
             self.detections = []
             self.render()
         except ValueError as error:
+            self.status.config(text=f"Not saved: {error}")
+            self.render()
             messagebox.showerror("Calibration", str(error))
+
+    def move_pin_roi(self, event):
+        if (self.frame is None or self.transform is None or self.mode.get() != "Corners"
+                or self.tracker is not None or self.axis_busy or self.axis_pending):
+            return
+        ox, oy, scale = self.transform
+        point = (round((event.x - ox) / scale), round((event.y - oy) / scale))
+        h, w = self.frame.shape[:2]
+        if not (0 <= point[0] < w and 0 <= point[1] < h):
+            self.clear_pin_roi()
+            return
+        try:
+            radius = float(self.pin_radius_var.get())
+            if not np.isfinite(radius) or radius <= 0:
+                return
+            self.pin_search_circle = (*point, radius)
+            self.render()
+        except ValueError:
+            pass
+
+    def clear_pin_roi(self, event=None):
+        if self.pin_search_circle is not None:
+            self.pin_search_circle = None
+            self.render()
+
+    def capture_pin(self, point):
+        """Search only the small ROI, never substitute the mouse position."""
+        if len(self.corners) >= 4:
+            raise ValueError("Four pins are already captured. Clear points to start again.")
+        radius = float(self.pin_radius_var.get())
+        if not np.isfinite(radius) or radius <= 0:
+            raise ValueError("Pin search radius must be a positive finite number.")
+        self.pin_search_circle = (*point, radius)
+        mask = circle_detection_mask(self.frame.shape[:2], self.pin_search_circle)
+        _, dots = self.detector.process(
+            self.frame, mode="Color blobs", color="Green", minimum_area=1,
+            morphology_kernel_size=1, draw_annotations=False, detection_mask=mask,
+        )
+        if not dots:
+            raise ValueError("No green pin inside the small ROI. Move it over the pin or increase Pin search radius, then retry.")
+        if len(dots) != 1:
+            raise ValueError(f"Found {len(dots)} green candidates. Move or shrink the small ROI to include only one pin, then retry.")
+        center = dots[0]["center"]
+        if any(np.linalg.norm(np.asarray(center) - old) < 3 for old in self.corners):
+            raise ValueError("This pin is already captured. Move the small ROI to a different pin.")
+        corners = [*self.corners, center]
+        if len(corners) == 4:
+            corners = OfflineDetectionGUI.order_corner_points(corners)
+            calibrated_dwell_coordinates([], corners, float(self.width_var.get()), float(self.height_var.get()))
+        self.corners = corners
+        self.reset_axes()
+        self.status.config(text=f"{len(corners)}/4 pins detected. " + (
+            "Four-point calibration ready; place the robot ROI next." if len(corners) == 4
+            else "Move the small ROI to the next green pin and click."))
 
     def clear_points(self):
         self.reset_axes()
         self.corners = []
+        self.pin_search_circle = None
         self.render()
         self.status.config(text="Select the four green corner dots.")
 
@@ -560,21 +670,21 @@ class CalibrationTab:
         cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         scale = min(cw / w, ch / h)
 
-        def stroke(draw, *args, color, width=2, **kwargs):
+        def stroke(draw, *args, color, width=1.5, **kwargs):
             # Keep overlays readable in screen pixels even at native 5 MP.
             kwargs["line_type" if draw in (cv2.drawMarker, cv2.arrowedLine) else "lineType"] = cv2.LINE_AA
             draw(annotated, *args, color=(0, 0, 0),
-                 thickness=max(1, round((width + 3) / scale)), **kwargs)
+                 thickness=max(1, round((width + 2) / scale)), **kwargs)
             draw(annotated, *args, color=color,
                  thickness=max(1, round(width / scale)), **kwargs)
 
         def marker(point, color):
-            stroke(cv2.drawMarker, point, color=color, width=1.5,
-                   markerType=cv2.MARKER_CROSS, markerSize=max(12, round(14 / scale)))
+            stroke(cv2.drawMarker, point, color=color, width=1,
+                   markerType=cv2.MARKER_CROSS, markerSize=max(8, round(10 / scale)))
 
         def label(text, point, color):
-            stroke(cv2.putText, text, point, color=color, width=1.5,
-                   fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=.55 / scale)
+            stroke(cv2.putText, text, point, color=color, width=1,
+                   fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=.45 / scale)
 
         mask_var = getattr(self, "show_mask_var", None)
         if mask_var is not None and mask_var.get():
@@ -599,6 +709,9 @@ class CalibrationTab:
                 self.detection_info.config(text="Enter valid contrast and minimum area values.")
         elif hasattr(self, "detection_info"):
             self.detection_info.config(text="")
+        pin_circle = getattr(self, "pin_search_circle", None)
+        if pin_circle is not None and self.mode.get() == "Corners":
+            stroke(cv2.circle, tuple(round(v) for v in pin_circle[:2]), round(pin_circle[2]), color=(255, 255, 0))
         if len(self.corners) == 4:
             stroke(cv2.polylines, [np.asarray(self.corners, np.int32)], True, color=(255, 0, 255))
         for index, point in enumerate(self.corners, 1):
@@ -622,9 +735,9 @@ class CalibrationTab:
                     point = tuple(map(int, samples[name]))
                     delta = np.asarray(point) - origin
                     length = np.linalg.norm(delta)
-                    end = tuple(np.rint(np.asarray(origin) + delta / max(length, 1) * 60 / scale).astype(int))
+                    end = tuple(np.rint(np.asarray(origin) + delta / max(length, 1) * 45 / scale).astype(int))
                     stroke(cv2.arrowedLine, origin, end, color=color, tipLength=.15)
-                    stroke(cv2.circle, point, max(4, round(4 / scale)), color=color, width=1.5)
+                    stroke(cv2.circle, point, max(3, round(3 / scale)), color=color, width=1)
                     label(name, end, color)
         dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
         self.transform = ((cw - dw) / 2, (ch - dh) / 2, scale)
@@ -635,7 +748,7 @@ class CalibrationTab:
 
     def setup_data(self):
         if getattr(self, "axis_busy", False) or getattr(self, "axis_pending", None):
-            raise ValueError("Finish the current robot-axis move and click before saving.")
+            raise ValueError("Capture the current settled robot position before saving.")
         if self.frame is None or self.circle is None:
             raise ValueError("Select a frame, four points and an ROI first.")
         data = {
@@ -650,11 +763,11 @@ class CalibrationTab:
             "dark_contrast_threshold": self.read_contrast_threshold(),
             "axis_samples_px": getattr(self, "axis_samples", {}),
             "axis_targets_m": AXIS_TARGETS_M,
-            "control_case": self.control_case_var.get() if hasattr(self, "control_case_var") else "",
+            "control_case": hardware_case_name(self.control_case_var.get()) if hasattr(self, "control_case_var") else "",
             "coordinate_system": "robot_axes" if len(getattr(self, "axis_samples", {})) == 3 else "rectangle_center",
         }
         if data["axis_samples_px"] and len(data["axis_samples_px"]) != 3:
-            raise ValueError("Finish Origin, +X and +Y measurements or Reset axes before saving.")
+            raise ValueError("Capture Center, +X and +Y or Reset axes before saving. Incomplete axes cannot be saved.")
         MovingROICalibration(data["corners_px"], data["rectangle_width_cm"],
                              data["rectangle_height_cm"], data["roi_circle_px"],
                              data["robot_count"], data["minimum_area"], data["axis_samples_px"],
@@ -673,7 +786,7 @@ class CalibrationTab:
             if path:
                 with open(path, "w", encoding="utf-8") as stream:
                     json.dump(data, stream, indent=2)
-                self.status.config(text="Calibration setup saved.")
+                self.status.config(text="Complete setup saved: four points, physical dimensions, ROI, detection settings, hardware case and XY calibration.")
         except (ValueError, OSError) as error:
             messagebox.showerror("Calibration", str(error))
 
@@ -712,11 +825,12 @@ class CalibrationTab:
         self.reset_axes()
         self.clear_tracking()
         self.corners, self.circle = tracker.corners, tuple(data["roi_circle_px"])
+        self.pin_search_circle = None
         for variable, value in ((self.width_var, tracker.width_cm), (self.height_var, tracker.height_cm),
                                 (self.radius_var, tracker.radius), (self.count_var, tracker.count),
                                 (self.area_var, tracker.minimum_area)):
             variable.set(str(value))
-        self.control_case_var.set(data.get("control_case", ""))
+        self.control_case_var.set(hardware_case_name(data.get("control_case", "")))
         if hasattr(self, "contrast_var"):
             self.contrast_var.set(str(tracker.contrast_threshold))
         self.axis_samples = samples

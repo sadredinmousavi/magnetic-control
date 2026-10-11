@@ -13,9 +13,9 @@ class RobotAxes:
     def __init__(self, corners, width_cm, height_cm, samples):
         pixels = np.asarray([samples[name] for name in AXIS_TARGETS_M], dtype=float)
         if pixels.shape != (3, 2) or not np.isfinite(pixels).all():
-            raise ValueError("Mark the robot at Origin, +X and +Y first.")
+            raise ValueError("Capture the settled robot at Center, +X and +Y first.")
         if np.min(np.linalg.norm(pixels[1:] - pixels[0], axis=1)) < 2:
-            raise ValueError("Axis movement is too small to resolve (less than 2 pixels). Mark settled positions again.")
+            raise ValueError("Axis movement is too small to resolve (less than 2 pixels). Capture settled positions again.")
         metric = calibrated_dwell_coordinates(
             [{"center": point} for point in pixels], corners, width_cm, height_cm,
         )
@@ -25,7 +25,7 @@ class RobotAxes:
             raise ValueError("Axis reference positions must be distinct.")
         basis = (vectors / lengths[:, None]).T
         if not np.isfinite(basis).all() or abs(np.linalg.det(basis)) < .5:
-            raise ValueError("The marked X and Y directions are nearly parallel. Check the robot positions.")
+            raise ValueError("The captured X and Y directions are nearly parallel. Check the robot positions and recapture.")
         # Fit orthogonal directions, including mirrored camera views. Preserve
         # the physical scale from the four-dot rectangle, not command errors.
         u, _, vt = np.linalg.svd(basis)

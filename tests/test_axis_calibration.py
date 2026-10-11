@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -11,7 +12,9 @@ import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
 from axis_calibration import AXIS_TARGETS_M, RobotAxes
 from control_workflow import calculate_point_control
-from closed_loop_calibration import CalibrationTab, MovingROICalibration
+from closed_loop_calibration import (
+    CalibrationTab, MovingROICalibration, DEFAULT_ROBOT_ROI_RADIUS, DEFAULT_PIN_ROI_RADIUS,
+)
 from gui005 import ClosedLoopGUI
 from robot_vision import RobotDetector
 
@@ -49,6 +52,10 @@ class RobotAxisTests(unittest.TestCase):
         app.status, app.axis_status, app.render = Mock(), Mock(), Mock()
         app.axis_samples = {"Origin": [100, 100], "+X": [100, 80], "+Y": [98, 100]}
         app.axis_pending, app.axis_busy, app.axis_job = None, False, 0
+        app.capture, app.frozen = None, False
+        app.frame_received_at = time.monotonic()
+        app.axis_ready_at = app.frame_received_at - .1
+        app.axis_capture_button = Mock()
         app.axis_buttons = [Mock(), Mock(), Mock()]
         for name, value in (("width_var", "10"), ("height_var", "10"), ("radius_var", "30"),
                             ("count_var", "1"), ("area_var", "2"),
@@ -60,6 +67,7 @@ class RobotAxisTests(unittest.TestCase):
         app = self.app()
         data = app.setup_data()
         self.assertEqual(data["version"], 2)
+        self.assertEqual(data["control_case"], "case_100")
         self.assertEqual(data["axis_samples_px"], app.axis_samples)
         expected = RobotAxes(CORNERS, 10, 10, app.axis_samples).coordinates([[90, 60]])
         with tempfile.TemporaryDirectory() as directory:
@@ -73,25 +81,159 @@ class RobotAxisTests(unittest.TestCase):
                 restored = MovingROICalibration(CORNERS, 10, 10, app.circle, 1, 2, app.axis_samples)
                 np.testing.assert_allclose(restored.coordinates([[90, 60]]), expected)
                 data["version"] = 1
+                data["control_case"] = "case_100.cond_016_calibration_cartesian"
                 data.pop("axis_samples_px")
                 with path.open("w", encoding="utf-8") as stream:
                     json.dump(data, stream)
                 app.load_setup()
+                app.control_case_var.set.assert_called_with("case_100")
                 self.assertEqual(app.axis_samples, {})
 
-    def test_measurement_click_snaps_to_robot_and_rejects_empty_click(self):
+    def test_roi_capture_records_single_robot_without_moving_roi(self):
         app = self.app()
         app.axis_samples = {}
         app.axis_pending = "Origin"
         app.detector = RobotDetector()
         cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
-        app.mark_axis((105, 102))
+        circle = app.circle
+        app.record_axis_from_roi()
         self.assertEqual(app.axis_samples["Origin"], [100, 100])
         self.assertIsNone(app.axis_pending)
+        self.assertEqual(app.circle, circle)
+        app.axis_capture_button.config.assert_called_with(state="disabled")
+
+    def test_roi_capture_rejects_missing_or_multiple_candidates_without_saving(self):
+        app = self.app()
+        app.axis_samples = {}
+        app.axis_pending = "Origin"
+        app.detector = RobotDetector()
+        with self.assertRaisesRegex(ValueError, "No robot detected"):
+            app.record_axis_from_roi()
+        cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
+        cv2.circle(app.frame, (115, 100), 3, (20, 20, 20), -1)
+        with self.assertRaisesRegex(ValueError, "2 candidates"):
+            app.record_axis_from_roi()
+        self.assertEqual(app.axis_samples, {})
+        self.assertEqual(app.axis_pending, "Origin")
+
+    def test_roi_capture_rejects_stale_frozen_unmoved_and_uncommanded_frames(self):
+        app = self.app()
+        app.detector = RobotDetector()
+        app.axis_pending = "Origin"
+        app.frame_received_at = time.monotonic() - 3
+        with self.assertRaisesRegex(ValueError, "fresh live frame"):
+            app.record_axis_from_roi()
+        app.frame_received_at = time.monotonic()
+        app.axis_ready_at = app.frame_received_at + 1
+        with self.assertRaisesRegex(ValueError, "new camera frame"):
+            app.record_axis_from_roi()
+        app.axis_ready_at = app.frame_received_at - .1
+        app.frozen = True
+        with self.assertRaisesRegex(ValueError, "running live camera"):
+            app.record_axis_from_roi()
+        app.frozen = False
         app.axis_pending = "+X"
-        with self.assertRaises(ValueError):
-            app.mark_axis((170, 170))
-        self.assertNotIn("+X", app.axis_samples)
+        cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
+        original = dict(app.axis_samples)
+        with self.assertRaisesRegex(ValueError, "not moved enough"):
+            app.record_axis_from_roi()
+        self.assertEqual(app.axis_samples, original)
+        app.axis_pending = None
+        with self.assertRaisesRegex(ValueError, "Move to a calibration position"):
+            app.record_axis_from_roi()
+
+    def test_capture_button_reports_errors_and_keeps_retry_available(self):
+        app = self.app()
+        app.axis_pending = "Origin"
+        app.detector = RobotDetector()
+        with patch("closed_loop_calibration.messagebox.showerror") as error:
+            app.capture_axis()
+        error.assert_called_once()
+        self.assertEqual(app.axis_pending, "Origin")
+
+    def test_save_rejects_pending_or_incomplete_axis_capture(self):
+        app = self.app()
+        app.axis_pending = "+Y"
+        with self.assertRaisesRegex(ValueError, "Capture the current"):
+            app.setup_data()
+        app.axis_pending = None
+        app.axis_samples.pop("+Y")
+        with self.assertRaisesRegex(ValueError, "Incomplete axes"):
+            app.setup_data()
+
+    def test_three_roi_captures_save_and_restore_complete_metric_calibration(self):
+        app = self.app()
+        app.axis_samples = {}
+        app.detector = RobotDetector()
+        app.frame_number = 0
+        for name, center in (("Origin", (100, 100)), ("+X", (120, 100)), ("+Y", (100, 120))):
+            app.axis_pending = name
+            app.axis_ready_at = time.monotonic() - .1
+            frame = np.full((220, 220, 3), 240, np.uint8)
+            cv2.circle(frame, center, 3, (20, 20, 20), -1)
+            app.accept_frame(frame)
+            app.record_axis_from_roi()
+        data = json.loads(json.dumps(app.setup_data()))
+        self.assertEqual(data["coordinate_system"], "robot_axes")
+        self.assertEqual(data["roi_circle_px"], [100, 100, 30])
+        self.assertEqual(data["control_case"], "case_100")
+        restored = MovingROICalibration(data["corners_px"], data["rectangle_width_cm"],
+                                        data["rectangle_height_cm"], data["roi_circle_px"],
+                                        data["robot_count"], data["minimum_area"], data["axis_samples_px"],
+                                        contrast_threshold=data["dark_contrast_threshold"])
+        np.testing.assert_allclose(restored.coordinates([[100, 100], [120, 100], [100, 120]]),
+                                   [[0, 0], [1, 0], [0, 1]], atol=1e-6)
+
+    def pin_app(self):
+        app = self.app()
+        app.corners = []
+        app.detector = RobotDetector()
+        app.pin_radius_var = Mock(get=Mock(return_value=str(DEFAULT_PIN_ROI_RADIUS)))
+        app.reset_axes = Mock()
+        return app
+
+    def test_default_robot_roi_is_300_and_pin_roi_is_small(self):
+        self.assertEqual(DEFAULT_ROBOT_ROI_RADIUS, 300)
+        self.assertEqual(DEFAULT_PIN_ROI_RADIUS, 35)
+
+    def test_pin_roi_finds_exact_centers_and_orders_four_points(self):
+        app = self.pin_app()
+        expected = [(40, 40), (180, 40), (180, 180), (40, 180)]
+        for point in expected:
+            cv2.circle(app.frame, point, 3, (0, 255, 0), -1)
+        for x, y in (expected[2], expected[0], expected[3], expected[1]):
+            app.capture_pin((x + 8, y + 5))
+        np.testing.assert_allclose(app.corners, expected)
+        self.assertEqual(app.reset_axes.call_count, 4)
+        with self.assertRaisesRegex(ValueError, "already captured"):
+            app.capture_pin((40, 40))
+
+    def test_pin_roi_rejects_missing_ambiguous_and_duplicate_pins(self):
+        app = self.pin_app()
+        with self.assertRaisesRegex(ValueError, "No green pin"):
+            app.capture_pin((100, 100))
+        self.assertEqual(app.corners, [])
+        cv2.circle(app.frame, (100, 100), 3, (0, 255, 0), -1)
+        app.capture_pin((108, 100))
+        with self.assertRaisesRegex(ValueError, "already captured"):
+            app.capture_pin((100, 105))
+        cv2.circle(app.frame, (120, 100), 3, (0, 255, 0), -1)
+        with self.assertRaisesRegex(ValueError, "2 green candidates"):
+            app.capture_pin((110, 100))
+        self.assertEqual(app.corners, [(100, 100)])
+
+    def test_pin_roi_moves_in_camera_pixels_without_changing_robot_roi(self):
+        app = self.pin_app()
+        app.mode = Mock(get=Mock(return_value="Corners"))
+        app.transform = (10, 20, .5)
+        app.pin_search_circle = None
+        circle = app.circle
+        app.move_pin_roi(Mock(x=60, y=70))
+        self.assertEqual(app.pin_search_circle, (100, 100, 35))
+        self.assertEqual(app.circle, circle)
+        self.assertEqual(app.corners, [])
+        app.clear_pin_roi()
+        self.assertIsNone(app.pin_search_circle)
 
     def test_synthesis_uses_requested_one_robot_target_and_strict_failure_policy(self):
         with patch("control_workflow.build_common_config") as config, \
