@@ -1,6 +1,8 @@
 import sys
+import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -9,7 +11,23 @@ import numpy as np
 EXPERIMENTAL_DIR = Path(__file__).resolve().parents[1] / "experimental"
 sys.path.insert(0, str(EXPERIMENTAL_DIR))
 
-from ssh_camera import MJPEGFrameParser, SSHCameraClient, SSHCameraSettings
+from ssh_camera import (
+    MJPEGFrameParser, SSHCameraClient, SSHCameraSettings,
+    build_camera_command, parse_camera_modes, preferred_camera_mode,
+)
+
+
+CAMERA_LIST = """Available cameras
+-----------------
+0 : imx219 [3280x2464] (/base/soc/camera)
+    Modes: 'SRGGB10_CSI2P' : 640x480 [206.65 fps - (1000, 752)/1280x960 crop]
+                             1640x1232 [41.85 fps - (0, 0)/3280x2464 crop]
+                             1920x1080 [47.57 fps - (680, 692)/1920x1080 crop]
+                             3280x2464 [21.19 fps - (0, 0)/3280x2464 crop]
+           'SRGGB8' : 1640x1232 [41.85 fps - (0, 0)/3280x2464 crop]
+1 : imx477 [4056x3040] (/base/soc/camera2)
+    Modes: 'SRGGB12_CSI2P' : 2028x1520 [40.01 fps - (0, 0)/4056x3040 crop]
+"""
 
 
 class SSHCameraTests(unittest.TestCase):
@@ -38,6 +56,49 @@ class SSHCameraTests(unittest.TestCase):
             SSHCameraSettings(port=70000).validate()
         with self.assertRaises(ValueError):
             SSHCameraSettings(password="bad\npassword").validate()
+
+    def test_parse_sensor_modes_including_formats_and_multiple_cameras(self):
+        modes = parse_camera_modes(CAMERA_LIST)
+        self.assertEqual(len(modes), 6)
+        self.assertEqual(modes[0].crop, (1000, 752, 1280, 960))
+        self.assertFalse(modes[0].full_field)
+        self.assertTrue(modes[1].full_field)
+        self.assertEqual(modes[4].mode_spec, "1640:1232:8:U")
+        self.assertEqual(modes[5].camera_index, 1)
+        self.assertEqual(modes[5].mode_spec, "2028:1520:12:P")
+
+    def test_default_selection_prefers_full_sensor_view(self):
+        selected = preferred_camera_mode(parse_camera_modes(CAMERA_LIST))
+        self.assertTrue(selected.full_field)
+        self.assertEqual(selected.mode_spec, "1640:1232:10:P")
+
+    def test_stream_uses_selected_camera_native_resolution_and_fps(self):
+        mode = parse_camera_modes(CAMERA_LIST)[5]
+        command = build_camera_command(SSHCameraSettings(camera_mode=mode, framerate=25))
+        self.assertIn("--camera 1 --mode 2028:1520:12:P --width 2028 --height 1520", command)
+        self.assertIn("--framerate 25", command)
+        self.assertNotIn("--width 1280", command)
+        self.assertNotIn("--roi", command)
+
+    def test_rejects_fps_above_selected_sensor_mode_limit(self):
+        mode = parse_camera_modes(CAMERA_LIST)[3]
+        with self.assertRaises(ValueError):
+            SSHCameraSettings(camera_mode=mode, framerate=30).validate()
+
+    @patch("ssh_camera.subprocess.run")
+    @patch("ssh_camera.SSHCameraClient.find_ssh_executable", return_value="plink")
+    def test_query_accepts_camera_list_on_stderr(self, executable, run):
+        run.return_value = subprocess.CompletedProcess([], 0, b"", CAMERA_LIST.encode())
+        self.assertEqual(len(SSHCameraClient.list_modes(SSHCameraSettings())), 6)
+        self.assertIn("--list-cameras", run.call_args.args[0][-1])
+
+    @patch("ssh_camera.subprocess.run")
+    @patch("ssh_camera.SSHCameraClient.find_ssh_executable", return_value="plink")
+    def test_query_timeout_does_not_expose_password(self, executable, run):
+        run.side_effect = subprocess.TimeoutExpired(["plink", "-pw", "123456789"], 20)
+        with self.assertRaises(RuntimeError) as error:
+            SSHCameraClient.list_modes(SSHCameraSettings())
+        self.assertNotIn("123456789", str(error.exception))
 
     def test_mjpeg_parser_handles_split_and_multiple_frames(self):
         images = []

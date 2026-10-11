@@ -404,6 +404,33 @@ field to use Windows OpenSSH key/agent authentication instead. Before the first
 GUI connection, connect once with the selected SSH client in a terminal to
 accept the Pi host key. The Pi must provide either rpicam-vid or libcamera-vid.
 
+In Connections, **Load modes** queries the Pi camera itself for its available
+sensor modes. The selector shows camera name/index, native resolution, bit depth,
+maximum sensor FPS, and whether that mode uses the full sensor view or a sensor
+crop. The default favors a full-view mode of the first camera at a modest native
+resolution. **Connect Camera** queries modes automatically if needed. Choose a
+mode and FPS before connecting; disconnect to change them. The stream uses the
+selected sensor mode and its native dimensions, encoded as MJPEG over SSH, rather
+than forcing 1280×720. Actual streaming speed also depends on Pi encoding and
+network throughput. The preview scales the complete received frame to fit.
+
+GUI005's **2. Calibration** tab uses the same dark-contrast robot detector and
+circular swarm ROI as GUI004, without the alternative color/ArUco modes.
+Use the live Pi camera or **Open movie**, select **Select 4 green points** and
+click the four rectangle corners (clicks snap to nearby green dots). Enter the
+actual rectangle width and height in cm. XY is measured in the calibration-dot
+plane with origin at the rectangle center, X right and Y up.
+Select **Place ROI center**, enter its radius in pixels and click around the
+complete robot group. Set the robot count and minimum blob area, then **Start
+tracking**. The circular ROI follows the complete group's centroid; incomplete
+detections hold the last valid ROI and leave group XY blank. Only robots inside
+the moving circle and calibrated workspace are detected. Tracking a movie
+processes each frame in sequence until the end; use **First frame** and place
+the ROI on the initial robots before starting a full run. **Freeze / Resume
+live** holds a live frame for setup. **Save setup / Load setup** retain the four
+points, physical rectangle size, ROI, robot count and minimum area in JSON.
+**Export XY CSV** saves per-robot and group coordinates for the tracked frames.
+
 On Windows, double-click `04-usage.bat` in the project root. The launcher scans
 `cases/case_*` and provides separate Usage, Case, and Condition menus. Use the
 Up/Down arrow keys and Enter, or type a displayed list number/name and press
