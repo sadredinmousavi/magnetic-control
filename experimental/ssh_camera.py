@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ipaddress
+import os
 import queue
 import re
 import shutil
@@ -31,6 +32,7 @@ class SSHCameraSettings:
     username: str = "sadra"
     host: str = "192.168.50.2"
     port: int = 22
+    password: str = "123456789"
 
     def validate(self):
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", self.username):
@@ -46,6 +48,8 @@ class SSHCameraSettings:
                 raise ValueError("Enter a valid Raspberry Pi IP address or hostname.")
         if not 1 <= self.port <= 65535:
             raise ValueError("SSH port must be between 1 and 65535.")
+        if "\x00" in self.password or "\r" in self.password or "\n" in self.password:
+            raise ValueError("SSH password contains invalid characters.")
 
 
 class MJPEGFrameParser:
@@ -91,9 +95,30 @@ class SSHCameraClient:
 
     @staticmethod
     def build_command(
-        settings, ssh_executable="ssh", remote_command=DEFAULT_CAMERA_COMMAND
+        settings, ssh_executable="plink", remote_command=DEFAULT_CAMERA_COMMAND
     ):
         settings.validate()
+        executable_name = os.path.basename(str(ssh_executable)).lower()
+        if executable_name in ("plink", "plink.exe"):
+            command = [
+                ssh_executable,
+                "-ssh",
+                "-T",
+                "-P",
+                str(settings.port),
+                "-batch",
+            ]
+            if settings.password:
+                command.extend(["-pw", settings.password])
+            command.extend(
+                [f"{settings.username}@{settings.host}", remote_command]
+            )
+            return command
+        if settings.password:
+            raise RuntimeError(
+                "Password authentication requires PuTTY plink.exe. Install PuTTY "
+                "or clear the password to use OpenSSH key/agent authentication."
+            )
         return [
             ssh_executable,
             "-T",
@@ -118,8 +143,14 @@ class SSHCameraClient:
     def start(self, settings):
         if self.is_running:
             raise RuntimeError("The SSH camera is already connected.")
-        ssh_executable = shutil.which("ssh")
+        executable = "plink" if settings.password else "ssh"
+        ssh_executable = shutil.which(executable)
         if not ssh_executable:
+            if settings.password:
+                raise RuntimeError(
+                    "PuTTY plink.exe was not found. Install PuTTY or add plink.exe "
+                    "to PATH to use password authentication."
+                )
             raise RuntimeError(
                 "Windows OpenSSH Client was not found. Install it from Optional Features."
             )

@@ -13,13 +13,21 @@ from ssh_camera import MJPEGFrameParser, SSHCameraClient, SSHCameraSettings
 
 
 class SSHCameraTests(unittest.TestCase):
-    def test_default_ssh_target_and_port(self):
+    def test_default_ssh_target_port_and_password(self):
         settings = SSHCameraSettings()
         command = SSHCameraClient.build_command(settings)
 
         self.assertIn("sadra@192.168.50.2", command)
-        self.assertEqual(command[command.index("-p") + 1], "22")
+        self.assertEqual(command[command.index("-P") + 1], "22")
+        self.assertEqual(command[command.index("-pw") + 1], "123456789")
+        self.assertIn("-batch", command)
+
+    def test_blank_password_uses_openssh_key_authentication(self):
+        settings = SSHCameraSettings(password="")
+        command = SSHCameraClient.build_command(settings, ssh_executable="ssh")
+
         self.assertIn("BatchMode=yes", command)
+        self.assertNotIn("-pw", command)
 
     def test_rejects_invalid_connection_settings(self):
         with self.assertRaises(ValueError):
@@ -28,6 +36,8 @@ class SSHCameraTests(unittest.TestCase):
             SSHCameraSettings(host="bad host!").validate()
         with self.assertRaises(ValueError):
             SSHCameraSettings(port=70000).validate()
+        with self.assertRaises(ValueError):
+            SSHCameraSettings(password="bad\npassword").validate()
 
     def test_mjpeg_parser_handles_split_and_multiple_frames(self):
         images = []

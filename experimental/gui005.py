@@ -112,7 +112,7 @@ class ClosedLoopGUI(BaseServoGUI):
         )
         frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         frame.columnconfigure(5, weight=1)
-        frame.rowconfigure(3, weight=1)
+        frame.rowconfigure(4, weight=1)
 
         tk.Label(frame, text="Username").grid(row=0, column=0, sticky="w")
         self.ssh_username_entry = tk.Entry(frame, width=14)
@@ -128,6 +128,15 @@ class ClosedLoopGUI(BaseServoGUI):
         self.ssh_port_entry = tk.Entry(frame, width=8)
         self.ssh_port_entry.insert(0, "22")
         self.ssh_port_entry.grid(row=0, column=5, padx=(5, 12), sticky="w")
+
+        tk.Label(frame, text="Password").grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
+        )
+        self.ssh_password_entry = tk.Entry(frame, width=20, show="*")
+        self.ssh_password_entry.insert(0, "123456789")
+        self.ssh_password_entry.grid(
+            row=1, column=1, padx=(5, 12), pady=(8, 0), sticky="w"
+        )
 
         self.camera_connect_button = tk.Button(
             frame, text="Connect Camera", width=15, command=self.connect_ssh_camera
@@ -149,23 +158,24 @@ class ClosedLoopGUI(BaseServoGUI):
             anchor="w",
         )
         self.ssh_state_label.grid(
-            row=1, column=0, columnspan=8, sticky="ew", pady=(8, 4)
+            row=2, column=0, columnspan=8, sticky="ew", pady=(8, 4)
         )
         tk.Label(
             frame,
             text=(
-                "Uses Windows OpenSSH with key/agent authentication. Before the "
-                "first run, connect once in a terminal to trust the Pi host key."
+                "Password authentication uses PuTTY plink. Clear the password to "
+                "use Windows OpenSSH key/agent authentication instead. Connect "
+                "once in a terminal first to trust the Pi host key."
             ),
             fg="#555555",
             anchor="w",
-        ).grid(row=2, column=0, columnspan=8, sticky="ew", pady=(0, 4))
+        ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(0, 4))
 
         self.remote_camera_canvas = tk.Canvas(
             frame, background="black", highlightthickness=0
         )
         self.remote_camera_canvas.grid(
-            row=3, column=0, columnspan=8, sticky="nsew", pady=(4, 0)
+            row=4, column=0, columnspan=8, sticky="nsew", pady=(4, 0)
         )
         self.remote_camera_canvas.create_text(
             20,
@@ -185,6 +195,7 @@ class ClosedLoopGUI(BaseServoGUI):
             username=self.ssh_username_entry.get().strip(),
             host=self.ssh_host_entry.get().strip(),
             port=port,
+            password=self.ssh_password_entry.get(),
         )
         settings.validate()
         return settings

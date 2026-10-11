@@ -397,11 +397,12 @@ tiny sampled robots are not discarded.
 GUI005 starts the first-paper closed-loop workflow. The current first stage
 connects to the controller over serial (default COM5, 1000000 baud) and
 receives a live Raspberry Pi camera stream over SSH (default
-sadra@192.168.50.2, port 22). Launch it with
-05-gui005-1stpaper-closedloop.bat. Camera transport uses Windows OpenSSH and
-key/agent authentication; connect with ssh sadra@192.168.50.2 once in a
-terminal first to accept the host key and verify authentication. The Pi must
-provide either rpicam-vid or libcamera-vid.
+sadra@192.168.50.2, port 22, password 123456789). Launch it with
+05-gui005-1stpaper-closedloop.bat. Password authentication uses PuTTY's
+plink.exe, which must be installed and available on PATH. Clear the password
+field to use Windows OpenSSH key/agent authentication instead. Before the first
+GUI connection, connect once with the selected SSH client in a terminal to
+accept the Pi host key. The Pi must provide either rpicam-vid or libcamera-vid.
 
 On Windows, double-click `04-usage.bat` in the project root. The launcher scans
 `cases/case_*` and provides separate Usage, Case, and Condition menus. Use the
