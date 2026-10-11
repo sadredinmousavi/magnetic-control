@@ -18,7 +18,7 @@ class Usage2XYExportTests(unittest.TestCase):
         result = SimpleNamespace(
             opt_infos=[{"angles_deg": [60, 70]}, {"angles_deg": [80, 90]}],
             scheduled_controls=[
-                SimpleNamespace(target_positions=(np.array([.0123456789, -.02]),)),
+                SimpleNamespace(target_positions=(np.array([.0123456789, -.02]),), eig_ratio=2, eig_angle=np.pi/4),
                 SimpleNamespace(target_positions=(np.array([.03, .04]), np.array([-.03, -.04]))),
             ],
         )
@@ -39,7 +39,10 @@ class Usage2XYExportTests(unittest.TestCase):
                     self.assertEqual(ast.literal_eval(xy_rows[0].split("|")[0]), [.0123456789, -.02])
                     self.assertEqual(ast.literal_eval(xy_rows[1].split("|")[0]), [[.03, .04], [-.03, -.04]])
                     for angle_row, xy_row in zip(angle_rows, xy_rows):
-                        self.assertEqual(angle_row.split("|")[1:], xy_row.split("|")[1:])
+                        self.assertEqual([value.strip() for value in angle_row.split("|")[1:]],
+                                         [value.strip() for value in xy_row.split("|")[1:3]])
+                    self.assertEqual([value.strip() for value in xy_rows[0].split('|')[3:]], ['2', '45'])
+                    self.assertEqual([value.strip() for value in xy_rows[1].split('|')[3:]], ['1', 'Auto'])
                     result.scheduled_controls[0].target_positions = (np.array([.05, .06]),)
                     usage2.main("case_001.cond_001")
                     first_xy_row = next(line for line in xy.read_text().splitlines() if not line.startswith("#"))

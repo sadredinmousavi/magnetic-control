@@ -3,6 +3,7 @@
 import json
 import csv
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 import queue
 import threading
@@ -17,10 +18,12 @@ from PIL import Image, ImageTk
 from command_sequences import (
     XY_SEQUENCE_DIR, read_xy_sequence, resolve_xy_units, project_sequence, execute_xy_sequence,
     point_limits, sequence_diagnostics, validate_projected_points,
+    write_xy_sequence,
 )
 from point_control import hardware_case_name, load_hardware_case
 from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
+from command_recording import CommandRecording, draw_command_overlay
 
 
 class CommandTab:
@@ -39,6 +42,9 @@ class CommandTab:
         self.show_all = True
         self.after_id = None
         self.arrival_gate = None
+        self.cell_editor = None
+        self.recording = None
+        self.recording_fps_var = tk.StringVar(value='15')
         self.arrival_tolerance_var = tk.StringVar(value="1")
         self.arrival_hold_var = tk.StringVar(value="0.5")
         self.tracking_tracker = None
@@ -61,6 +67,7 @@ class CommandTab:
         bar.pack(fill="x", padx=8, pady=6)
         self.load_button = tk.Button(bar, text="Load XY sequence", command=self.load_sequence)
         self.load_button.pack(side="left", padx=3)
+        tk.Button(bar, text="Export XY sequence", command=self.export_sequence).pack(side="left", padx=3)
         self.calibration_button = tk.Button(bar, text="Use current calibration", command=lambda: self.refresh_calibration(reset_tracking=True))
         self.calibration_button.pack(side="left", padx=3)
         actions = tk.Frame(parent)
@@ -89,20 +96,22 @@ class CommandTab:
         self.file_label.pack(fill="x", padx=10)
         tk.Label(parent, anchor="w", justify="left", wraplength=1000, text=(
             "Calibration sizes: cm. Sequence: select mm, cm or m. Auto reads the unit header; without a header it uses mm. "
-            "Table shows mm; ratio = 1. "
+            "Table shows mm. Double-click Ratio, Angle, Wait or Zero to edit each point (Enter applies). "
+            "Ratio defaults to 1; Angle Auto is unconstrained and is ignored for ratio 1. "
             "Each point is calculated fresh and sent. After the row's minimum wait, all robots must reach the target and stay within tolerance. "
             "Press Next point to advance (Finish for the last point). There is no automatic progression. "
             "Stop prevents further commands; it does not undo the last motor pose."
         )).pack(fill="x", padx=10, pady=3)
         table_frame = tk.Frame(parent)
         table_frame.pack(fill="x", padx=8)
-        self.table = ttk.Treeview(table_frame, columns=("x", "y", "wait", "zero", "state", "angles"),
+        self.table = ttk.Treeview(table_frame, columns=("x", "y", "wait", "zero", "ratio", "angle", "state", "angles"),
                                   show="tree headings", height=6, selectmode="browse")
         self.table.tag_configure("outside", foreground="#b00020")
         self.table.heading("#0", text="Point")
         self.table.column("#0", width=55, stretch=False)
         for key, title, width in (("x", "X (mm)", 75), ("y", "Y (mm)", 75),
                                   ("wait", "Wait (s)", 65), ("zero", "Zero (deg)", 75),
+                                  ("ratio", "Ratio", 60), ("angle", "Angle (deg)", 80),
                                   ("state", "State", 95), ("angles", "Calculated motor angles (deg)", 380)):
             self.table.heading(key, text=title)
             self.table.column(key, width=width, stretch=(key == "angles"))
@@ -111,6 +120,16 @@ class CommandTab:
         scroll.pack(side="right", fill="y")
         self.table.pack(side="left", fill="x", expand=True)
         self.table.bind("<<TreeviewSelect>>", self.select_point)
+        self.table.bind("<Double-1>", self.edit_point_cell)
+        point_settings = tk.Frame(parent)
+        point_settings.pack(fill='x', padx=8, pady=3)
+        self.point_ratio_var = tk.StringVar(value='1')
+        self.point_angle_var = tk.StringVar(value='Auto')
+        tk.Label(point_settings, text='Selected point: Ratio').pack(side='left', padx=3)
+        tk.Entry(point_settings, textvariable=self.point_ratio_var, width=6).pack(side='left')
+        tk.Label(point_settings, text='Equilibrium angle (deg / Auto)').pack(side='left', padx=6)
+        tk.Entry(point_settings, textvariable=self.point_angle_var, width=7).pack(side='left')
+        tk.Button(point_settings, text='Apply to selected point', command=self.apply_point_settings).pack(side='left', padx=6)
         self.status = tk.Label(parent, text="Load an XY sequence and complete/load Calibration first.", anchor="w", wraplength=1000)
         self.status.pack(fill="x", padx=10, pady=4)
         self.limits_label = tk.Label(parent, text="", anchor="w", justify="left", wraplength=1000)
@@ -137,6 +156,15 @@ class CommandTab:
         self.arrival_hold_entry.pack(side="left")
         self.tracking_status = tk.Label(parent, text="Tracking starts automatically when calibration is applied.", anchor="w", wraplength=1000)
         self.tracking_status.pack(fill="x", padx=10)
+        recording_bar = tk.Frame(parent)
+        recording_bar.pack(fill='x', padx=8, pady=3)
+        tk.Button(recording_bar, text='Start recording', command=self.start_recording).pack(side='left', padx=3)
+        self.recording_stop_button = tk.Button(recording_bar, text='Stop / save recording', command=self.stop_recording, state='disabled')
+        self.recording_stop_button.pack(side='left', padx=3)
+        tk.Label(recording_bar, text='Video FPS').pack(side='left', padx=3)
+        tk.Entry(recording_bar, textvariable=self.recording_fps_var, width=4).pack(side='left')
+        self.recording_status = tk.Label(recording_bar, text='Camera + annotated + blue-screen overlays + tracking CSV', anchor='w')
+        self.recording_status.pack(side='left', padx=8)
         tk.Label(parent, text="Green: tracked robots    Cyan: desired points    Orange: active target    Red: beyond pins. Select a row or click a target.",
                  anchor="w").pack(fill="x", padx=10)
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
@@ -180,8 +208,95 @@ class CommandTab:
         for index, step in enumerate(steps):
             self.table.insert("", "end", iid=str(index), text=str(index + 1), values=(
                 f"{step.target_xy_m[0] * 1000:g}", f"{step.target_xy_m[1] * 1000:g}",
-                f"{step.wait_seconds:g}", f"{step.zero_angle_deg:g}", "Pending", ""))
+                f"{step.wait_seconds:g}", f"{step.zero_angle_deg:g}", f"{step.ratio:g}",
+                "Auto" if step.angle_deg is None else f"{step.angle_deg:g}", "Pending", ""))
         self.refresh_calibration()
+
+    def edit_point_cell(self, event):
+        if self.running:
+            return
+        row = self.table.identify_row(event.y)
+        column = self.table.identify_column(event.x)
+        fields = {"#3": "wait", "#4": "zero", "#5": "ratio", "#6": "angle"}
+        if not row or column not in fields:
+            return
+        if self.cell_editor is not None:
+            self.cell_editor.destroy()
+        key = fields[column]
+        x, y, width, height = self.table.bbox(row, column)
+        editor = tk.Entry(self.table)
+        self.cell_editor = editor
+        editor.insert(0, self.table.set(row, key))
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.focus_set()
+        editor.select_range(0, 'end')
+
+        def finish(event=None, cancel=False):
+            if self.cell_editor is not editor:
+                return
+            if not cancel:
+                try:
+                    text = editor.get().strip()
+                    value = None if key == 'angle' and text.lower() in ('auto', 'none') else float(text)
+                    if value is not None and not np.isfinite(value):
+                        raise ValueError('Value must be finite.')
+                    if key == 'ratio' and value <= 0:
+                        raise ValueError('Ratio must be positive.')
+                    if key == 'wait' and value < 0:
+                        raise ValueError('Wait must be nonnegative.')
+                    if key == 'zero' and not 0 <= value <= 360:
+                        raise ValueError('Motor zero must be between 0 and 360 degrees.')
+                    field = {'ratio': 'ratio', 'angle': 'angle_deg', 'wait': 'wait_seconds', 'zero': 'zero_angle_deg'}[key]
+                    self.steps[int(row)] = replace(self.steps[int(row)], **{field: value})
+                    self.table.set(row, key, 'Auto' if value is None else f'{value:g}')
+                    self.table.set(row, 'angles', '')
+                    self.table.set(row, 'state', 'Pending')
+                    self.status.config(text=f'Point {int(row) + 1}: {key} updated. Export XY sequence to save edits.')
+                except ValueError as error:
+                    self.status.config(text=f'Point edit rejected: {error}')
+            self.cell_editor = None
+            editor.destroy()
+
+        editor.bind('<Return>', finish)
+        editor.bind('<FocusOut>', finish)
+        editor.bind('<Escape>', lambda event: finish(cancel=True))
+
+    def export_sequence(self):
+        if not self.steps:
+            messagebox.showerror('Sequence export', 'Load a sequence first.')
+            return
+        path = filedialog.asksaveasfilename(title='Save edited XY sequence', initialdir=str(XY_SEQUENCE_DIR),
+                                           initialfile=Path(self.sequence_path).name, defaultextension='.txt',
+                                           filetypes=[('XY sequence', '*.txt')])
+        if path:
+            try:
+                write_xy_sequence(path, self.steps)
+                self.status.config(text=f'Saved XY, wait, motor zero, ratio and equilibrium angle: {path}')
+            except OSError as error:
+                messagebox.showerror('Sequence export', str(error))
+
+    def apply_point_settings(self):
+        if self.running:
+            return
+        selection = self.table.selection()
+        if not selection:
+            self.status.config(text='Select a point before applying ratio and angle.')
+            return
+        try:
+            ratio = float(self.point_ratio_var.get())
+            text = self.point_angle_var.get().strip()
+            angle = None if text.lower() in ('auto', 'none') else float(text)
+            if not np.isfinite(ratio) or ratio <= 0 or (angle is not None and not np.isfinite(angle)):
+                raise ValueError('Ratio must be positive and finite; angle must be finite or Auto.')
+            index = int(selection[0])
+            self.steps[index] = replace(self.steps[index], ratio=ratio, angle_deg=angle)
+            self.table.set(str(index), 'ratio', f'{ratio:g}')
+            self.table.set(str(index), 'angle', 'Auto' if angle is None else f'{angle:g}')
+            self.table.set(str(index), 'angles', '')
+            self.table.set(str(index), 'state', 'Pending')
+            self.status.config(text=f'Point {index + 1} settings applied. Export XY sequence to save them.')
+        except ValueError as error:
+            self.status.config(text=f'Point edit rejected: {error}')
 
     def current_setup(self):
         if self.calibration.capture is not None:
@@ -240,8 +355,26 @@ class CommandTab:
             self.tracking_group_xy = None
             self.tracking_status.config(text="Tracking stopped: camera size no longer matches calibration.")
             self.status.config(text="Camera resolution changed. Sequence stopped; load matching calibration before running again.")
+        first_row = len(self.tracking_rows)
         if getattr(self, "tracking_tracker", None) is not None:
             self.process_tracking_frame()
+        if getattr(self, 'recording', None) is not None:
+            try:
+                options = dict(show_path=self.show_path_var.get(), show_roi=self.show_roi_var.get(),
+                               trails=self.robot_trails if self.show_trails_var.get() else None)
+                args = (self.setup, self.pixels, self.active_index, self.tracking_detections, self.tracking_tracker)
+                annotated = draw_command_overlay(frame.copy(), *args, **options)
+                overlay = np.zeros_like(frame)
+                overlay[:] = (255, 0, 0)  # Blue chroma-key background; MP4 has no alpha channel.
+                draw_command_overlay(overlay, *args, **options)
+                rows = self.tracking_rows[first_row:]
+                if not rows:
+                    rows = [{'frame': '', 'group_valid': 0, 'detected_robots': 0}]
+                self.recording.write(frame, annotated, overlay, rows)
+                self.recording_status.config(text=f'Recording {self.recording.frame_count} frames; source-resolution videos + CSV.')
+            except (ValueError, OSError, cv2.error) as error:
+                self.stop_recording()
+                self.recording_status.config(text=f'Recording stopped: {error}. Partial files kept.')
         if self.visible():
             self.render()
 
@@ -371,6 +504,8 @@ class CommandTab:
                 "sequence_running": int(self.running),
                 "arrival_ready": int(gate.ready) if gate is not None else 0,
                 "arrival_max_error_mm": "" if gate is None or gate.error_mm is None else gate.error_mm,
+                "desired_ratio": "" if self.active_index is None else self.steps[self.active_index].ratio,
+                "desired_angle_deg": "" if self.active_index is None or self.steps[self.active_index].angle_deg is None else self.steps[self.active_index].angle_deg,
             })
         self.tracking_frame_number += 1
         detail = "Group missing; ROI held at last complete detection."
@@ -415,9 +550,42 @@ class CommandTab:
             except OSError as error:
                 messagebox.showerror("Tracking export", str(error))
 
+    def start_recording(self):
+        if self.recording is not None:
+            return
+        if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
+            messagebox.showerror('Recording', 'Connect the camera and wait for a fresh frame first.')
+            return
+        if self.tracking_tracker is None or not self.tracking_enabled:
+            messagebox.showerror('Recording', 'Apply calibration and start tracking first to record synchronized measurements.')
+            return
+        path = filedialog.asksaveasfilename(title='Choose recording base name (four files will be created)',
+                                           initialdir=str(XY_SEQUENCE_DIR.parent),
+                                           initialfile=default_setup_name().replace('.json', '.mp4'),
+                                           defaultextension='.mp4', filetypes=[('Recording', '*.mp4')])
+        if not path:
+            return
+        try:
+            self.recording = CommandRecording(path, self.frame.shape[1::-1], float(self.recording_fps_var.get()))
+            self.recording_stop_button.config(state='normal')
+            self.recording_status.config(text='Recording started. Stop / save finalizes all four files.')
+        except (ValueError, OSError, cv2.error) as error:
+            messagebox.showerror('Recording', str(error))
+
+    def stop_recording(self):
+        if self.recording is not None:
+            recording, self.recording = self.recording, None
+            recording.close()
+            self.recording_stop_button.config(state='disabled')
+            self.recording_status.config(text=f'Saved {recording.frame_count} frames: {recording.paths[0].parent / recording.paths[0].stem} (+ annotated, overlay, CSV).')
+
     def select_point(self, event=None):
         if not self.running and self.table.selection():
             self.active_index = int(self.table.selection()[0])
+            if hasattr(self, 'point_ratio_var'):
+                step = self.steps[self.active_index]
+                self.point_ratio_var.set(f'{step.ratio:g}')
+                self.point_angle_var.set('Auto' if step.angle_deg is None else f'{step.angle_deg:g}')
             self.render()
 
     def show_points(self):
@@ -648,6 +816,8 @@ class CommandTab:
             self.canvas.create_text(x + 5, y + 5, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 8), anchor="nw")
 
     def close(self):
+        if getattr(self, 'recording', None) is not None:
+            self.stop_recording()
         self.stop_event.set()
         self.job += 1
         if self.after_id is not None:

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from shutil import copyfile
+import math
 
 from case_loader import build_common_config, case_output_path, get_case_name_from_argv, load_case, require_keys
 from control_workflow import run_control_workflow
@@ -51,7 +52,7 @@ def main(case_name=None):
     xy_filename = sequence_filename.parent.parent / "xy_sequences" / sequence_filename.name
     xy_filename.parent.mkdir(parents=True, exist_ok=True)
     with open(xy_filename, "w", encoding="utf-8") as output:
-        output.write("# targets_xy_m | wait | zero\n")
+        output.write("# targets_xy_m | wait | zero | ratio | angle_deg\n")
         output.write("# Each row matches the same row of the magnet-angle sequence.\n")
         for control in result.scheduled_controls:
             points = [
@@ -59,7 +60,11 @@ def main(case_name=None):
                 for position in control.target_positions
             ]
             point_text = points[0] if len(points) == 1 else "[" + ", ".join(points) + "]"
-            output.write(f"{point_text} | {sequence_wait:g} | 180\n")
+            ratio = getattr(control, 'eig_ratio', None)
+            angle = getattr(control, 'eig_angle', None)
+            ratio_text = f'{float(ratio):.12g}' if ratio is not None else '1'
+            angle_text = f'{math.degrees(float(angle)):.12g}' if angle is not None else 'Auto'
+            output.write(f"{point_text} | {sequence_wait:g} | 180 | {ratio_text} | {angle_text}\n")
 
     print(f"Wrote {output_filename}")
     print(f"Wrote {sequence_filename}")

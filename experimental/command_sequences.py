@@ -19,6 +19,8 @@ class XYStep:
     target_xy_m: tuple
     wait_seconds: float
     zero_angle_deg: float
+    ratio: float = 1.0
+    angle_deg: float | None = None
 
 
 def resolve_xy_units(content, units="auto"):
@@ -44,22 +46,37 @@ def read_xy_sequence(path, units="auto"):
             continue
         try:
             columns = [column.strip() for column in line.split("|")]
-            if len(columns) != 3:
-                raise ValueError("Expected [x, y] | wait | zero.")
+            if len(columns) not in (3, 5):
+                raise ValueError("Expected [x, y] | wait | zero [| ratio | angle_deg].")
             target = np.asarray(ast.literal_eval(columns[0]), dtype=float)
             if target.shape != (2,):
                 raise ValueError("Commands currently require one XY target per row, not magnet angles or simultaneous multiple targets.")
             wait, zero = float(columns[1]), float(columns[2])
+            ratio = float(columns[3]) if len(columns) == 5 else 1.0
+            angle = (None if len(columns) == 3 or columns[4].lower() in ('none', 'auto')
+                     else float(columns[4]))
+            if not np.isfinite(ratio) or ratio <= 0 or (angle is not None and not np.isfinite(angle)):
+                raise ValueError("Ratio must be positive and angle finite or Auto.")
             if not np.isfinite(target).all() or not np.isfinite([wait, zero]).all():
                 raise ValueError("Coordinates, wait and zero must be finite.")
             if wait < 0 or not 0 <= zero <= 360:
                 raise ValueError("Wait must be nonnegative and zero must be between 0 and 360 degrees.")
-            steps.append(XYStep(tuple(target * factor), wait, zero))
+            steps.append(XYStep(tuple(target * factor), wait, zero, ratio, angle))
         except (SyntaxError, ValueError, TypeError) as error:
             raise ValueError(f"Line {line_number}: {error}") from error
     if not steps:
         raise ValueError("The XY sequence contains no points.")
     return steps
+
+
+def write_xy_sequence(path, steps):
+    """Save explicit SI units and every point's equilibrium settings."""
+    with open(path, "w", encoding="utf-8") as output:
+        output.write("# targets_xy_m | wait | zero | ratio | angle_deg\n")
+        for step in steps:
+            xy = ', '.join(f'{value:.12g}' for value in step.target_xy_m)
+            angle = 'Auto' if step.angle_deg is None else f'{step.angle_deg:.12g}'
+            output.write(f'[{xy}] | {step.wait_seconds:g} | {step.zero_angle_deg:g} | {step.ratio:.12g} | {angle}\n')
 
 
 def project_sequence(steps, setup, *, validate=True):
@@ -117,7 +134,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
             report("sent", index, result)
 
         result = commander.move(
-            case_name, step.target_xy_m, ratio=1.0, angle_deg=None,
+            case_name, step.target_xy_m, ratio=step.ratio, angle_deg=step.angle_deg,
             settle_seconds=step.wait_seconds, zero_angle_deg=step.zero_angle_deg,
             active=active, on_sent=sent,
         )

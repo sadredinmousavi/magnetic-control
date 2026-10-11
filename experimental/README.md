@@ -10,6 +10,17 @@ In Commands, load a file from `experimental/xy_sequences`:
 
 `[x, y] | wait_seconds | motor_zero_degrees`
 
+New exports also preserve equilibrium settings:
+`[x, y] | wait_seconds | motor_zero_degrees | ratio | angle_deg`
+Old three-column files default to ratio 1 and angle Auto. Angle is the equilibrium
+orientation in robot XY, not the motor zero or calculated motor angles; ratio 1
+ignores orientation. Select a point, edit Ratio / Equilibrium angle in the input
+boxes and Apply to selected point. Alternatively double-click Ratio, Angle, Wait
+or Zero in the table; Enter or leaving the cell applies, Escape cancels. Edits
+are blocked during execution. Export XY sequence saves the edited points in
+metres with explicit ratio/angle fields. Usage 2 exports these fields as well;
+magnet-angle sequence files remain GUI001-compatible three-column files.
+
 Calibration rectangle dimensions are in centimetres. Select sequence units
 (`mm`, `cm`, or `m`) in Commands. `Auto` respects `# targets_xy_mm`,
 `# targets_xy_cm`, or legacy `# targets_xy_m` headers, and uses millimetres
@@ -22,7 +33,7 @@ cyan, beyond-pin points red, and the selected/current target orange. Select a
 table row or click an image marker, then Run selected point, or choose Run all.
 The preview reports sequence and pin extents in mm; the origin is the captured
 robot Center, which need not equal the geometric rectangle center.
-The table displays XY in millimetres. Commands use ratio 1 and calculate fresh
+The table displays XY in millimetres. Commands use each row's ratio/angle and calculate fresh
 motor angles for each point; the wait starts after sending that pose.
 The row wait is a minimum motor hold. After it, tracking must confirm that every
 expected robot is within Arrival tolerance (default 1 mm) continuously for the
@@ -51,6 +62,18 @@ be enabled separately. Export tracking CSV saves per-frame robot XY, group XY,
 target XY, error, detection validity/counts, arrival readiness/error and moving ROI.
 Stop tracking preserves measurements and pauses arrival progression without
 undoing the motor pose; restart tracking to continue or use command Stop to end.
+
+To export live video, apply calibration, start tracking, set Video FPS to match
+the camera, then Start recording and choose a base name. Recording continues
+across targets and tab switches until Stop / save recording (or closing GUI005).
+It writes `_camera.mp4` (unmodified frame), `_annotated.mp4` (camera plus overlays),
+`_overlay.mp4` (overlays on blue for chroma-key removal), and `_tracking.csv` with
+recording frame IDs/timestamps and robot/target measurements. Overlay toggles
+control desired lines, ROI and trails; robot markers and desired points remain.
+Videos use source resolution, independent of preview zoom; odd frame dimensions
+are padded by one pixel, not cropped. MP4 is constant FPS, so CSV timestamps are
+the authority for variable-rate or dropped-frame timing. Existing recording names
+are rejected to avoid overwriting. For CSV alone, use Export tracking CSV.
 
 
 
