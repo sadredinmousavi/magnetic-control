@@ -38,7 +38,7 @@ class MovingROICalibration:
     """Frame-by-frame tracking shared by live preview and movie playback."""
 
     def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area, axis_samples=None,
-                 contrast_threshold=10, strict_single=False):
+                 contrast_threshold=10, strict_single=False, limit_to_pins=True):
         calibrated_dwell_coordinates([], corners, width_cm, height_cm)
         if count < 1 or not np.isfinite(minimum_area) or minimum_area <= 0:
             raise ValueError("Robot count and minimum area must be positive.")
@@ -52,6 +52,7 @@ class MovingROICalibration:
         self.count, self.minimum_area = count, minimum_area
         self.references = []
         self.strict_single = strict_single
+        self.limit_to_pins = limit_to_pins
         self.selection_error = None
         self.detector = RobotDetector()
         self.axes = RobotAxes(corners, width_cm, height_cm, axis_samples) if axis_samples else None
@@ -68,7 +69,8 @@ class MovingROICalibration:
 
     def process(self, frame):
         mask = circle_detection_mask(frame.shape[:2], (*self.center, self.radius))
-        mask = cv2.bitwise_and(mask, workspace_detection_mask(frame.shape[:2], self.corners))
+        if self.limit_to_pins:
+            mask = cv2.bitwise_and(mask, workspace_detection_mask(frame.shape[:2], self.corners))
         _, candidates = self.detector.process(
             frame, mode="Color blobs", color="Dark contrast",
             minimum_area=self.minimum_area, morphology_kernel_size=1,

@@ -33,6 +33,18 @@ Stop cancels unsent poses and interrupts waits; it does not undo the last pose.
 This is timed execution, not robot-arrival feedback. Simultaneous multi-target
 rows are not supported by this tab.
 
+Phase 3 robot tracking starts when a complete calibration is applied, even before
+loading a sequence. It uses the same dark-contrast detector, robot IDs and moving
+ROI as Calibration. Set Robots to the actual count; adjust minimum area, contrast
+and ROI radius in the command view. Tracking is not clipped to the pin rectangle,
+so it can follow extrapolated targets. Partial/missing groups do not move the ROI
+or produce valid group XY; current robot markers disappear when video is stale.
+The view shows small green robot markers, actual group XY and active-target error
+in mm. Desired lines, moving ROI and robot trails are hidden by default and can
+be enabled separately. Export tracking CSV saves per-frame robot XY, group XY,
+target XY, error, detection validity/counts and moving ROI. Stop tracking preserves
+measurements and does not stop motor execution; use the command Stop button for that.
+
 
 
 

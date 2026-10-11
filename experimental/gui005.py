@@ -391,6 +391,7 @@ class ClosedLoopGUI(BaseServoGUI):
             self.show_camera_frame(latest_frame)
             self.calibration.accept_live_frame(latest_frame)
             self.commands.accept_live_frame(latest_frame)
+        self.commands.check_camera_health()
         self.root.after(40, self.poll_camera)
 
     def show_camera_frame(self, frame_bgr):

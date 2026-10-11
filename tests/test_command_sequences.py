@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import numpy as np
+import cv2
+import csv
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
 from axis_calibration import RobotAxes
@@ -232,6 +234,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.port = Mock(is_open=True)
         app.input_units = "mm"
         app.allow_extrapolation_var = Mock(get=Mock(return_value=False))
+        app.configure_tracking = Mock()
         for name in ("parent", "table", "status", "render", "set_running", "load_button", "calibration_button",
                      "run_button", "run_selected_button", "stop_button", "units_combo", "extrapolation_check"):
             setattr(app, name, Mock())
@@ -292,6 +295,102 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertTrue(np.all(app.screen_points < [800, 500]))
         colors = [call.kwargs.get("outline") for call in app.canvas.create_oval.call_args_list]
         self.assertIn("#ff9900", colors)
+
+    def tracking_app(self):
+        app = self.run_app()
+        app.configure_tracking = CommandTab.configure_tracking.__get__(app)
+        app.setup = app.calibration.setup_data.return_value
+        app.setup.update(robot_count=1, minimum_area=2, dark_contrast_threshold=10, roi_circle_px=[110, 110, 90])
+        app.visible = lambda: False
+        app.tracking_tracker = None
+        app.tracking_enabled, app.tracking_signature = True, None
+        app.tracking_detections, app.tracking_group_xy = [], None
+        app.tracking_rows, app.robot_trails = [], {}
+        app.tracking_started_at, app.tracking_frame_number = None, 0
+        app.tracking_status = Mock()
+        for name, value in (("tracking_count_var", "1"), ("tracking_area_var", "2"),
+                            ("tracking_contrast_var", "10"), ("tracking_radius_var", "90")):
+            setattr(app, name, Mock(get=Mock(return_value=value)))
+        app.frame = np.full((400, 400, 3), 240, np.uint8)
+        app.steps, app.active_index = [XYStep((.01, 0), 0, 180)], 0
+        return app
+
+    def robot_frame(self, points):
+        frame = np.full((400, 400, 3), 240, np.uint8)
+        for point in points:
+            cv2.circle(frame, point, 3, (20, 20, 20), -1)
+        return frame
+
+    def test_command_tracking_follows_robot_and_records_xy_and_target_error(self):
+        app = self.tracking_app()
+        app.start_tracking()
+        for x in (110, 130, 160, 190, 230):
+            app.accept_live_frame(self.robot_frame([(x, 110)]))
+            self.assertEqual(app.tracking_detections[0]["center"], (x, 110))
+            np.testing.assert_allclose(app.tracking_tracker.center, [x, 110])
+        row = app.tracking_rows[-1]
+        self.assertAlmostEqual(row["robot_x_mm"], 60)
+        self.assertAlmostEqual(row["desired_x_mm"], 10)
+        self.assertAlmostEqual(row["error_mm"], 50)
+        self.assertEqual(row["group_valid"], 1)
+        self.assertFalse(app.tracking_tracker.limit_to_pins)
+
+    def test_missing_robot_leaves_gap_and_holds_roi_until_reacquisition(self):
+        app = self.tracking_app()
+        app.start_tracking()
+        app.accept_live_frame(self.robot_frame([(130, 110)]))
+        previous = app.tracking_tracker.center.copy()
+        app.accept_live_frame(self.robot_frame([]))
+        np.testing.assert_allclose(app.tracking_tracker.center, previous)
+        self.assertEqual(app.tracking_detections, [])
+        self.assertEqual(app.tracking_rows[-1]["group_valid"], 0)
+        self.assertEqual(app.tracking_rows[-1]["robot_x_mm"], "")
+        self.assertEqual(app.tracking_rows[-1]["error_mm"], "")
+        app.accept_live_frame(self.robot_frame([(140, 110)]))
+        self.assertEqual(app.tracking_rows[-1]["group_valid"], 1)
+
+    def test_multiple_robots_keep_individual_ids_and_partial_group_is_invalid(self):
+        app = self.tracking_app()
+        app.tracking_count_var.get.return_value = "2"
+        app.start_tracking()
+        app.accept_live_frame(self.robot_frame([(110, 110), (130, 110)]))
+        self.assertEqual({item["robot_id"] for item in app.tracking_detections}, {1, 2})
+        self.assertEqual(len(app.tracking_rows[-2:]), 2)
+        app.accept_live_frame(self.robot_frame([(115, 110)]))
+        self.assertEqual(app.tracking_rows[-1]["group_valid"], 0)
+        self.assertEqual(app.tracking_rows[-1]["detected_robots"], 1)
+
+    def test_camera_loss_clears_current_positions_and_tracking_csv_keeps_measurements(self):
+        app = self.tracking_app()
+        app.start_tracking()
+        app.accept_live_frame(self.robot_frame([(130, 110)]))
+        app.camera_running = lambda: False
+        app.check_camera_health()
+        self.assertEqual(app.tracking_detections, [])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tracking.csv"
+            with patch("command_tab.filedialog.asksaveasfilename", return_value=str(path)):
+                app.export_tracking()
+            with path.open(newline="", encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+        self.assertEqual(len(rows), len(app.tracking_rows))
+        self.assertAlmostEqual(float(rows[-1]["robot_x_mm"]), 10)
+
+    def test_command_view_shows_robot_even_without_loaded_sequence_and_hides_path_by_default(self):
+        app = self.tracking_app()
+        app.start_tracking()
+        app.accept_live_frame(self.robot_frame([(130, 110)]))
+        app.pixels, app.active_index, app.show_all = None, None, True
+        app.canvas = Mock()
+        app.canvas.winfo_width.return_value = 800
+        app.canvas.winfo_height.return_value = 500
+        with patch("command_tab.ImageTk.PhotoImage"):
+            CommandTab.render(app)
+        colors = [call.kwargs.get("fill") for call in app.canvas.create_line.call_args_list]
+        self.assertEqual(colors, ["#00ff66", "#00ff66"])
+        self.assertEqual(app.canvas.create_oval.call_count, 0)
+        labels = [call.kwargs["text"] for call in app.canvas.create_text.call_args_list]
+        self.assertIn("R1", labels)
 
 
 if __name__ == "__main__":
