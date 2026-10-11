@@ -41,7 +41,7 @@ class PointCommander:
                                        ratio=ratio, angle_deg=angle_deg)
 
     def move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
-             settle_seconds=0, active=lambda: True):
+             settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None):
         """Calculate fresh motor angles, send them, then wait interruptibly.
 
         Cancellation skips unsent commands; it cannot undo an already sent pose.
@@ -52,6 +52,9 @@ class PointCommander:
         settle_seconds = float(settle_seconds)
         if not np.isfinite(settle_seconds) or settle_seconds < 0:
             raise ValueError("Settle time must be finite and nonnegative.")
+        zero_angle_deg = self.zero_angle_deg if zero_angle_deg is None else float(zero_angle_deg)
+        if not np.isfinite(zero_angle_deg) or not 0 <= zero_angle_deg <= 360:
+            raise ValueError("Motor zero angle must be between 0 and 360 degrees.")
         with self.lock:
             if not active():
                 return None
@@ -66,7 +69,9 @@ class PointCommander:
             angles = np.asarray(result["angles_deg"], dtype=float)
             if angles.ndim != 1 or not angles.size or not np.isfinite(angles).all():
                 raise ValueError("Calculation did not produce valid motor angles.")
-            moveArray(port, angles, 0, self.zero_angle_deg)
+            moveArray(port, angles, 0, zero_angle_deg)
+            if on_sent is not None:
+                on_sent(result)
             deadline = time.monotonic() + settle_seconds
             while active() and time.monotonic() < deadline:
                 time.sleep(min(.05, max(0, deadline - time.monotonic())))

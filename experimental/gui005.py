@@ -12,6 +12,7 @@ from gui_helpers import BaseServoGUI
 from ssh_camera import SSHCameraClient, SSHCameraSettings, preferred_camera_mode
 from closed_loop_calibration import CalibrationTab
 from point_control import PointCommander
+from command_tab import CommandTab
 
 
 class ClosedLoopGUI(BaseServoGUI):
@@ -66,6 +67,15 @@ class ClosedLoopGUI(BaseServoGUI):
         calibration_tab = tk.Frame(notebook)
         notebook.add(calibration_tab, text="2. Calibration")
         self.calibration = CalibrationTab(calibration_tab, axis_move=self.move_axis_target)
+        command_tab = tk.Frame(notebook)
+        notebook.add(command_tab, text="3. Commands")
+        self.commands = CommandTab(
+            command_tab, self.calibration, self.point_commander, lambda: self.ssh_camera.is_running,
+            set_running=lambda running: notebook.tab(calibration_tab, state="disabled" if running else "normal"),
+            visible=lambda: notebook.select() == str(command_tab),
+        )
+        notebook.bind("<<NotebookTabChanged>>", lambda event: self.commands.refresh_calibration()
+                      if notebook.select() == str(command_tab) else None)
         self.build_future_tabs(notebook)
 
     def move_axis_target(self, target, case_name, settle, active):
@@ -85,7 +95,6 @@ class ClosedLoopGUI(BaseServoGUI):
 
     def build_future_tabs(self, notebook):
         for title, description in (
-            ("3. Commands", "Manual commands and sequence loading will be added next."),
             ("4. Detection", "Moving ROI and robot tracking will be added next."),
         ):
             frame = tk.Frame(notebook, padx=24, pady=24)
@@ -381,6 +390,7 @@ class ClosedLoopGUI(BaseServoGUI):
         if latest_frame is not None:
             self.show_camera_frame(latest_frame)
             self.calibration.accept_live_frame(latest_frame)
+            self.commands.accept_live_frame(latest_frame)
         self.root.after(40, self.poll_camera)
 
     def show_camera_frame(self, frame_bgr):
@@ -399,6 +409,7 @@ class ClosedLoopGUI(BaseServoGUI):
         )
 
     def on_close(self):
+        self.commands.close()
         self.calibration.close()
         self.ssh_camera.stop()
         try:

@@ -1,6 +1,7 @@
 """Robot-frame orientation after four-point perspective/metric calibration."""
 
 import numpy as np
+import cv2
 
 from gui004 import calibrated_dwell_coordinates
 
@@ -40,3 +41,24 @@ class RobotAxes:
             self.corners, self.width_cm, self.height_cm,
         )
         return (metric - self.origin) @ self.rotation
+
+    def pixel_positions(self, coordinates_cm):
+        """Inverse robot XY mapping for desired-position camera overlays."""
+        coordinates = np.asarray(coordinates_cm, dtype=float)
+        if coordinates.ndim != 2 or coordinates.shape[1] != 2 or not np.isfinite(coordinates).all():
+            raise ValueError("Desired coordinates must be finite XY pairs.")
+        metric = coordinates @ self.rotation.T + self.origin
+        plane = np.float32([
+            [-self.width_cm / 2, self.height_cm / 2],
+            [self.width_cm / 2, self.height_cm / 2],
+            [self.width_cm / 2, -self.height_cm / 2],
+            [-self.width_cm / 2, -self.height_cm / 2],
+        ])
+        inverse = cv2.getPerspectiveTransform(plane, np.asarray(self.corners, np.float32))
+        homogeneous = np.column_stack((metric, np.ones(len(metric)))) @ inverse.T
+        if np.any(np.abs(homogeneous[:, 2]) < 1e-10):
+            raise ValueError("Desired point is outside the usable camera projection.")
+        pixels = homogeneous[:, :2] / homogeneous[:, 2:3]
+        if not np.isfinite(pixels).all():
+            raise ValueError("Desired point projection is not finite.")
+        return pixels
