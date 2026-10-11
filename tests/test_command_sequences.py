@@ -166,7 +166,8 @@ class CommandSequenceTests(unittest.TestCase):
         app.events, app.job, app.running = queue.Queue(), 1, True
         app.steps = [XYStep((0, 0), 3, 180)]
         app.active_index = None
-        for name in ("table", "status", "render", "set_running", "load_button", "calibration_button", "run_button", "run_selected_button", "extrapolation_check", "stop_button", "units_combo"):
+        app.arrival_gate, app.run_indices, app.stop_event = None, (0,), threading.Event()
+        for name in ("table", "status", "render", "set_running", "load_button", "calibration_button", "run_button", "run_selected_button", "extrapolation_check", "stop_button", "units_combo", "next_button", "arrival_tolerance_entry", "arrival_hold_entry"):
             setattr(app, name, Mock())
         app.events.put((1, "sent", 0, {"angles_deg": [60, 70]}))
         app.events.put((1, "completed", 0, {"angles_deg": [60, 70]}))
@@ -235,8 +236,12 @@ class CommandSequenceTests(unittest.TestCase):
         app.input_units = "mm"
         app.allow_extrapolation_var = Mock(get=Mock(return_value=False))
         app.configure_tracking = Mock()
+        app.arrival_gate = None
+        app.arrival_tolerance_var = Mock(get=Mock(return_value="1"))
+        app.arrival_hold_var = Mock(get=Mock(return_value="0.5"))
+        app.tracking_tracker, app.tracking_enabled = Mock(), True
         for name in ("parent", "table", "status", "render", "set_running", "load_button", "calibration_button",
-                     "run_button", "run_selected_button", "stop_button", "units_combo", "extrapolation_check"):
+                     "run_button", "run_selected_button", "stop_button", "units_combo", "extrapolation_check", "next_button", "arrival_tolerance_entry", "arrival_hold_entry"):
             setattr(app, name, Mock())
         app.table.selection.return_value = ("1",)
         return app
@@ -244,6 +249,7 @@ class CommandSequenceTests(unittest.TestCase):
     def test_run_selected_sends_only_that_row_and_uses_original_row_number(self):
         app = self.run_app()
         with patch("command_tab.messagebox.askyesno", return_value=True), \
+             patch("command_tab.ArrivalGate", return_value=Mock(tolerance_mm=1, stable_seconds=.5, waiting_for_next=False)), \
              patch("command_tab.threading.Thread") as thread, \
              patch("command_tab.load_hardware_case", return_value={}), \
              patch.object(app.commander, "calculate", return_value={"angles_deg": [60, 70]}) as calculate, \
@@ -268,6 +274,7 @@ class CommandSequenceTests(unittest.TestCase):
         app = self.run_app()
         app.allow_extrapolation_var.get.return_value = True
         with patch("command_tab.messagebox.askyesno", return_value=True) as confirm, \
+             patch("command_tab.ArrivalGate", return_value=Mock(tolerance_mm=1, stable_seconds=.5, waiting_for_next=False)), \
              patch("command_tab.threading.Thread") as thread, \
              patch("command_tab.load_hardware_case", return_value={}), \
              patch.object(app.commander, "calculate", return_value={"angles_deg": [60, 70]}) as calculate, \

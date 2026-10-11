@@ -24,14 +24,20 @@ The preview reports sequence and pin extents in mm; the origin is the captured
 robot Center, which need not equal the geometric rectangle center.
 The table displays XY in millimetres. Commands use ratio 1 and calculate fresh
 motor angles for each point; the wait starts after sending that pose.
+The row wait is a minimum motor hold. After it, tracking must confirm that every
+expected robot is within Arrival tolerance (default 1 mm) continuously for the
+In-range hold (default 0.5 seconds). Execution then waits for your Next point
+button press; the last or single selected point uses Finish. There is no automatic
+advance. Missing, stale or out-of-tolerance detections disable the button until
+arrival is confirmed again. Set tolerance and hold before starting the run.
 Run requires a live camera, connected controller, complete robot axes, and each
 requested target inside the camera frame. Beyond-pin points require the explicit
 Allow beyond pins option and a warning confirmation; their mapping is extrapolated
 and you must verify that the target is physically safe. Running an inside selected
 point is not blocked by other outside points. Calibration is locked while running.
 Stop cancels unsent poses and interrupts waits; it does not undo the last pose.
-This is timed execution, not robot-arrival feedback. Simultaneous multi-target
-rows are not supported by this tab.
+Tracking gates progression; it does not recalculate corrective motor commands
+while approaching a target. Simultaneous multi-target rows are not supported.
 
 Phase 3 robot tracking starts when a complete calibration is applied, even before
 loading a sequence. It uses the same dark-contrast detector, robot IDs and moving
@@ -42,8 +48,9 @@ or produce valid group XY; current robot markers disappear when video is stale.
 The view shows small green robot markers, actual group XY and active-target error
 in mm. Desired lines, moving ROI and robot trails are hidden by default and can
 be enabled separately. Export tracking CSV saves per-frame robot XY, group XY,
-target XY, error, detection validity/counts and moving ROI. Stop tracking preserves
-measurements and does not stop motor execution; use the command Stop button for that.
+target XY, error, detection validity/counts, arrival readiness/error and moving ROI.
+Stop tracking preserves measurements and pauses arrival progression without
+undoing the motor pose; restart tracking to continue or use command Stop to end.
 
 
 

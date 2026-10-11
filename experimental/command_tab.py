@@ -20,6 +20,7 @@ from command_sequences import (
 )
 from point_control import hardware_case_name, load_hardware_case
 from closed_loop_calibration import MovingROICalibration, default_setup_name
+from arrival_control import ArrivalGate
 
 
 class CommandTab:
@@ -37,6 +38,9 @@ class CommandTab:
         self.active_index = None
         self.show_all = True
         self.after_id = None
+        self.arrival_gate = None
+        self.arrival_tolerance_var = tk.StringVar(value="1")
+        self.arrival_hold_var = tk.StringVar(value="0.5")
         self.tracking_tracker = None
         self.tracking_detections = []
         self.tracking_group_xy = None
@@ -69,6 +73,8 @@ class CommandTab:
         self.run_button.pack(side="left", padx=3)
         self.stop_button = tk.Button(actions, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="left", padx=3)
+        self.next_button = tk.Button(actions, text="Next point", command=self.next_point, state="disabled")
+        self.next_button.pack(side="left", padx=3)
         self.allow_extrapolation_var = tk.BooleanVar(value=False)
         self.extrapolation_check = tk.Checkbutton(actions, text="Allow beyond pins (extrapolated)",
                                                  variable=self.allow_extrapolation_var)
@@ -84,7 +90,8 @@ class CommandTab:
         tk.Label(parent, anchor="w", justify="left", wraplength=1000, text=(
             "Calibration sizes: cm. Sequence: select mm, cm or m. Auto reads the unit header; without a header it uses mm. "
             "Table shows mm; ratio = 1. "
-            "Each point is calculated fresh, sent, then held for its wait time. This is timed execution, not arrival feedback. "
+            "Each point is calculated fresh and sent. After the row's minimum wait, all robots must reach the target and stay within tolerance. "
+            "Press Next point to advance (Finish for the last point). There is no automatic progression. "
             "Stop prevents further commands; it does not undo the last motor pose."
         )).pack(fill="x", padx=10, pady=3)
         table_frame = tk.Frame(parent)
@@ -122,6 +129,12 @@ class CommandTab:
         for label, variable in (("Show desired lines", self.show_path_var), ("Show moving ROI", self.show_roi_var),
                                 ("Show robot trails", self.show_trails_var)):
             tk.Checkbutton(options, text=label, variable=variable, command=self.render).pack(side="left", padx=3)
+        tk.Label(options, text="Arrival tolerance (mm)").pack(side="left", padx=(8, 2))
+        self.arrival_tolerance_entry = tk.Entry(options, textvariable=self.arrival_tolerance_var, width=4)
+        self.arrival_tolerance_entry.pack(side="left")
+        tk.Label(options, text="In-range hold (s)").pack(side="left", padx=(8, 2))
+        self.arrival_hold_entry = tk.Entry(options, textvariable=self.arrival_hold_var, width=4)
+        self.arrival_hold_entry.pack(side="left")
         self.tracking_status = tk.Label(parent, text="Tracking starts automatically when calibration is applied.", anchor="w", wraplength=1000)
         self.tracking_status.pack(fill="x", padx=10)
         tk.Label(parent, text="Green: tracked robots    Cyan: desired points    Orange: active target    Red: beyond pins. Select a row or click a target.",
@@ -266,6 +279,9 @@ class CommandTab:
         )
 
     def start_tracking(self, *, setup=None):
+        if getattr(self, "arrival_gate", None) is not None:
+            self.arrival_gate.observe(None)
+            self.refresh_next_button()
         try:
             setup = self.current_setup() if setup is None else setup
             if setup.get("coordinate_system") != "robot_axes":
@@ -292,6 +308,9 @@ class CommandTab:
         self.tracking_tracker = None
         self.tracking_detections = []
         self.tracking_group_xy = None
+        if getattr(self, "arrival_gate", None) is not None:
+            self.arrival_gate.observe(None)
+            self.refresh_next_button()
         self.tracking_status.config(text="Tracking stopped. Recorded measurements remain available for export; motor execution is unchanged.")
         self.render()
 
@@ -311,8 +330,16 @@ class CommandTab:
             self.tracking_detections, center, self.tracking_group_xy = tracker.process(self.frame)
         except (ValueError, TypeError) as error:
             self.tracking_detections, self.tracking_group_xy = [], None
+            if getattr(self, "arrival_gate", None) is not None:
+                self.arrival_gate.observe(None)
+                self.refresh_next_button()
             self.tracking_status.config(text=f"Tracking unavailable: {error}")
             return
+        if getattr(self, "arrival_gate", None) is not None:
+            positions = (None if center is None else
+                         np.asarray([item["xy_cm"] for item in self.tracking_detections]) * .01)
+            self.arrival_gate.observe(positions, self.frame_received_at)
+            self.refresh_next_button()
         target = None if self.active_index is None else self.steps[self.active_index].target_xy_m
         group_mm = None if self.tracking_group_xy is None else np.asarray(self.tracking_group_xy) * 10
         error_mm = None if target is None or group_mm is None else float(np.linalg.norm(group_mm - np.asarray(target) * 1000))
@@ -323,6 +350,7 @@ class CommandTab:
         for item in self.tracking_detections:
             self.robot_trails.setdefault(item["robot_id"], deque(maxlen=300)).append(item["center"])
         elapsed = time.monotonic() - self.tracking_started_at
+        gate = getattr(self, "arrival_gate", None)
         for item in self.tracking_detections or [None]:
             self.tracking_rows.append({
                 "frame": self.tracking_frame_number, "time_s": elapsed,
@@ -341,6 +369,8 @@ class CommandTab:
                 "error_mm": "" if error_mm is None else error_mm,
                 "roi_x_px": tracker.center[0], "roi_y_px": tracker.center[1], "roi_radius_px": tracker.radius,
                 "sequence_running": int(self.running),
+                "arrival_ready": int(gate.ready) if gate is not None else 0,
+                "arrival_max_error_mm": "" if gate is None or gate.error_mm is None else gate.error_mm,
             })
         self.tracking_frame_number += 1
         detail = "Group missing; ROI held at last complete detection."
@@ -348,6 +378,8 @@ class CommandTab:
             detail = f"Group XY ({group_mm[0]:.2f}, {group_mm[1]:.2f}) mm."
         if error_mm is not None:
             detail += f" Active-target error {error_mm:.2f} mm."
+        if gate is not None and gate.error_mm is not None:
+            detail += f" Arrival maximum robot error {gate.error_mm:.2f} mm (limit {gate.tolerance_mm:g} mm)."
         self.tracking_status.config(text=f"Tracking {len(self.tracking_detections)}/{tracker.count} robots. {detail}")
 
     def check_camera_health(self):
@@ -356,6 +388,9 @@ class CommandTab:
         if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
             had_detections = bool(self.tracking_detections)
             self.tracking_detections, self.tracking_group_xy = [], None
+            if getattr(self, "arrival_gate", None) is not None:
+                self.arrival_gate.observe(None)
+                self.refresh_next_button()
             if had_detections:
                 for trail in self.robot_trails.values():
                     trail.append(None)
@@ -409,6 +444,7 @@ class CommandTab:
         if self.running:
             return
         try:
+            arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()))
             setup, pixels = self.prepare(validate=False)
             if selected_only:
                 selection = self.table.selection()
@@ -427,6 +463,8 @@ class CommandTab:
                 raise ValueError("Connect the serial controller first.")
             load_hardware_case(setup["control_case"])
             self.configure_tracking(setup)
+            if self.tracking_tracker is None or not self.tracking_enabled:
+                raise ValueError("Start robot tracking before running an arrival-controlled sequence.")
         except (ValueError, TypeError, KeyError, ImportError) as error:
             messagebox.showerror("Cannot run sequence", str(error))
             return
@@ -434,7 +472,7 @@ class CommandTab:
         extrapolated = sum(bool(outside[index]) for index in indices)
         description = f"selected point {indices[0] + 1}" if selected_only else f"all {len(indices)} points"
         warning = f"\nWARNING: {extrapolated} target(s) beyond pins. Mapping is extrapolated; confirm they are physically safe." if extrapolated else ""
-        if not messagebox.askyesno("Run XY targets", f"Run {description} using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nRatio 1; wait and zero from each XY row.\nConfirm the units and physical hardware match.{warning}"):
+        if not messagebox.askyesno("Run XY targets", f"Run {description} using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nArrival: all tracked robots within {arrival_gate.tolerance_mm:g} mm for {arrival_gate.stable_seconds:g} s; then press Next.\nRow wait is the minimum hold after sending; no automatic advance.\nConfirm the units and physical hardware match.{warning}"):
             return
         self.setup, self.pixels = setup, pixels
         self.running = True
@@ -444,12 +482,16 @@ class CommandTab:
         job = self.job
         steps = tuple(self.steps[index] for index in indices)
         self.run_indices = indices
+        self.arrival_gate = arrival_gate
         self.set_running(True)
         for button in (self.load_button, self.calibration_button, self.run_button, self.run_selected_button):
             button.config(state="disabled")
         self.stop_button.config(state="normal")
         self.units_combo.config(state="disabled")
         self.extrapolation_check.config(state="disabled")
+        self.next_button.config(state="disabled", text="Next point")
+        self.arrival_tolerance_entry.config(state="disabled")
+        self.arrival_hold_entry.config(state="disabled")
         for index in indices:
             self.table.set(str(index), "state", "Pending")
             self.table.set(str(index), "angles", "")
@@ -465,7 +507,8 @@ class CommandTab:
             try:
                 outcome = execute_xy_sequence(steps, self.commander, hardware_case_name(setup["control_case"]),
                                               active=active, report=lambda kind, index, result:
-                                              self.events.put((job, kind, indices[index], result)))
+                                              self.events.put((job, kind, indices[index], result)),
+                                              arrival_gate=arrival_gate)
                 self.events.put((job, outcome, None, None))
             except Exception as error:
                 self.events.put((job, "error", None, str(error)))
@@ -477,7 +520,28 @@ class CommandTab:
         if self.running:
             self.stop_event.set()
             self.stop_button.config(state="disabled")
+            self.next_button.config(state="disabled")
             self.status.config(text="Stop requested. Unsent commands will be cancelled; an ongoing calculation may take time to return. Last pose stays applied.")
+
+    def next_point(self):
+        if self.running and self.arrival_gate is not None and self.arrival_gate.request_next():
+            self.next_button.config(state="disabled")
+            self.status.config(text="Progression confirmed. Advancing only the current step; no queued Next presses.")
+        else:
+            self.status.config(text="Next is unavailable: wait for a fresh, complete robot detection inside the arrival tolerance.")
+
+    def refresh_next_button(self):
+        gate = self.arrival_gate
+        waiting = self.running and gate is not None and gate.waiting_for_next
+        ready = waiting and gate.ready and not self.stop_event.is_set() and not gate.next_requested
+        last = self.active_index is not None and self.active_index == self.run_indices[-1] if self.running else False
+        self.next_button.config(state="normal" if ready else "disabled", text="Finish" if last else "Next point")
+        if waiting and self.active_index is not None and not self.stop_event.is_set():
+            self.table.set(str(self.active_index), "state", "Await Next" if ready else "Arriving")
+            self.status.config(text=(
+                f"Point {self.active_index + 1} reached. Press {'Finish' if last else 'Next point'} when ready."
+                if ready else "Robot left tolerance or tracking is incomplete. Waiting for arrival again; Next is blocked."
+            ))
 
     def poll(self):
         self.after_id = None
@@ -486,9 +550,10 @@ class CommandTab:
                 job, kind, index, result = self.events.get_nowait()
                 if job != self.job:
                     continue
-                if kind in ("calculating", "sent", "completed"):
+                if kind in ("calculating", "sent", "completed", "waiting_arrival", "arrived"):
                     self.active_index = index
-                    state = {"calculating": "Calculating", "sent": "Holding", "completed": "Completed"}[kind]
+                    state = {"calculating": "Calculating", "sent": "Moving", "completed": "Completed",
+                             "waiting_arrival": "Arriving", "arrived": "Await Next"}[kind]
                     self.table.set(str(index), "state", state)
                     self.table.see(str(index))
                     if result is not None:
@@ -496,6 +561,7 @@ class CommandTab:
                     target = self.steps[index].target_xy_m
                     self.status.config(text=f"Point {index + 1}/{len(self.steps)}: {state.lower()}; desired XY ({target[0] * 1000:g}, {target[1] * 1000:g}) mm.")
                     self.render()
+                    self.refresh_next_button()
                 else:
                     self.running = False
                     self.set_running(False)
@@ -504,6 +570,10 @@ class CommandTab:
                     self.stop_button.config(state="disabled")
                     self.units_combo.config(state="readonly")
                     self.extrapolation_check.config(state="normal")
+                    self.arrival_gate = None
+                    self.next_button.config(state="disabled", text="Next point")
+                    self.arrival_tolerance_entry.config(state="normal")
+                    self.arrival_hold_entry.config(state="normal")
                     if kind != "finished" and self.active_index is not None:
                         self.table.set(str(self.active_index), "state", "Failed" if kind == "error" else "Stopped")
                     self.status.config(text=("Sequence complete." if kind == "finished" else
