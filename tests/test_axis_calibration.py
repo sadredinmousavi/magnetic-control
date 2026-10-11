@@ -196,6 +196,20 @@ class RobotAxisTests(unittest.TestCase):
         self.assertEqual(DEFAULT_ROBOT_ROI_RADIUS, 300)
         self.assertEqual(DEFAULT_PIN_ROI_RADIUS, 35)
 
+    def test_overlay_strokes_have_thin_color_and_outline_at_half_scale(self):
+        app = self.app()
+        app.frame = np.full((960, 1280, 3), 240, np.uint8)
+        app.canvas = Mock()
+        app.canvas.winfo_width.return_value = 640
+        app.canvas.winfo_height.return_value = 480
+        app.detections = []
+        with patch("closed_loop_calibration.ImageTk.PhotoImage"), \
+             patch("closed_loop_calibration.cv2.circle", wraps=cv2.circle) as circles:
+            CalibrationTab.render(app)
+        widths = [call.kwargs["thickness"] for call in circles.call_args_list]
+        self.assertTrue(widths)
+        self.assertEqual(set(widths), {2, 3})
+
     def test_pin_roi_finds_exact_centers_and_orders_four_points(self):
         app = self.pin_app()
         expected = [(40, 40), (180, 40), (180, 180), (40, 180)]
@@ -221,6 +235,28 @@ class RobotAxisTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "2 green candidates"):
             app.capture_pin((110, 100))
         self.assertEqual(app.corners, [(100, 100)])
+
+    def test_manual_pin_placement_bypasses_detection_only_when_explicit(self):
+        app = self.pin_app()
+        app.detector = Mock()
+        app.capture_pin((40, 40), manual=True)
+        self.assertEqual(app.corners, [(40, 40)])
+        app.detector.process.assert_not_called()
+        self.assertIn("manually placed", app.status.config.call_args.kwargs["text"])
+        with self.assertRaisesRegex(ValueError, "already captured"):
+            app.capture_pin((40, 40), manual=True)
+        with self.assertRaisesRegex(ValueError, "inside the camera frame"):
+            app.capture_pin((-1, 40), manual=True)
+
+    def test_manual_and_auto_pins_can_be_mixed_and_saved(self):
+        app = self.pin_app()
+        app.axis_samples = {}
+        for point in ((40, 40), (180, 40), (180, 180)):
+            app.capture_pin(point, manual=True)
+        cv2.circle(app.frame, (40, 180), 3, (0, 255, 0), -1)
+        app.capture_pin((45, 180))
+        data = app.setup_data()
+        np.testing.assert_allclose(data["corners_px"], [(40, 40), (180, 40), (180, 180), (40, 180)])
 
     def test_pin_roi_moves_in_camera_pixels_without_changing_robot_roi(self):
         app = self.pin_app()

@@ -141,6 +141,7 @@ class CalibrationTab:
         self.height_var = tk.StringVar(value="10")
         self.radius_var = tk.StringVar(value=str(DEFAULT_ROBOT_ROI_RADIUS))
         self.pin_radius_var = tk.StringVar(value=str(DEFAULT_PIN_ROI_RADIUS))
+        self.manual_pin_var = tk.BooleanVar(value=False)
         self.count_var = tk.StringVar(value="3")
         self.area_var = tk.StringVar(value="1")
         self.contrast_var = tk.StringVar(value="10")
@@ -178,7 +179,9 @@ class CalibrationTab:
         pin_tools.pack(fill="x", padx=8, pady=2)
         tk.Label(pin_tools, text="Pin search radius (px)").pack(side="left")
         tk.Spinbox(pin_tools, from_=3, to=300, textvariable=self.pin_radius_var, width=5).pack(side="left", padx=4)
-        tk.Label(pin_tools, text="Select pin mode, move the small ROI over a green pin, then click to detect it. Repeat for all four.").pack(side="left", padx=4)
+        tk.Checkbutton(pin_tools, text="Manual pin placement", variable=self.manual_pin_var,
+                       command=self.on_pin_method_changed).pack(side="left", padx=4)
+        tk.Label(pin_tools, text="Auto: click the small ROI over a green pin. Manual: click the exact pin center.").pack(side="left", padx=4)
         axes_bar = tk.LabelFrame(parent, text="Robot XY axes — use one robot", padx=5, pady=4)
         axes_bar.pack(fill="x", padx=8, pady=4)
         axes_bar.columnconfigure(1, weight=1)
@@ -544,7 +547,7 @@ class CalibrationTab:
                 if len(self.corners) == 4:
                     self.status.config(text="Four points selected. Clear points to select again.")
                     return
-                self.capture_pin(point)
+                self.capture_pin(point, manual=self.manual_pin_var.get())
             else:
                 radius = float(self.radius_var.get())
                 if not np.isfinite(radius) or radius <= 0:
@@ -560,7 +563,8 @@ class CalibrationTab:
 
     def move_pin_roi(self, event):
         if (self.frame is None or self.transform is None or self.mode.get() != "Corners"
-                or self.tracker is not None or self.axis_busy or self.axis_pending):
+                or self.tracker is not None or self.axis_busy or self.axis_pending
+                or (hasattr(self, "manual_pin_var") and self.manual_pin_var.get())):
             return
         ox, oy, scale = self.transform
         point = (round((event.x - ox) / scale), round((event.y - oy) / scale))
@@ -582,10 +586,25 @@ class CalibrationTab:
             self.pin_search_circle = None
             self.render()
 
-    def capture_pin(self, point):
-        """Search only the small ROI, never substitute the mouse position."""
+    def on_pin_method_changed(self):
+        self.clear_pin_roi()
+        self.status.config(text=(
+            "Manual pin placement: click the exact pin center. No green detection is performed."
+            if self.manual_pin_var.get() else
+            "Automatic pin detection: move the small ROI over one green pin, then click."
+        ))
+
+    def capture_pin(self, point, *, manual=False):
+        """Use detected centers unless the user explicitly selects manual mode."""
         if len(self.corners) >= 4:
             raise ValueError("Four pins are already captured. Clear points to start again.")
+        if manual:
+            h, w = self.frame.shape[:2]
+            center = np.asarray(point, dtype=float)
+            if center.shape != (2,) or not np.isfinite(center).all() or np.any(center < 0) or np.any(center >= [w, h]):
+                raise ValueError("Manual pin must be inside the camera frame.")
+            self.store_pin(tuple(center), manual=True)
+            return
         radius = float(self.pin_radius_var.get())
         if not np.isfinite(radius) or radius <= 0:
             raise ValueError("Pin search radius must be a positive finite number.")
@@ -596,10 +615,13 @@ class CalibrationTab:
             morphology_kernel_size=1, draw_annotations=False, detection_mask=mask,
         )
         if not dots:
-            raise ValueError("No green pin inside the small ROI. Move it over the pin or increase Pin search radius, then retry.")
+            raise ValueError("No green pin inside the small ROI. Move it over the pin or increase Pin search radius. Alternatively, enable Manual pin placement and click the exact pin center.")
         if len(dots) != 1:
             raise ValueError(f"Found {len(dots)} green candidates. Move or shrink the small ROI to include only one pin, then retry.")
         center = dots[0]["center"]
+        self.store_pin(center, manual=False)
+
+    def store_pin(self, center, *, manual):
         if any(np.linalg.norm(np.asarray(center) - old) < 3 for old in self.corners):
             raise ValueError("This pin is already captured. Move the small ROI to a different pin.")
         corners = [*self.corners, center]
@@ -608,9 +630,10 @@ class CalibrationTab:
             calibrated_dwell_coordinates([], corners, float(self.width_var.get()), float(self.height_var.get()))
         self.corners = corners
         self.reset_axes()
-        self.status.config(text=f"{len(corners)}/4 pins detected. " + (
+        method = "manually placed" if manual else "automatically detected"
+        self.status.config(text=f"Pin {method}. {len(corners)}/4 pins saved. " + (
             "Four-point calibration ready; place the robot ROI next." if len(corners) == 4
-            else "Move the small ROI to the next green pin and click."))
+            else ("Click the exact center of the next pin." if manual else "Move the small ROI to the next green pin and click.")))
 
     def clear_points(self):
         self.reset_axes()
@@ -670,11 +693,11 @@ class CalibrationTab:
         cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         scale = min(cw / w, ch / h)
 
-        def stroke(draw, *args, color, width=1.5, **kwargs):
+        def stroke(draw, *args, color, width=1, **kwargs):
             # Keep overlays readable in screen pixels even at native 5 MP.
             kwargs["line_type" if draw in (cv2.drawMarker, cv2.arrowedLine) else "lineType"] = cv2.LINE_AA
             draw(annotated, *args, color=(0, 0, 0),
-                 thickness=max(1, round((width + 2) / scale)), **kwargs)
+                 thickness=max(1, round((width + .5) / scale)), **kwargs)
             draw(annotated, *args, color=color,
                  thickness=max(1, round(width / scale)), **kwargs)
 
