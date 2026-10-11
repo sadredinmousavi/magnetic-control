@@ -445,10 +445,10 @@ GUI005 calibration **Save setup / Load setup** defaults to
 rectangle dimensions, ROI, robot count and detection minimum area.
 To align XY with the magnetic controller rather than the camera image, use
 one robot and set **Robots** to `1`. Choose the **Control case** matching your
-hardware, then press **Move & mark Origin**: this commands `(0, 0)` metres and
+hardware, then press **Move & mark Center**: this commands `(0, 0)` metres and
 waits for the settle interval. Click the settled robot; the click snaps to the
 nearest dark blob. Repeat with **Move & mark +X** for `(0.01, 0)` metres (10 mm),
-then **Move & mark +Y** for `(0, 0.001)` metres (1 mm). The preview shows the
+then **Move & mark +Y** for `(0, 0.01)` metres (10 mm). The preview shows the
 origin and axis directions. Both serial controller and live Pi camera must be
 connected for these moves. **Reset axes** cancels pending calibration steps
 and returns to image-aligned XY; it does not reverse an already sent motor move.
@@ -460,6 +460,16 @@ control model, settling, point selection and rectangle measurements. The
 observed displacements are displayed for checking. **Save setup** includes
 these references and control case in the dated JSON; **Load setup** restores
 the robot coordinate mapping. Older setup files without robot axes still load.
+
+The Calibration tab fixes the equilibrium ratio at `1`, with no orientation
+constraint. Every Center/+X/+Y press recalculates motor angles through the
+shared Usage 2/3 workflow, sends the pose and waits for settling before the
+measurement click. `control_workflow.calculate_point_control()` is the shared
+point solver; `experimental/point_control.PointCommander` serializes calculation,
+serial writes and cancellable settling for reuse by subsequent GUI005 tabs.
+The GUI owns one commander instance, independent of camera/calibration state.
+Calculated magnet angles are also recorded in the GUI log. Saved reference
+keys retain `Origin` for backward compatibility with existing setup files.
 Usage 2 also exports the desired target coordinates on every sequence export
 to `experimental/xy_sequences/`, using the same filename as its
 magnet-angle sequence. XY text rows use `[x, y] | wait | zero` in metres; a

@@ -11,7 +11,7 @@ from PIL import Image, ImageTk
 from gui_helpers import BaseServoGUI
 from ssh_camera import SSHCameraClient, SSHCameraSettings, preferred_camera_mode
 from closed_loop_calibration import CalibrationTab
-from axis_calibration import axis_target_angles
+from point_control import PointCommander
 
 
 class ClosedLoopGUI(BaseServoGUI):
@@ -31,7 +31,7 @@ class ClosedLoopGUI(BaseServoGUI):
         self.camera_modes = []
         self.mode_settings = None
         self.mode_loading = False
-        self.axis_move_lock = threading.Lock()
+        self.point_commander = PointCommander(lambda: self.port)
 
         self.build_header()
         self.build_workflow()
@@ -69,27 +69,19 @@ class ClosedLoopGUI(BaseServoGUI):
         self.build_future_tabs(notebook)
 
     def move_axis_target(self, target, case_name, settle, active):
-        """Called from the calibration worker; reuse GUI001's serial protocol."""
-        from helpers import moveArray
-        import time
-
-        with self.axis_move_lock:
-            if not active():
-                return
-            port = self.port
-            if port is None or not getattr(port, "is_open", False):
-                raise RuntimeError("Connect the serial controller in Connections first.")
-            if not self.ssh_camera.is_running:
-                raise RuntimeError("Connect the live Pi camera before axis calibration.")
-            angles = axis_target_angles(case_name, target)
-            if not active():
-                return
-            if self.port is not port or not getattr(port, "is_open", False):
-                raise RuntimeError("The controller disconnected before the move.")
-            moveArray(port, angles, 0, 180)
-            deadline = time.monotonic() + settle
-            while active() and time.monotonic() < deadline:
-                time.sleep(min(.05, max(0, deadline - time.monotonic())))
+        """Calibration policy; reusable synthesis/motion lives in PointCommander."""
+        if not active():
+            return
+        if not self.ssh_camera.is_running:
+            raise RuntimeError("Connect the live Pi camera before axis calibration.")
+        result = self.point_commander.move(
+            case_name, target, ratio=1.0, angle_deg=None,
+            settle_seconds=settle, active=active,
+        )
+        if result is not None:
+            angles = ", ".join(f"{angle:.2f}" for angle in result["angles_deg"])
+            self.camera_event_queue.put(("log", f"Point {target} m, ratio 1: calculated magnet angles [{angles}] deg"))
+        return result
 
     def build_future_tabs(self, notebook):
         for title, description in (

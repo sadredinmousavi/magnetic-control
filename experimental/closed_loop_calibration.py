@@ -21,7 +21,7 @@ from gui004 import (
     robot_center_for, workspace_detection_mask,
 )
 from robot_vision import RobotDetector
-from axis_calibration import AXIS_TARGETS_M, RobotAxes
+from axis_calibration import AXIS_TARGETS_M, AXIS_DISPLAY_NAMES, RobotAxes
 
 
 SETUP_DIR = Path(__file__).resolve().parent / "setups"
@@ -182,12 +182,12 @@ class CalibrationTab:
         actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.axis_buttons = []
         for name in AXIS_TARGETS_M:
-            button = tk.Button(actions, text=f"Move & mark {name}", command=lambda n=name: self.move_axis(n))
+            button = tk.Button(actions, text=f"Move & mark {AXIS_DISPLAY_NAMES[name]}", command=lambda n=name: self.move_axis(n))
             button.pack(side="left", padx=3)
             self.axis_buttons.append(button)
         tk.Button(actions, text="Reset axes", command=self.reset_axes).pack(side="left", padx=3)
         self.axis_status = tk.Label(axes_bar, anchor="w", text=(
-            "Choose the hardware control case. Move to Origin, +X (10 mm), then +Y (1 mm); click the settled robot after each move."
+            "Ratio = 1 (fixed). Choose the hardware case, move to Center, +X (10 mm), then +Y (10 mm); click the settled robot after each move."
         ), wraplength=1000)
         self.axis_status.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         tk.Label(parent, anchor="w", text=(
@@ -229,7 +229,7 @@ class CalibrationTab:
         self.axis_samples = {}
         for button in self.axis_buttons:
             button.config(state="normal")
-        self.axis_status.config(text="Axes reset. Mark Origin, then +X and +Y.")
+        self.axis_status.config(text="Axes reset. Move and mark Center, then +X and +Y. Ratio is fixed at 1.")
         self.render()
 
     def move_axis(self, name):
@@ -243,7 +243,7 @@ class CalibrationTab:
             if int(self.count_var.get()) != 1:
                 raise ValueError("Set Robots to 1 for axis calibration.")
             if name != "Origin" and "Origin" not in self.axis_samples:
-                raise ValueError("Move and mark Origin first.")
+                raise ValueError("Move and mark Center first.")
             if not self.control_case_var.get():
                 raise ValueError("Select the control case matching your hardware geometry first.")
             wait = float(self.axis_wait_var.get())
@@ -268,7 +268,7 @@ class CalibrationTab:
         for button in self.axis_buttons:
             button.config(state="disabled")
         target = AXIS_TARGETS_M[name]
-        self.axis_status.config(text=f"Moving to {name} {target} m. Waiting for the controller and {wait:g} s settling...")
+        self.axis_status.config(text=f"Calculating {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1, then moving and settling for {wait:g} s...")
 
         def worker():
             try:
@@ -296,7 +296,7 @@ class CalibrationTab:
                     messagebox.showerror("Robot axes", error)
                 else:
                     self.axis_pending = name
-                    self.axis_status.config(text=f"At {name}: click the settled robot to record its position. The click will snap to the nearest dark blob.")
+                    self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} commanded: click the settled robot to record its observed position.")
         except queue.Empty:
             pass
         if self.axis_busy:
@@ -556,6 +556,26 @@ class CalibrationTab:
         if self.frame is None:
             return
         annotated = self.frame.copy()
+        h, w = annotated.shape[:2]
+        cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
+        scale = min(cw / w, ch / h)
+
+        def stroke(draw, *args, color, width=2, **kwargs):
+            # Keep overlays readable in screen pixels even at native 5 MP.
+            kwargs["line_type" if draw in (cv2.drawMarker, cv2.arrowedLine) else "lineType"] = cv2.LINE_AA
+            draw(annotated, *args, color=(0, 0, 0),
+                 thickness=max(1, round((width + 3) / scale)), **kwargs)
+            draw(annotated, *args, color=color,
+                 thickness=max(1, round(width / scale)), **kwargs)
+
+        def marker(point, color):
+            stroke(cv2.drawMarker, point, color=color, width=1.5,
+                   markerType=cv2.MARKER_CROSS, markerSize=max(12, round(14 / scale)))
+
+        def label(text, point, color):
+            stroke(cv2.putText, text, point, color=color, width=1.5,
+                   fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=.55 / scale)
+
         mask_var = getattr(self, "show_mask_var", None)
         if mask_var is not None and mask_var.get():
             circle = self.circle if self.tracker is None else (*self.tracker.center, self.tracker.radius)
@@ -573,41 +593,39 @@ class CalibrationTab:
                 candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
                 annotated = cv2.cvtColor(self.detector.last_blob_mask, cv2.COLOR_GRAY2BGR)
                 for item in candidates:
-                    cv2.drawMarker(annotated, item["center"], (0, 180, 255), cv2.MARKER_CROSS, 10, 1)
+                    marker(item["center"], (0, 180, 255))
                 self.detection_info.config(text=f"{len(candidates)} eligible blobs; white = contrast pixels")
             except (ValueError, TypeError):
                 self.detection_info.config(text="Enter valid contrast and minimum area values.")
         elif hasattr(self, "detection_info"):
             self.detection_info.config(text="")
         if len(self.corners) == 4:
-            cv2.polylines(annotated, [np.asarray(self.corners, np.int32)], True, (0, 255, 0), 1)
+            stroke(cv2.polylines, [np.asarray(self.corners, np.int32)], True, color=(255, 0, 255))
         for index, point in enumerate(self.corners, 1):
             p = tuple(map(int, point))
-            cv2.drawMarker(annotated, p, (0, 255, 0), cv2.MARKER_CROSS, 12, 1)
-            cv2.putText(annotated, f"P{index}", (p[0] + 5, p[1] - 5), 0, .5, (0, 255, 0), 1)
+            marker(p, (255, 0, 255))
+            offset = max(5, round(10 / scale))
+            label(f"P{index}", (p[0] + offset, max(offset, p[1] - offset)), (255, 0, 255))
         circle = self.circle if self.tracker is None else (*self.tracker.center, self.tracker.radius)
         if circle is not None:
-            cv2.circle(annotated, tuple(map(lambda v: round(float(v)), circle[:2])),
-                       round(float(circle[2])), (255, 255, 0), 1)
+            stroke(cv2.circle, tuple(map(lambda v: round(float(v)), circle[:2])),
+                   round(float(circle[2])), color=(0, 255, 255))
         for item in self.detections:
-            cv2.drawMarker(annotated, item["center"], (0, 0, 255), cv2.MARKER_CROSS, 10, 1)
+            marker(item["center"], (0, 0, 255))
         samples = getattr(self, "axis_samples", {})
         if "Origin" in samples:
             origin = tuple(map(int, samples["Origin"]))
-            cv2.drawMarker(annotated, origin, (0, 255, 255), cv2.MARKER_CROSS, 15, 2)
-            cv2.putText(annotated, "O", (origin[0] + 7, origin[1] + 15), 0, .5, (0, 255, 255), 1)
+            marker(origin, (255, 255, 255))
+            label("O", (origin[0] + round(10 / scale), origin[1] + round(18 / scale)), (255, 255, 255))
             for name, color in (("+X", (0, 0, 255)), ("+Y", (255, 180, 0))):
                 if name in samples:
                     point = tuple(map(int, samples[name]))
                     delta = np.asarray(point) - origin
                     length = np.linalg.norm(delta)
-                    end = tuple(np.rint(np.asarray(origin) + delta / max(length, 1) * 60).astype(int))
-                    cv2.arrowedLine(annotated, origin, end, color, 2, tipLength=.15)
-                    cv2.circle(annotated, point, 4, color, 1)
-                    cv2.putText(annotated, name, end, 0, .6, color, 2)
-        h, w = annotated.shape[:2]
-        cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
-        scale = min(cw / w, ch / h)
+                    end = tuple(np.rint(np.asarray(origin) + delta / max(length, 1) * 60 / scale).astype(int))
+                    stroke(cv2.arrowedLine, origin, end, color=color, tipLength=.15)
+                    stroke(cv2.circle, point, max(4, round(4 / scale)), color=color, width=1.5)
+                    label(name, end, color)
         dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
         self.transform = ((cw - dw) / 2, (ch - dh) / 2, scale)
         image = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)).resize((dw, dh))

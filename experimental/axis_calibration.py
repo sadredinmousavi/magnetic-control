@@ -1,14 +1,12 @@
 """Robot-frame orientation after four-point perspective/metric calibration."""
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
 from gui004 import calibrated_dwell_coordinates
 
 
-AXIS_TARGETS_M = {"Origin": (0.0, 0.0), "+X": (0.01, 0.0), "+Y": (0.0, 0.001)}
+AXIS_TARGETS_M = {"Origin": (0.0, 0.0), "+X": (0.01, 0.0), "+Y": (0.0, 0.01)}
+AXIS_DISPLAY_NAMES = {"Origin": "Center", "+X": "+X", "+Y": "+Y"}
 
 
 class RobotAxes:
@@ -42,19 +40,3 @@ class RobotAxes:
             self.corners, self.width_cm, self.height_cm,
         )
         return (metric - self.origin) @ self.rotation
-
-
-def axis_target_angles(case_name, target):
-    """Use the same physical model and synthesis as Usage 2; never move here."""
-    project = str(Path(__file__).resolve().parents[1])
-    if project not in sys.path:
-        sys.path.insert(0, project)
-    from case_loader import build_common_config, load_case
-    from control_workflow import run_control_workflow
-
-    params = load_case(case_name)
-    params["TARGET_SCHEDULE"] = [(0.0, np.asarray(target, dtype=float), 1.0, 0.0)]
-    params["INITIAL_ROBOT_POSITIONS"] = np.zeros((1, 2))
-    params["OPTIMIZATION_FAILURE_MODE"] = "raise"
-    result = run_control_workflow(build_common_config(params), params, compute_fields=False)
-    return result.opt_infos[0]["angles_deg"]

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from case_loader import unpack_target_schedule_entry, validate_target_schedule
+from case_loader import build_common_config, unpack_target_schedule_entry, validate_target_schedule
 from functions_main import (
     calculate_potential_hessian,
     calculate_total_force_from_sources,
@@ -47,6 +47,30 @@ class ControlWorkflowResult:
             )
             for item in self.scheduled_controls
         ]
+
+
+def calculate_point_control(params, target_xy_m, *, ratio=1.0, angle_deg=None):
+    """Synthesize one target using the same workflow as Usage 2/3, without IO.
+
+    XY is in metres; angle is the equilibrium orientation, not motor angles.
+    Isotropic ratio=1 requires no orientation. The case's trajectory is replaced
+    in a copy, so repeated interactive commands never modify the source model.
+    """
+    target = np.asarray(target_xy_m, dtype=float)
+    if target.shape != (2,) or not np.isfinite(target).all():
+        raise ValueError("Target must contain finite X and Y coordinates in metres.")
+    ratio = float(ratio)
+    if not np.isfinite(ratio) or ratio <= 0:
+        raise ValueError("Equilibrium ratio must be positive.")
+    if angle_deg is not None and not np.isfinite(float(angle_deg)):
+        raise ValueError("Equilibrium angle must be finite.")
+    angle_rad = None if np.isclose(ratio, 1) or angle_deg is None else np.deg2rad(float(angle_deg))
+    point_params = dict(params)
+    point_params["TARGET_SCHEDULE"] = [(0.0, target.copy(), ratio, angle_rad)]
+    point_params["INITIAL_ROBOT_POSITIONS"] = np.zeros((1, 2))
+    point_params["OPTIMIZATION_FAILURE_MODE"] = "raise"
+    result = run_control_workflow(build_common_config(point_params), point_params, compute_fields=False)
+    return result.opt_infos[0]
 
 
 def _solve_entry(entry, source_positions, cfg, params):

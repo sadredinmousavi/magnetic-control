@@ -9,7 +9,8 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
-from axis_calibration import RobotAxes, axis_target_angles
+from axis_calibration import AXIS_TARGETS_M, RobotAxes
+from control_workflow import calculate_point_control
 from closed_loop_calibration import CalibrationTab, MovingROICalibration
 from gui005 import ClosedLoopGUI
 from robot_vision import RobotDetector
@@ -93,29 +94,38 @@ class RobotAxisTests(unittest.TestCase):
         self.assertNotIn("+X", app.axis_samples)
 
     def test_synthesis_uses_requested_one_robot_target_and_strict_failure_policy(self):
-        with patch("case_loader.load_case", return_value={}) as load, \
-             patch("case_loader.build_common_config") as config, \
+        with patch("control_workflow.build_common_config") as config, \
              patch("control_workflow.run_control_workflow") as workflow:
             workflow.return_value.opt_infos = [{"angles_deg": [60] * 8}]
-            angles = axis_target_angles("case_100.cond_016_calibration_cartesian", (0, .001))
-            self.assertEqual(len(angles), 8)
+            self.assertEqual(AXIS_TARGETS_M["+X"], (.01, 0))
+            self.assertEqual(AXIS_TARGETS_M["+Y"], (0, .01))
+            original = {"TARGET_SCHEDULE": [(9, [2, 3], 2, 1)]}
+            result = calculate_point_control(original, AXIS_TARGETS_M["+Y"])
+            self.assertEqual(len(result["angles_deg"]), 8)
             params = config.call_args.args[0]
-            np.testing.assert_allclose(params["TARGET_SCHEDULE"][0][1], [0, .001])
+            np.testing.assert_allclose(params["TARGET_SCHEDULE"][0][1], [0, .01])
             self.assertEqual(params["OPTIMIZATION_FAILURE_MODE"], "raise")
+            self.assertEqual(params["TARGET_SCHEDULE"][0][2], 1)
+            self.assertIsNone(params["TARGET_SCHEDULE"][0][3])
+            self.assertEqual(original["TARGET_SCHEDULE"], [(9, [2, 3], 2, 1)])
 
-    def test_axis_command_uses_existing_serial_protocol_without_real_hardware(self):
-        import threading
+    def test_calibration_commands_all_three_points_with_ratio_one(self):
+        import queue
         app = ClosedLoopGUI.__new__(ClosedLoopGUI)
-        app.axis_move_lock = threading.Lock()
-        app.port = Mock(is_open=True)
+        app.point_commander = Mock()
+        app.point_commander.move.return_value = {"angles_deg": [60] * 8}
+        app.camera_event_queue = queue.Queue()
         app.ssh_camera = Mock(is_running=True)
-        with patch("gui005.axis_target_angles", return_value=[60] * 8), \
-             patch("helpers.moveArray") as move:
-            app.move_axis_target((.01, 0), "case_100.cond_016_calibration_cartesian", 0, lambda: True)
-            move.assert_called_once_with(app.port, [60] * 8, 0, 180)
-            move.reset_mock()
-            app.move_axis_target((.01, 0), "case_100.cond_016_calibration_cartesian", 0, lambda: False)
-            move.assert_not_called()
+        active = lambda: True
+        for target in AXIS_TARGETS_M.values():
+            app.move_axis_target(target, "case_100.cond_016_calibration_cartesian", 3, active)
+            app.point_commander.move.assert_called_with(
+                "case_100.cond_016_calibration_cartesian", target,
+                ratio=1.0, angle_deg=None, settle_seconds=3, active=active,
+            )
+        app.point_commander.move.reset_mock()
+        app.move_axis_target((.01, 0), "case_100.cond_016_calibration_cartesian", 0, lambda: False)
+        app.point_commander.move.assert_not_called()
 
 
 if __name__ == "__main__":
