@@ -1,6 +1,7 @@
 """XY sequence parsing, calibrated projection and cancellable point execution."""
 
 import ast
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,10 +21,24 @@ class XYStep:
     zero_angle_deg: float
 
 
-def read_xy_sequence(path):
-    """Read the existing export format: [x_m, y_m] | wait_s | zero_deg."""
+def resolve_xy_units(content, units="auto"):
+    units = units.lower()
+    if units not in ("auto", "mm", "cm", "m"):
+        raise ValueError("Sequence units must be Auto, mm, cm or m.")
+    if units != "auto":
+        return units
+    headers = set(re.findall(r"^\s*#\s*targets_xy_(mm|cm|m)\b", content, re.MULTILINE))
+    if len(headers) > 1:
+        raise ValueError("Conflicting XY unit headers. Select the correct sequence units explicitly.")
+    return next(iter(headers), "mm")
+
+
+def read_xy_sequence(path, units="auto"):
+    """Convert file XY units to solver metres; unlabelled sequences use mm."""
+    content = Path(path).read_text(encoding="utf-8-sig")
+    factor = {"mm": .001, "cm": .01, "m": 1.0}[resolve_xy_units(content, units)]
     steps = []
-    for line_number, line in enumerate(Path(path).read_text(encoding="utf-8-sig").splitlines(), 1):
+    for line_number, line in enumerate(content.splitlines(), 1):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
@@ -39,7 +54,7 @@ def read_xy_sequence(path):
                 raise ValueError("Coordinates, wait and zero must be finite.")
             if wait < 0 or not 0 <= zero <= 360:
                 raise ValueError("Wait must be nonnegative and zero must be between 0 and 360 degrees.")
-            steps.append(XYStep(tuple(target), wait, zero))
+            steps.append(XYStep(tuple(target * factor), wait, zero))
         except (SyntaxError, ValueError, TypeError) as error:
             raise ValueError(f"Line {line_number}: {error}") from error
     if not steps:
@@ -58,7 +73,8 @@ def project_sequence(steps, setup):
     for index, point in enumerate(pixels, 1):
         if (np.any(point < 0) or np.any(point >= [width, height])
                 or cv2.pointPolygonTest(polygon, tuple(point), True) < -1e-3):
-            raise ValueError(f"Point {index} is outside the calibrated four-pin workspace. Check sequence units (metres), axes and rectangle dimensions.")
+            target = np.asarray(steps[index - 1].target_xy_m) * 1000
+            raise ValueError(f"Point {index}, XY ({target[0]:g}, {target[1]:g}) mm, is outside the calibrated four-pin workspace. Check Sequence units, robot axes and rectangle dimensions (cm).")
     return pixels
 
 

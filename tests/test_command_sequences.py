@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
 from axis_calibration import RobotAxes
-from command_sequences import XYStep, read_xy_sequence, project_sequence, execute_xy_sequence
+from command_sequences import XYStep, read_xy_sequence, resolve_xy_units, project_sequence, execute_xy_sequence
 from command_tab import CommandTab
 from point_control import PointCommander
 
@@ -28,15 +28,49 @@ def setup(samples=None):
 
 
 class CommandSequenceTests(unittest.TestCase):
-    def parse(self, content):
+    def parse(self, content, units="auto"):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "xy.txt"
             path.write_text(content, encoding="utf-8")
-            return read_xy_sequence(path)
+            return read_xy_sequence(path, units=units)
 
     def test_existing_export_format_units_wait_and_zero(self):
         steps = self.parse("# targets_xy_m | wait | zero\n\n[0, 0] | 3 | 180\n[0.01, -0.02] | .5 | 90 # note\n")
         self.assertEqual(steps, [XYStep((0, 0), 3, 180), XYStep((.01, -.02), .5, 90)])
+
+    def test_mm_sequence_projects_into_cm_calibration_and_solves_in_metres(self):
+        steps = self.parse("[10, -20] | 3 | 180\n")
+        np.testing.assert_allclose(steps[0].target_xy_m, [.01, -.02])
+        np.testing.assert_allclose(project_sequence(steps, setup()), [[130, 150]], atol=1e-6)
+        commander = Mock()
+        commander.move.return_value = {"angles_deg": [60, 70]}
+        execute_xy_sequence(steps, commander, "case_100", active=lambda: True, report=Mock())
+        np.testing.assert_allclose(commander.move.call_args.args[1], [.01, -.02])
+
+    def test_unit_headers_and_explicit_overrides_are_equivalent(self):
+        mm = self.parse("# targets_xy_mm | wait | zero\n[10, -20] | 3 | 180")
+        cm = self.parse("# targets_xy_cm | wait | zero\n[1, -2] | 3 | 180")
+        meters = self.parse("# targets_xy_m | wait | zero\n[.01, -.02] | 3 | 180")
+        self.assertEqual(mm, cm)
+        self.assertEqual(mm, meters)
+        override = self.parse("# targets_xy_m | wait | zero\n[10, -20] | 3 | 180", units="mm")
+        self.assertEqual(override, mm)
+        with self.assertRaisesRegex(ValueError, "Conflicting"):
+            resolve_xy_units("# targets_xy_mm\n# targets_xy_m")
+
+    def test_unit_change_reload_updates_table_without_moving_hardware(self):
+        app = CommandTab.__new__(CommandTab)
+        app.units_var = Mock(get=Mock(return_value="mm"))
+        app.file_label, app.table, app.refresh_calibration = Mock(), Mock(), Mock()
+        app.table.get_children.return_value = ()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "xy.txt"
+            path.write_text("[10, -20] | 3 | 180", encoding="utf-8")
+            app.load_path(path)
+        values = app.table.insert.call_args.kwargs["values"]
+        self.assertEqual(values[:2], ("10", "-20"))
+        self.assertEqual(app.input_units, "mm")
+        np.testing.assert_allclose(app.steps[0].target_xy_m, [.01, -.02])
 
     def test_invalid_rows_fail_before_any_execution(self):
         for row in ("[1, 2, 3] | 3 | 180", "[[0, 0], [1, 1]] | 3 | 180",
@@ -126,7 +160,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.events, app.job, app.running = queue.Queue(), 1, True
         app.steps = [XYStep((0, 0), 3, 180)]
         app.active_index = None
-        for name in ("table", "status", "render", "set_running", "load_button", "calibration_button", "run_button", "stop_button"):
+        for name in ("table", "status", "render", "set_running", "load_button", "calibration_button", "run_button", "stop_button", "units_combo"):
             setattr(app, name, Mock())
         app.events.put((1, "sent", 0, {"angles_deg": [60, 70]}))
         app.events.put((1, "completed", 0, {"angles_deg": [60, 70]}))

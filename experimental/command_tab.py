@@ -1,6 +1,7 @@
 """GUI005 desired XY overlay and explicit, cancellable sequence execution."""
 
 import json
+from pathlib import Path
 import queue
 import threading
 import time
@@ -11,7 +12,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from command_sequences import XY_SEQUENCE_DIR, read_xy_sequence, project_sequence, execute_xy_sequence
+from command_sequences import XY_SEQUENCE_DIR, read_xy_sequence, resolve_xy_units, project_sequence, execute_xy_sequence
 from point_control import hardware_case_name, load_hardware_case
 
 
@@ -21,6 +22,7 @@ class CommandTab:
         self.parent, self.calibration, self.commander = parent, calibration, commander
         self.camera_running, self.set_running, self.visible = camera_running, set_running, visible
         self.steps, self.pixels, self.setup = [], None, None
+        self.sequence_path, self.input_units = None, None
         self.frame, self.frame_received_at = None, None
         self.running = False
         self.stop_event = threading.Event()
@@ -38,10 +40,17 @@ class CommandTab:
         self.run_button.pack(side="left", padx=3)
         self.stop_button = tk.Button(bar, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="left", padx=3)
+        tk.Label(bar, text="Sequence units").pack(side="left", padx=(12, 3))
+        self.units_var = tk.StringVar(value="Auto")
+        self.units_combo = ttk.Combobox(bar, textvariable=self.units_var, values=("Auto", "mm", "cm", "m"),
+                                        width=5, state="readonly")
+        self.units_combo.pack(side="left")
+        self.units_combo.bind("<<ComboboxSelected>>", self.change_units)
         self.file_label = tk.Label(parent, text="No XY sequence loaded.", anchor="w")
         self.file_label.pack(fill="x", padx=10)
         tk.Label(parent, anchor="w", justify="left", wraplength=1000, text=(
-            "XY files: [x_m, y_m] | wait_s | zero_deg. Table shows mm; ratio = 1. "
+            "Calibration sizes: cm. Sequence: select mm, cm or m. Auto reads the unit header; without a header it uses mm. "
+            "Table shows mm; ratio = 1. "
             "Each point is calculated fresh, sent, then held for its wait time. This is timed execution, not arrival feedback. "
             "Stop prevents further commands; it does not undo the last motor pose."
         )).pack(fill="x", padx=10, pady=3)
@@ -77,13 +86,30 @@ class CommandTab:
         if not path:
             return
         try:
-            steps = read_xy_sequence(path)
+            self.load_path(path)
         except (ValueError, OSError) as error:
             messagebox.showerror("XY sequence", str(error))
             return
+
+    def change_units(self, event=None):
+        if self.running or self.sequence_path is None:
+            return
+        try:
+            self.load_path(self.sequence_path)
+        except (ValueError, OSError) as error:
+            self.steps, self.pixels, self.setup = [], None, None
+            self.status.config(text=f"Not ready: {error}")
+            self.render()
+            messagebox.showerror("XY sequence units", str(error))
+
+    def load_path(self, path):
+        units = self.units_var.get()
+        steps = read_xy_sequence(path, units=units)
+        self.input_units = resolve_xy_units(Path(path).read_text(encoding="utf-8-sig"), units)
+        self.sequence_path = path
         self.steps, self.pixels, self.setup = steps, None, None
         self.active_index = None
-        self.file_label.config(text=f"{path} — {len(steps)} points")
+        self.file_label.config(text=f"{path} — {len(steps)} points — input units: {self.input_units}; table: mm")
         self.table.delete(*self.table.get_children())
         for index, step in enumerate(steps):
             self.table.insert("", "end", iid=str(index), text=str(index + 1), values=(
@@ -109,7 +135,7 @@ class CommandTab:
             return
         try:
             self.setup, self.pixels = self.prepare()
-            self.status.config(text=f"Ready: {len(self.steps)} points; hardware {self.setup['control_case']}; saved robot XY axes applied.")
+            self.status.config(text=f"Ready: {len(self.steps)} points; hardware {self.setup['control_case']}; rectangle {self.setup['rectangle_width_cm']:g} × {self.setup['rectangle_height_cm']:g} cm; input {self.input_units}, table mm.")
         except (ValueError, TypeError, KeyError) as error:
             self.setup, self.pixels = None, None
             self.status.config(text=f"Not ready: {error}")
@@ -144,7 +170,7 @@ class CommandTab:
         except (ValueError, TypeError, KeyError, ImportError) as error:
             messagebox.showerror("Cannot run sequence", str(error))
             return
-        if not messagebox.askyesno("Run XY sequence", f"Move through {len(self.steps)} points using {setup['control_case']}?\nRatio 1; wait and zero from each XY row.\nConfirm this case matches the physical magnets."):
+        if not messagebox.askyesno("Run XY sequence", f"Move through {len(self.steps)} points using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nRatio 1; wait and zero from each XY row.\nConfirm the units and physical hardware match."):
             return
         self.setup, self.pixels = setup, pixels
         self.running = True
@@ -157,6 +183,7 @@ class CommandTab:
         for button in (self.load_button, self.calibration_button, self.run_button):
             button.config(state="disabled")
         self.stop_button.config(state="normal")
+        self.units_combo.config(state="disabled")
         for index in range(len(steps)):
             self.table.set(str(index), "state", "Pending")
             self.table.set(str(index), "angles", "")
@@ -208,6 +235,7 @@ class CommandTab:
                     for button in (self.load_button, self.calibration_button, self.run_button):
                         button.config(state="normal")
                     self.stop_button.config(state="disabled")
+                    self.units_combo.config(state="readonly")
                     if kind != "finished" and self.active_index is not None:
                         self.table.set(str(self.active_index), "state", "Failed" if kind == "error" else "Stopped")
                     self.status.config(text=("Sequence complete." if kind == "finished" else
