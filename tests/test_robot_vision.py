@@ -13,6 +13,39 @@ from robot_vision import RobotDetector
 
 
 class RobotVisionTests(unittest.TestCase):
+    def test_adjustable_contrast_detects_faint_single_pixel_robot(self):
+        frame = np.full((100, 120, 3), 200, dtype=np.uint8)
+        frame[50, 40] = 182
+        _, strong = self.detector.process(
+            frame, mode="Color blobs", color="Dark contrast", minimum_area=1,
+            morphology_kernel_size=1,
+        )
+        self.assertEqual(strong, [])
+        _, sensitive = self.detector.process(
+            frame, mode="Color blobs", color="Dark contrast", minimum_area=1,
+            morphology_kernel_size=1, dark_contrast_threshold=10,
+        )
+        self.assertEqual(len(sensitive), 1)
+        self.assertEqual(sensitive[0]["center"], (40, 50))
+        self.assertEqual(sensitive[0]["area"], 1)
+        self.assertEqual(self.detector.last_blob_mask[50, 40], 255)
+
+    def test_sensitive_mask_respects_roi_and_does_not_detect_flat_background(self):
+        frame = np.full((100, 120, 3), 200, dtype=np.uint8)
+        roi = np.zeros((100, 120), np.uint8)
+        roi[20:80, 20:80] = 255
+        _, detections = self.detector.process(
+            frame, mode="Color blobs", color="Dark contrast", minimum_area=1,
+            morphology_kernel_size=1, dark_contrast_threshold=5, detection_mask=roi,
+        )
+        self.assertEqual(detections, [])
+        frame[50, 100] = 180
+        _, detections = self.detector.process(
+            frame, mode="Color blobs", color="Dark contrast", minimum_area=1,
+            morphology_kernel_size=1, dark_contrast_threshold=5, detection_mask=roi,
+        )
+        self.assertEqual(detections, [])
+
     def test_dark_contrast_detects_desaturated_robot_on_bright_background(self):
         detector = RobotDetector()
         frame = np.full((100, 120, 3), (210, 190, 170), dtype=np.uint8)

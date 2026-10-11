@@ -34,7 +34,8 @@ def default_setup_name():
 class MovingROICalibration:
     """Frame-by-frame tracking shared by live preview and movie playback."""
 
-    def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area, axis_samples=None):
+    def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area, axis_samples=None,
+                 contrast_threshold=10):
         calibrated_dwell_coordinates([], corners, width_cm, height_cm)
         if count < 1 or not np.isfinite(minimum_area) or minimum_area <= 0:
             raise ValueError("Robot count and minimum area must be positive.")
@@ -49,6 +50,9 @@ class MovingROICalibration:
         self.references = []
         self.detector = RobotDetector()
         self.axes = RobotAxes(corners, width_cm, height_cm, axis_samples) if axis_samples else None
+        self.contrast_threshold = float(contrast_threshold)
+        if not np.isfinite(self.contrast_threshold) or not 1 <= self.contrast_threshold <= 255:
+            raise ValueError("Dark contrast threshold must be between 1 and 255.")
 
     def coordinates(self, points):
         if self.axes is not None:
@@ -64,6 +68,7 @@ class MovingROICalibration:
             frame, mode="Color blobs", color="Dark contrast",
             minimum_area=self.minimum_area, morphology_kernel_size=1,
             draw_annotations=False, detection_mask=mask,
+            dark_contrast_threshold=self.contrast_threshold,
         )
         candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
         if self.references:
@@ -131,6 +136,8 @@ class CalibrationTab:
         self.radius_var = tk.StringVar(value="60")
         self.count_var = tk.StringVar(value="3")
         self.area_var = tk.StringVar(value="1")
+        self.contrast_var = tk.StringVar(value="10")
+        self.show_mask_var = tk.BooleanVar(value=False)
         for label, variable in (("Width (cm)", self.width_var),
                                 ("Height (cm)", self.height_var),
                                 ("ROI radius (px)", self.radius_var),
@@ -138,6 +145,18 @@ class CalibrationTab:
                                 ("Min area (px²)", self.area_var)):
             tk.Label(settings, text=label).pack(side="left", padx=(4, 2))
             tk.Entry(settings, textvariable=variable, width=6).pack(side="left")
+        sensitivity = tk.Frame(parent)
+        sensitivity.pack(fill="x", padx=8, pady=3)
+        tk.Label(sensitivity, text="Dark contrast threshold").pack(side="left")
+        contrast_entry = tk.Spinbox(sensitivity, from_=1, to=255, textvariable=self.contrast_var,
+                                    width=5, command=self.render)
+        contrast_entry.pack(side="left", padx=4)
+        contrast_entry.bind("<KeyRelease>", lambda event: self.render())
+        tk.Label(sensitivity, text="Lower detects fainter robots").pack(side="left", padx=4)
+        tk.Checkbutton(sensitivity, text="Show detection mask", variable=self.show_mask_var,
+                       command=self.render).pack(side="left", padx=4)
+        self.detection_info = tk.Label(sensitivity, text="", anchor="w")
+        self.detection_info.pack(side="left", padx=4)
         tools = tk.Frame(parent)
         tools.pack(fill="x", padx=8, pady=4)
         self.mode = tk.StringVar(value="ROI")
@@ -194,6 +213,13 @@ class CalibrationTab:
         self.detections = []
         self.rows = []
         self.live_started = None
+
+    def read_contrast_threshold(self):
+        variable = getattr(self, "contrast_var", None)
+        value = float(variable.get()) if variable is not None else 10.0
+        if not np.isfinite(value) or not 1 <= value <= 255:
+            raise ValueError("Dark contrast threshold must be between 1 and 255.")
+        return value
 
     def reset_axes(self):
         self.stop_tracking()
@@ -282,6 +308,7 @@ class CalibrationTab:
         _, candidates = self.detector.process(
             self.frame, mode="Color blobs", color="Dark contrast", minimum_area=float(self.area_var.get()),
             morphology_kernel_size=1, draw_annotations=False, detection_mask=mask,
+            dark_contrast_threshold=self.read_contrast_threshold(),
         )
         candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
         if not candidates:
@@ -354,6 +381,7 @@ class CalibrationTab:
         self.frame = frame.copy()
         if self.tracker is not None:
             try:
+                self.tracker.contrast_threshold = self.read_contrast_threshold()
                 self.detections, center, xy = self.tracker.process(frame)
                 elapsed = (self.frame_number / self.fps if self.capture is not None
                            else time.monotonic() - self.live_started)
@@ -495,10 +523,15 @@ class CalibrationTab:
                 self.corners, float(self.width_var.get()), float(self.height_var.get()),
                 circle, int(self.count_var.get()), float(self.area_var.get()),
                 getattr(self, "axis_samples", None) if len(getattr(self, "axis_samples", {})) == 3 else None,
+                contrast_threshold=self.read_contrast_threshold(),
             )
             detections, center, _ = tracker.process(self.frame)
             if center is None:
-                raise ValueError(f"Found {len(detections)}/{tracker.count} robots. Adjust ROI, robot count or min area.")
+                raise ValueError(
+                    f"Found {len(detections)}/{tracker.count} robots. Enable Show detection mask: "
+                    "the robot must appear white inside the ROI and four-point region. "
+                    "Lower the dark contrast threshold (try 5), keep Min area at 1, and check Robots count."
+                )
         except (ValueError, TypeError) as error:
             messagebox.showerror("Calibration", str(error))
             return
@@ -523,6 +556,29 @@ class CalibrationTab:
         if self.frame is None:
             return
         annotated = self.frame.copy()
+        mask_var = getattr(self, "show_mask_var", None)
+        if mask_var is not None and mask_var.get():
+            circle = self.circle if self.tracker is None else (*self.tracker.center, self.tracker.radius)
+            mask = circle_detection_mask(self.frame.shape[:2], circle)
+            if len(self.corners) == 4:
+                workspace = workspace_detection_mask(self.frame.shape[:2], self.corners)
+                mask = workspace if mask is None else cv2.bitwise_and(mask, workspace)
+            try:
+                _, candidates = self.detector.process(
+                    self.frame, mode="Color blobs", color="Dark contrast",
+                    minimum_area=float(self.area_var.get()), morphology_kernel_size=1,
+                    draw_annotations=False, detection_mask=mask,
+                    dark_contrast_threshold=self.read_contrast_threshold(),
+                )
+                candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
+                annotated = cv2.cvtColor(self.detector.last_blob_mask, cv2.COLOR_GRAY2BGR)
+                for item in candidates:
+                    cv2.drawMarker(annotated, item["center"], (0, 180, 255), cv2.MARKER_CROSS, 10, 1)
+                self.detection_info.config(text=f"{len(candidates)} eligible blobs; white = contrast pixels")
+            except (ValueError, TypeError):
+                self.detection_info.config(text="Enter valid contrast and minimum area values.")
+        elif hasattr(self, "detection_info"):
+            self.detection_info.config(text="")
         if len(self.corners) == 4:
             cv2.polylines(annotated, [np.asarray(self.corners, np.int32)], True, (0, 255, 0), 1)
         for index, point in enumerate(self.corners, 1):
@@ -573,6 +629,7 @@ class CalibrationTab:
                 float(self.radius_var.get()) if self.tracker is None else self.tracker.radius,
             ],
             "robot_count": int(self.count_var.get()), "minimum_area": float(self.area_var.get()),
+            "dark_contrast_threshold": self.read_contrast_threshold(),
             "axis_samples_px": getattr(self, "axis_samples", {}),
             "axis_targets_m": AXIS_TARGETS_M,
             "control_case": self.control_case_var.get() if hasattr(self, "control_case_var") else "",
@@ -582,7 +639,8 @@ class CalibrationTab:
             raise ValueError("Finish Origin, +X and +Y measurements or Reset axes before saving.")
         MovingROICalibration(data["corners_px"], data["rectangle_width_cm"],
                              data["rectangle_height_cm"], data["roi_circle_px"],
-                             data["robot_count"], data["minimum_area"], data["axis_samples_px"])
+                             data["robot_count"], data["minimum_area"], data["axis_samples_px"],
+                             contrast_threshold=data["dark_contrast_threshold"])
         return data
 
     def save_setup(self):
@@ -624,6 +682,7 @@ class CalibrationTab:
                 data["corners_px"], data["rectangle_width_cm"], data["rectangle_height_cm"],
                 data["roi_circle_px"], data["robot_count"], data["minimum_area"],
                 samples,
+                contrast_threshold=data.get("dark_contrast_threshold", 10),
             )
             h, w = self.frame.shape[:2]
             points = np.asarray([*tracker.corners, tracker.center, *samples.values()], dtype=float)
@@ -640,6 +699,8 @@ class CalibrationTab:
                                 (self.area_var, tracker.minimum_area)):
             variable.set(str(value))
         self.control_case_var.set(data.get("control_case", ""))
+        if hasattr(self, "contrast_var"):
+            self.contrast_var.set(str(tracker.contrast_threshold))
         self.axis_samples = samples
         self.axis_status.config(text="Saved robot origin and XY axes restored." if samples else "Setup has image-aligned XY. Calibrate robot axes if needed.")
         self.render()

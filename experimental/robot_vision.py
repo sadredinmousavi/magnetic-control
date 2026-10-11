@@ -23,6 +23,17 @@ class RobotDetector:
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         parameters = cv2.aruco.DetectorParameters()
         self.aruco_detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+        self.last_blob_mask = None
+
+    @staticmethod
+    def dark_contrast_mask(frame_bgr, threshold=30):
+        threshold = float(threshold)
+        if not math.isfinite(threshold) or not 1 <= threshold <= 255:
+            raise ValueError("Dark contrast threshold must be between 1 and 255.")
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        local_background = cv2.GaussianBlur(gray, (0, 0), sigmaX=5.0, sigmaY=5.0)
+        contrast = cv2.subtract(local_background, gray)
+        return np.where(contrast >= threshold, 255, 0).astype(np.uint8)
 
     def process(
         self,
@@ -34,6 +45,7 @@ class RobotDetector:
         color_ranges=None,
         draw_annotations=True,
         detection_mask=None,
+        dark_contrast_threshold=30,
     ):
         """Return an annotated BGR frame and a list of detected robots."""
         annotated = frame_bgr.copy()
@@ -49,6 +61,7 @@ class RobotDetector:
                     color_ranges,
                     draw_annotations,
                     detection_mask,
+                    dark_contrast_threshold,
                 )
             )
 
@@ -75,17 +88,13 @@ class RobotDetector:
         color_ranges=None,
         draw_annotations=True,
         detection_mask=None,
+        dark_contrast_threshold=30,
     ):
         if color == "Dark contrast":
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             # Subtract each pixel from a smooth local-background estimate.
             # This responds to tiny dark robots on uneven white illumination
             # without depending on hue or saturation.
-            local_background = cv2.GaussianBlur(
-                gray, (0, 0), sigmaX=5.0, sigmaY=5.0
-            )
-            contrast = cv2.subtract(local_background, gray)
-            mask = np.where(contrast >= 30, 255, 0).astype(np.uint8)
+            mask = self.dark_contrast_mask(frame_bgr, dark_contrast_threshold)
         else:
             hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
             mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
@@ -111,6 +120,7 @@ class RobotDetector:
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         if detection_mask is not None:
             mask = cv2.bitwise_and(mask, detection_mask)
+        self.last_blob_mask = mask.copy()
         detections = []
         component_count, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
         components = sorted(

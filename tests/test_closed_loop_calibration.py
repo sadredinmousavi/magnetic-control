@@ -48,6 +48,19 @@ class MovingROICalibrationTests(unittest.TestCase):
         np.testing.assert_allclose(tracker.center, previous)
         self.assertIsNotNone(tracker.process(self.frame([(80, 95), (90, 105)]))[1])
 
+    def test_faint_one_pixel_robot_is_trackable_with_lower_contrast(self):
+        tracker = MovingROICalibration(
+            [(10, 10), (190, 10), (190, 190), (10, 190)],
+            18, 18, (80, 100, 30), 1, 1, contrast_threshold=10,
+        )
+        for x in range(80, 100):
+            frame = np.full((200, 200, 3), 200, np.uint8)
+            frame[100, x] = 182
+            detections, center, xy = tracker.process(frame)
+            self.assertEqual(len(detections), 1)
+            self.assertEqual(center, (x, 100))
+            self.assertEqual(detections[0]["area"], 1)
+
     def test_physical_coordinates_have_y_up(self):
         tracker = self.tracker()
         detections, _, _ = tracker.process(self.frame([(75, 95), (85, 105)]))

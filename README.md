@@ -431,6 +431,14 @@ live** holds a live frame for setup. **Save setup / Load setup** retain the four
 points, physical rectangle size, ROI, robot count and minimum area in JSON.
 **Export XY CSV** saves per-robot and group coordinates for the tracked frames.
 
+If a visible robot is missed, leave **Min area** at `1` and lower **Dark contrast
+threshold** (GUI005 default `10`; try `5` for faint or blurred robots).
+**Show detection mask** displays the thresholded pixels in white and eligible
+blob centers as crosses, constrained by the ROI and four-point region. Check
+that the robot is inside both regions and that **Robots** matches the actual
+count. Lower thresholds also admit more noise. The contrast setting applies
+to tracking and axis-click snapping and is retained in saved setups.
+
 GUI005 calibration **Save setup / Load setup** defaults to
 `experimental/setups/`. The suggested setup filename is
 `YYYYMMDD_HHMMSS.json` in Tehran time. It stores the four points, physical
