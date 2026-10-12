@@ -8,6 +8,7 @@ Calibration and Commands both have a Pop-out camera button. The normal full page
 remain available, while a separate resizable window shows the same source and
 overlays. Maximize or Full screen enlarges that view; Escape exits full screen.
 Reopening the button raises the existing window instead of creating duplicates.
+Pop-out windows open maximized by default.
 Calibration supports pin/ROI mouse placement and settled-robot Capture in the
 pop-out. Its single-row toolbar includes 4 pins / ROI modes, Manual pins,
 pin/robot ROI radius inputs, Center/+X/+Y moves, Capture, Reset axes, Clear pins,
@@ -16,6 +17,15 @@ Calibration pop-out controls are locked during a Phase 3 run. Commands supports
 target selection and synchronized Next/Finish/Stop.
 Closing only the pop-out never stops tracking, recording or motor execution.
 Closing GUI005 closes all camera windows and finalizes any recording.
+Press Prepare axis moves beside Hardware case (or Prepare in the pop-out) once.
+It computes Center/+X/+Y poses in the background without connecting or moving
+motors. Afterwards these moves reuse the prepared ratio-1 poses; Phase 3 continues
+to synthesize its own per-point settings freshly. Changing the selected case or
+its hardware model requires preparation again. The settle time still applies.
+Moves can be repeated in any order once the current move finishes; a new move
+replaces an uncaptured pending position without silently saving it. For axes,
+capture Center first, then +X/+Y. Capturing a new Center resets dependent X/Y
+samples, but merely testing a Center move does not erase saved axes.
 Calibration defaults to one robot. Both views show color-coded steps: 1. 4 pins,
 2. ROI and robot, 3. Axis (green completed, blue active, gray waiting). Capture
 is initially disabled; move to Center/+X/+Y and finish the command's settle wait

@@ -38,6 +38,7 @@ class CameraPopout:
         self.canvas.bind('<Configure>', lambda event: self.refresh())
         self.window.bind('<Escape>', lambda event: self.window.attributes('-fullscreen', False))
         self.window.protocol('WM_DELETE_WINDOW', self.close)
+        self.maximize()
         self.tick()
 
     @property

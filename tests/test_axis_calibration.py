@@ -144,6 +144,33 @@ class RobotAxisTests(unittest.TestCase):
         thread.return_value.start.assert_called_once()
         app.axis_move.assert_not_called()
 
+    def test_test_moves_allow_any_axis_without_center_capture(self):
+        for target in ('+X', '+Y'):
+            app = self.app()
+            app.axis_samples = {}
+            app.axis_tracker, app.axis_after = None, None
+            app.axis_pending = 'Origin'  # An uncaptured prior command may be replaced.
+            app.axis_wait_var = Mock(get=Mock(return_value='3'))
+            app.axis_move, app.parent = Mock(), Mock()
+            cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
+            with patch('closed_loop_calibration.threading.Thread') as thread:
+                app.move_axis(target)
+            self.assertTrue(app.axis_busy)
+            self.assertIsNone(app.axis_pending)
+            self.assertEqual(app.axis_samples, {})
+            thread.return_value.start.assert_called_once()
+
+    def test_center_test_move_does_not_erase_saved_axis_samples(self):
+        app = self.app()
+        samples = dict(app.axis_samples)
+        app.axis_tracker, app.axis_after = None, None
+        app.axis_wait_var = Mock(get=Mock(return_value='3'))
+        app.axis_move, app.parent = Mock(), Mock()
+        cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
+        with patch('closed_loop_calibration.threading.Thread'):
+            app.move_axis('Origin')
+        self.assertEqual(app.axis_samples, samples)
+
     def test_axis_roi_follows_movement_outside_initial_roi_and_never_captures_lost_frame(self):
         app = self.app()
         app.axis_samples = {"Origin": [100, 100]}
@@ -357,19 +384,19 @@ class RobotAxisTests(unittest.TestCase):
         import queue
         app = ClosedLoopGUI.__new__(ClosedLoopGUI)
         app.point_commander = Mock()
-        app.point_commander.move.return_value = {"angles_deg": [60] * 8}
+        app.point_commander.move_prepared_axis.return_value = {"angles_deg": [60] * 8}
         app.camera_event_queue = queue.Queue()
         app.ssh_camera = Mock(is_running=True)
         active = lambda: True
         for target in AXIS_TARGETS_M.values():
             app.move_axis_target(target, "case_100.cond_016_calibration_cartesian", 3, active)
-            app.point_commander.move.assert_called_with(
+            app.point_commander.move_prepared_axis.assert_called_with(
                 "case_100.cond_016_calibration_cartesian", target,
-                ratio=1.0, angle_deg=None, settle_seconds=3, active=active,
+                settle_seconds=3, active=active,
             )
-        app.point_commander.move.reset_mock()
+        app.point_commander.move_prepared_axis.reset_mock()
         app.move_axis_target((.01, 0), "case_100.cond_016_calibration_cartesian", 0, lambda: False)
-        app.point_commander.move.assert_not_called()
+        app.point_commander.move_prepared_axis.assert_not_called()
 
 
 if __name__ == "__main__":

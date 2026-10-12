@@ -123,7 +123,7 @@ class MovingROICalibration:
 
 
 class CalibrationTab:
-    def __init__(self, parent, axis_move=None):
+    def __init__(self, parent, axis_move=None, axis_prepare=None):
         self.parent = parent
         self.frame = None
         self.corners = []
@@ -143,6 +143,12 @@ class CalibrationTab:
         self.source = "Live Pi camera"
         self.detector = RobotDetector()
         self.axis_move = axis_move
+        self.axis_prepare = axis_prepare
+        self.axis_prepare_busy = False
+        self.prepared_case = None
+        self.prepare_job = 0
+        self.prepare_events = queue.Queue()
+        self.prepare_after = None
         self.axis_samples = {}
         self.axis_pending = None
         self.axis_busy = False
@@ -222,8 +228,12 @@ class CalibrationTab:
         cases_dir = Path(__file__).resolve().parents[1] / "cases"
         cases = [path.parent.name for path in sorted(cases_dir.glob("case_*/case.py"))]
         tk.Label(axes_bar, text="Hardware case").grid(row=0, column=0)
-        ttk.Combobox(axes_bar, textvariable=self.control_case_var, values=cases,
-                     width=39, state="readonly").grid(row=0, column=1, padx=4, sticky="ew")
+        case_row = tk.Frame(axes_bar)
+        case_row.grid(row=0, column=1, padx=4, sticky='ew')
+        ttk.Combobox(case_row, textvariable=self.control_case_var, values=cases,
+                     width=28, state="readonly").pack(side='left')
+        self.prepare_button = tk.Button(case_row, text='Prepare axis moves', command=self.prepare_axis_moves)
+        self.prepare_button.pack(side='left', padx=4)
         self.axis_wait_var = tk.StringVar(value="3")
         tk.Label(axes_bar, text="Settle (s)").grid(row=0, column=2)
         tk.Entry(axes_bar, textvariable=self.axis_wait_var, width=4).grid(row=0, column=3)
@@ -243,7 +253,8 @@ class CalibrationTab:
         ), wraplength=1000).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.axis_status = tk.Label(axes_bar, anchor="w", background='#edf4ff', foreground='#173c68', padx=6, pady=4, text=(
             "Ratio = 1. Place the ROI around one robot; it follows the robot during moves. Move to Center, +X (10 mm), then +Y (10 mm). "
-            "After each move, visually confirm the robot has settled and press Capture settled robot. No mouse marking."
+            "Prepare axis moves once. Moves can be repeated in any order; Capture saves only the latest completed move. "
+            "For calibration, capture Center first, then +X and +Y."
         ), wraplength=1000)
         self.axis_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.capture_hint = tk.Label(axes_bar, anchor='w', foreground='#855300', background='#fff4d6', padx=6, pady=3)
@@ -265,6 +276,8 @@ class CalibrationTab:
             variable.trace_add("write", self.on_metric_size_changed)
 
     def on_metric_size_changed(self, *args):
+        if getattr(self, 'prepared_case', None) != self.control_case_var.get():
+            self.prepared_case = None
         if self.axis_samples or self.axis_busy or self.axis_pending or getattr(self, "axis_tracker", None) is not None:
             self.reset_axes()
             self.axis_status.config(text="Rectangle size or control case changed. Recalibrate the robot axes.")
@@ -299,21 +312,68 @@ class CalibrationTab:
         self.axis_status.config(text="Axes reset. Move to Center, then capture the settled robot in the ROI. Repeat for +X and +Y. Ratio is 1.")
         self.render()
 
-    def move_axis(self, name):
-        if self.axis_busy:
+    def prepare_axis_moves(self):
+        if self.axis_busy or self.axis_prepare_busy or self.command_running:
+            self.axis_status.config(text='Wait for the current operation to finish before preparing axes.')
             return
-        if self.axis_pending:
-            messagebox.showerror("Robot axes", "Capture the current settled position before another move, or Reset axes to cancel.")
+        case = self.control_case_var.get()
+        if not case or self.axis_prepare is None:
+            messagebox.showerror('Prepare axes', 'Select a hardware case; axis preparation must be available.')
+            return
+        self.prepared_case = None
+        self.axis_prepare_busy = True
+        self.prepare_job += 1
+        job = self.prepare_job
+        self.prepare_button.config(state='disabled')
+        for button in self.axis_buttons:
+            button.config(state='disabled')
+        self.axis_status.config(text='Preparing Center, +X and +Y motor poses in the background. No motors are moved.')
+
+        def worker():
+            try:
+                self.axis_prepare(case)
+                self.prepare_events.put((job, case, None))
+            except Exception as error:
+                self.prepare_events.put((job, case, str(error)))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.prepare_after = self.parent.after(50, self.poll_axis_preparation)
+
+    def poll_axis_preparation(self):
+        self.prepare_after = None
+        try:
+            job, case, error = self.prepare_events.get_nowait()
+        except queue.Empty:
+            if self.axis_prepare_busy:
+                self.prepare_after = self.parent.after(50, self.poll_axis_preparation)
+            return
+        if job != self.prepare_job:
+            return
+        self.axis_prepare_busy = False
+        self.prepare_button.config(state='normal')
+        for button in self.axis_buttons:
+            button.config(state='normal')
+        if error:
+            self.axis_status.config(text=f'Axis preparation failed: {error}')
+        elif case != self.control_case_var.get():
+            self.axis_status.config(text='Case changed during preparation. Prepare the selected case again.')
+        else:
+            self.prepared_case = case
+            self.axis_status.config(text='Axis poses ready. Center/+X/+Y now send prepared angles without another optimization. The settle wait still applies.')
+        self.render()
+
+    def move_axis(self, name):
+        if self.axis_busy or getattr(self, 'axis_prepare_busy', False) or getattr(self, 'command_running', False):
             return
         try:
+            if getattr(self, 'axis_prepare', None) is not None and self.prepared_case != self.control_case_var.get():
+                raise ValueError('Press Prepare axis moves beside the selected hardware case first.')
             if self.capture is not None:
                 raise ValueError("Axis movement requires the live Pi camera.")
             if self.frame is None or self.circle is None or len(self.corners) != 4:
                 raise ValueError("Select four corners and place an ROI around the single robot first.")
             if int(self.count_var.get()) != 1:
                 raise ValueError("Set Robots to 1 for axis calibration.")
-            if name != "Origin" and "Origin" not in self.axis_samples:
-                raise ValueError("Move to Center and capture it first.")
             if not self.control_case_var.get():
                 raise ValueError("Select the control case matching your hardware geometry first.")
             wait = float(self.axis_wait_var.get())
@@ -337,8 +397,6 @@ class CalibrationTab:
             return
         self.stop_tracking()
         self.clear_tracking()
-        if name == "Origin":
-            self.axis_samples = {}
         self.axis_pending = None
         self.axis_busy = True
         self.axis_capture_button.config(state="disabled")
@@ -349,7 +407,7 @@ class CalibrationTab:
         for button in self.axis_buttons:
             button.config(state="disabled")
         target = AXIS_TARGETS_M[name]
-        self.axis_status.config(text=f"Calculating {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1, then moving and settling for {wait:g} s...")
+        self.axis_status.config(text=f"Sending {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1, then settling for {wait:g} s. Any uncaptured previous move is replaced.")
 
         def worker():
             try:
@@ -378,10 +436,8 @@ class CalibrationTab:
                 else:
                     self.axis_pending = name
                     self.axis_ready_at = time.monotonic()
-                    for button in self.axis_buttons:
-                        button.config(state="disabled")
                     self.axis_capture_button.config(state="normal")
-                    self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} commanded. Confirm the robot has stopped inside the ROI, then press Capture settled robot. The wait alone does not prove it settled.")
+                    self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} commanded. Capture the settled robot to save this position, or move again to test. Moving again replaces the pending capture; settling is not proven by the timer.")
         except queue.Empty:
             pass
         if self.axis_busy:
@@ -429,7 +485,9 @@ class CalibrationTab:
             raise ValueError("Capture Center first.")
         if self.axis_pending != "Origin" and np.linalg.norm(np.asarray(center) - self.axis_samples["Origin"]) < 2:
             raise ValueError("Robot has not moved enough from Center (less than 2 pixels). Check the movement and wait for it to settle; nothing was saved.")
-        samples = dict(self.axis_samples, **{self.axis_pending: list(center)})
+        # Only an explicit successful Center capture resets dependent X/Y samples.
+        samples = dict({} if self.axis_pending == 'Origin' else self.axis_samples,
+                       **{self.axis_pending: list(center)})
         if len(samples) == 3:
             axes = RobotAxes(self.corners, float(self.width_var.get()), float(self.height_var.get()), samples)
             self.axis_status.config(text=(
@@ -609,7 +667,8 @@ class CalibrationTab:
             return
         self.camera_popout = CameraPopout(
             self.parent, 'GUI005 — Calibration camera', self.render,
-            actions=(('Center', lambda: self.move_axis('Origin'), self.axis_buttons[0]),
+            actions=(('Prepare', self.prepare_axis_moves, self.prepare_button),
+                     ('Center', lambda: self.move_axis('Origin'), self.axis_buttons[0]),
                      ('+X', lambda: self.move_axis('+X'), self.axis_buttons[1]),
                      ('+Y', lambda: self.move_axis('+Y'), self.axis_buttons[2]),
                      ('Capture', self.capture_axis, self.axis_capture_button),
@@ -678,6 +737,8 @@ class CalibrationTab:
             return 'Capture locked: stop the Phase 3 run before changing calibration.'
         if self.axis_busy:
             return 'Capture disabled: calculation / movement / settle wait is still running.'
+        if getattr(self, 'axis_prepare_busy', False):
+            return 'Preparing axis poses: no motors are moved. Wait until preparation finishes.'
         if self.axis_pending:
             return f'Capture ready for {AXIS_DISPLAY_NAMES[self.axis_pending]}: confirm the robot is settled, then press Capture.'
         if len(self.axis_samples) == 3:
@@ -1068,6 +1129,10 @@ class CalibrationTab:
                 messagebox.showerror("Coordinates", str(error))
 
     def close(self):
+        if getattr(self, 'prepare_after', None) is not None:
+            self.parent.after_cancel(self.prepare_after)
+            self.prepare_after = None
+        self.prepare_job = getattr(self, 'prepare_job', 0) + 1
         if getattr(self, 'camera_popout', None) is not None:
             self.camera_popout.close()
         self.axis_job += 1

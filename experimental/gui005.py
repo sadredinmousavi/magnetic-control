@@ -66,7 +66,8 @@ class ClosedLoopGUI(BaseServoGUI):
 
         calibration_tab = tk.Frame(notebook)
         notebook.add(calibration_tab, text="2. Calibration")
-        self.calibration = CalibrationTab(calibration_tab, axis_move=self.move_axis_target)
+        self.calibration = CalibrationTab(calibration_tab, axis_move=self.move_axis_target,
+                                          axis_prepare=self.point_commander.prepare_axes)
         command_tab = tk.Frame(notebook)
         notebook.add(command_tab, text="3. Commands")
         self.commands = CommandTab(
@@ -85,13 +86,13 @@ class ClosedLoopGUI(BaseServoGUI):
             return
         if not self.ssh_camera.is_running:
             raise RuntimeError("Connect the live Pi camera before axis calibration.")
-        result = self.point_commander.move(
-            case_name, target, ratio=1.0, angle_deg=None,
+        result = self.point_commander.move_prepared_axis(
+            case_name, target,
             settle_seconds=settle, active=active,
         )
         if result is not None:
             angles = ", ".join(f"{angle:.2f}" for angle in result["angles_deg"])
-            self.camera_event_queue.put(("log", f"Point {target} m, ratio 1: calculated magnet angles [{angles}] deg"))
+            self.camera_event_queue.put(("log", f"Point {target} m, ratio 1: prepared magnet angles [{angles}] deg"))
         return result
 
     def build_future_tabs(self, notebook):

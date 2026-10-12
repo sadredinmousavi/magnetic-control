@@ -11,6 +11,38 @@ from control_workflow import calculate_point_control
 
 
 class PointControlTests(unittest.TestCase):
+    def test_prepare_axes_computes_once_without_motor_io_and_reuses_results(self):
+        port = Mock(is_open=True)
+        commander = PointCommander(lambda: port)
+        params = {'NUM_SOURCES': 8, 'RADIUS': .18}
+        with patch('point_control.load_hardware_case', return_value=params), \
+             patch('point_control.calculate_point_control', return_value={'angles_deg': [60] * 8}) as calculate, \
+             patch('helpers.moveArray') as move:
+            commander.prepare_axes('case_100')
+            self.assertEqual(calculate.call_count, 3)
+            move.assert_not_called()
+            for target in ((0, .01), (0, 0), (.01, 0), (0, .01)):
+                commander.move_prepared_axis('case_100', target)
+            self.assertEqual(calculate.call_count, 3)
+            self.assertEqual(move.call_count, 4)
+            params['RADIUS'] = .2
+            with self.assertRaisesRegex(ValueError, 'Prepare axis moves'):
+                commander.move_prepared_axis('case_100', (0, 0))
+            self.assertEqual(move.call_count, 4)
+
+    def test_unprepared_axis_never_sends_and_preparation_needs_no_connected_port(self):
+        commander = PointCommander(lambda: None)
+        with patch('point_control.load_hardware_case', return_value={'RADIUS': .18}), \
+             patch('point_control.calculate_point_control', return_value={'angles_deg': [60] * 8}), \
+             patch('helpers.moveArray') as move:
+            commander.prepare_axes('case_100')
+            move.assert_not_called()
+        port = Mock(is_open=True)
+        commander = PointCommander(lambda: port)
+        with patch('point_control.load_hardware_case', return_value={'RADIUS': .18}), patch('helpers.moveArray') as move:
+            with self.assertRaisesRegex(ValueError, 'not prepared'):
+                commander.move_prepared_axis('case_100', (0, 0))
+            move.assert_not_called()
     def test_only_base_hardware_model_is_loaded_even_for_legacy_conditions(self):
         params = {"NUM_SOURCES": 8, "RADIUS": .18}
         with patch("point_control.load_case", return_value=params) as load, \

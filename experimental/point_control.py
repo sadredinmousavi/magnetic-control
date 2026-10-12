@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 import threading
 import time
+import json
+import hashlib
 
 import numpy as np
 
@@ -35,13 +37,44 @@ class PointCommander:
         self.port_provider = port_provider
         self.zero_angle_deg = zero_angle_deg
         self.lock = threading.Lock()
+        self.prepared_axes = {}
+
+    @staticmethod
+    def hardware_signature(params):
+        def encode(value):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, np.generic):
+                return value.item()
+            return repr(value)
+        return hashlib.sha256(json.dumps(params, sort_keys=True, default=encode).encode()).hexdigest()
+
+    def prepare_axes(self, case_name):
+        """Compute all three fixed ratio-1 poses without connecting or moving motors."""
+        name = hardware_case_name(case_name)
+        with self.lock:
+            params = load_hardware_case(name)
+            signature = self.hardware_signature(params)
+            results = {}
+            for target in ((0., 0.), (.01, 0.), (0., .01)):
+                result = calculate_point_control(params, target, ratio=1., angle_deg=None)
+                angles = np.asarray(result['angles_deg'], dtype=float)
+                if angles.ndim != 1 or not angles.size or not np.isfinite(angles).all():
+                    raise ValueError('Axis preparation did not produce valid motor angles.')
+                results[target] = dict(result, angles_deg=angles.copy())
+            self.prepared_axes[name] = (signature, results)
+        return results
+
+    def move_prepared_axis(self, case_name, target_xy_m, *, settle_seconds=0, active=lambda: True):
+        return self.move(case_name, target_xy_m, settle_seconds=settle_seconds,
+                         active=active, prepared_axis=True)
 
     def calculate(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None):
         return calculate_point_control(load_hardware_case(case_name), target_xy_m,
                                        ratio=ratio, angle_deg=angle_deg)
 
     def move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
-             settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None):
+             settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False):
         """Calculate fresh motor angles, send them, then wait interruptibly.
 
         Cancellation skips unsent commands; it cannot undo an already sent pose.
@@ -61,7 +94,15 @@ class PointCommander:
             port = self.port_provider()
             if port is None or not getattr(port, "is_open", False):
                 raise RuntimeError("Connect the serial controller in Connections first.")
-            result = self.calculate(case_name, target_xy_m, ratio=ratio, angle_deg=angle_deg)
+            if prepared_axis:
+                name = hardware_case_name(case_name)
+                signature = self.hardware_signature(load_hardware_case(name))
+                cached = self.prepared_axes.get(name)
+                if cached is None or cached[0] != signature or tuple(target_xy_m) not in cached[1]:
+                    raise ValueError('Axis poses are not prepared for this hardware. Press Prepare axis moves again.')
+                result = cached[1][tuple(target_xy_m)]
+            else:
+                result = self.calculate(case_name, target_xy_m, ratio=ratio, angle_deg=angle_deg)
             if not active():
                 return None
             if self.port_provider() is not port or not getattr(port, "is_open", False):
