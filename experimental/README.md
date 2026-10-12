@@ -9,7 +9,11 @@ remain available, while a separate resizable window shows the same source and
 overlays. Maximize or Full screen enlarges that view; Escape exits full screen.
 Reopening the button raises the existing window instead of creating duplicates.
 Calibration supports pin/ROI mouse placement and settled-robot Capture in the
-pop-out; Commands supports target selection and synchronized Next/Finish/Stop.
+pop-out. Its single-row toolbar includes 4 pins / ROI modes, Manual pins,
+pin/robot ROI radius inputs, Center/+X/+Y moves, Capture, Reset axes, Clear pins,
+Track / Stop track, and Freeze. These share the main page's state and settings.
+Calibration pop-out controls are locked during a Phase 3 run. Commands supports
+target selection and synchronized Next/Finish/Stop.
 Closing only the pop-out never stops tracking, recording or motor execution.
 Closing GUI005 closes all camera windows and finalizes any recording.
 

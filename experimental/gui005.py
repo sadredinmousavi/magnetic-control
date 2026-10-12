@@ -71,7 +71,8 @@ class ClosedLoopGUI(BaseServoGUI):
         notebook.add(command_tab, text="3. Commands")
         self.commands = CommandTab(
             command_tab, self.calibration, self.point_commander, lambda: self.ssh_camera.is_running,
-            set_running=lambda running: notebook.tab(calibration_tab, state="disabled" if running else "normal"),
+            set_running=lambda running: (self.calibration.set_command_running(running),
+                                         notebook.tab(calibration_tab, state="disabled" if running else "normal")),
             visible=lambda: notebook.select() == str(command_tab),
         )
         notebook.bind("<<NotebookTabChanged>>", lambda event: self.commands.refresh_calibration()

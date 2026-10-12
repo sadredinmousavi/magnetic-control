@@ -19,6 +19,22 @@ def canvas(width, height):
 
 
 class CameraPopoutTests(unittest.TestCase):
+    def test_compact_labels_preserved_and_all_actions_lock_during_command_run(self):
+        enabled = [True]
+        source = Mock()
+        source.cget.return_value = 'normal'
+        with patch('camera_popout.tk.Toplevel') as window, patch('camera_popout.tk.Frame'), \
+             patch('camera_popout.tk.Button'), patch('camera_popout.tk.Label'), patch('camera_popout.tk.Canvas'):
+            window.return_value.winfo_width.return_value = 1000
+            view = CameraPopout(Mock(), 'Camera', Mock(), actions=(('Center', Mock(), source),),
+                                mirror_action_text=False, controls_enabled=lambda: enabled[0])
+            button = view.actions[0][0]
+            button.config.assert_called_with(state='normal')
+            enabled[0] = False
+            view.refresh()
+            button.config.assert_called_with(state='disabled')
+            view.close()
+
     def test_close_cancels_only_view_timer_and_is_idempotent(self):
         render, command, source = Mock(), Mock(), Mock()
         source.cget.side_effect = lambda key: {'state': 'disabled', 'text': 'Finish'}[key]
@@ -29,7 +45,8 @@ class CameraPopoutTests(unittest.TestCase):
             view = CameraPopout(Mock(), 'Camera', render, actions=(('Next', command, source),))
             self.assertTrue(view.is_open)
             view.show()
-            view.actions[0][0].config.assert_called_with(state='disabled', text='Finish')
+            view.actions[0][0].config.assert_any_call(state='disabled')
+            view.actions[0][0].config.assert_any_call(text='Finish')
             view.close()
             view.close()
             self.assertFalse(view.is_open)

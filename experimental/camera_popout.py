@@ -4,20 +4,26 @@ import tkinter as tk
 
 
 class CameraPopout:
-    def __init__(self, parent, title, render, *, actions=(), status=lambda: ''):
+    def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
+                 toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True):
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry('1100x780')
         self.window.minsize(480, 320)
         self.render, self.status = render, status
+        self.mirror_action_text, self.controls_enabled = mirror_action_text, controls_enabled
         self.after_id = None
         self.closed = False
         bar = tk.Frame(self.window)
         bar.pack(fill='x', padx=5, pady=3)
+        self.extra_controls = tk.Frame(bar)
+        self.extra_controls.pack(side='left')
+        if toolbar_builder is not None:
+            toolbar_builder(self.extra_controls)
         self.actions = []
         for label, command, source in actions:
-            button = tk.Button(bar, text=label, command=command)
-            button.pack(side='left', padx=3)
+            button = tk.Button(bar, text=label, command=lambda callback=command: callback() if self.controls_enabled() else None)
+            button.pack(side='left', padx=2)
             self.actions.append((button, source))
         tk.Button(bar, text='Maximize', command=self.maximize).pack(side='right', padx=3)
         tk.Button(bar, text='Full screen', command=self.fullscreen).pack(side='right', padx=3)
@@ -54,8 +60,13 @@ class CameraPopout:
         self.render(self.canvas)
         self.status_label.config(text=self.status(), wraplength=max(400, self.window.winfo_width() - 16))
         for button, source in self.actions:
-            if source is not None:
-                button.config(state=source.cget('state'), text=source.cget('text'))
+            state = source.cget('state') if source is not None else 'normal'
+            button.config(state=state if self.controls_enabled() else 'disabled')
+            if source is not None and self.mirror_action_text:
+                button.config(text=source.cget('text'))
+        for widget in self.extra_controls.winfo_children():
+            if widget.winfo_class() in ('Entry', 'Checkbutton', 'Radiobutton', 'Button'):
+                widget.config(state='normal' if self.controls_enabled() else 'disabled')
 
     def tick(self):
         self.after_id = None

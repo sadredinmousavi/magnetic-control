@@ -155,6 +155,7 @@ class CalibrationTab:
         self.axis_detections = []
         self.axis_processed_at = None
         self.camera_popout = None
+        self.command_running = False
 
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
@@ -604,16 +605,47 @@ class CalibrationTab:
             return
         self.camera_popout = CameraPopout(
             self.parent, 'GUI005 — Calibration camera', self.render,
-            actions=(('Capture settled robot', self.capture_axis, self.axis_capture_button),
-                     ('Freeze / Resume', self.freeze_live, None)),
+            actions=(('Center', lambda: self.move_axis('Origin'), self.axis_buttons[0]),
+                     ('+X', lambda: self.move_axis('+X'), self.axis_buttons[1]),
+                     ('+Y', lambda: self.move_axis('+Y'), self.axis_buttons[2]),
+                     ('Capture', self.capture_axis, self.axis_capture_button),
+                     ('Reset axes', self.reset_axes, None),
+                     ('Clear pins', self.clear_points, None),
+                     ('Track', self.start_tracking, None),
+                     ('Stop track', self.stop_tracking, None),
+                     ('Freeze', self.freeze_live, None)),
+            toolbar_builder=self.build_popout_tools, mirror_action_text=False,
+            controls_enabled=lambda: not self.command_running,
             status=lambda: f"{self.status.cget('text')}  {self.axis_status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
         canvas.bind('<Button-1>', lambda event: self.click(event, transform=getattr(canvas, 'camera_transform', None)))
         canvas.bind('<Motion>', lambda event: self.move_pin_roi(event, transform=getattr(canvas, 'camera_transform', None)))
         canvas.bind('<Leave>', self.clear_pin_roi)
+        # Keep the single-row controls reachable even when the view is resized.
+        self.camera_popout.window.update_idletasks()
+        toolbar_width = self.camera_popout.extra_controls.master.winfo_reqwidth()
+        self.camera_popout.window.minsize(max(480, toolbar_width + 10), 320)
+
+    def build_popout_tools(self, bar):
+        # Shared variables keep both pages synchronized without extra setup dialogs.
+        for label, mode in (('4 pins', 'Corners'), ('ROI', 'ROI')):
+            tk.Radiobutton(bar, text=label, variable=self.mode, value=mode,
+                           command=self.clear_pin_roi).pack(side='left', padx=1)
+        tk.Checkbutton(bar, text='Manual', variable=self.manual_pin_var,
+                       command=self.on_pin_method_changed).pack(side='left', padx=1)
+        for label, variable in (('Pin r', self.pin_radius_var), ('ROI r', self.radius_var)):
+            tk.Label(bar, text=label).pack(side='left', padx=(3, 1))
+            tk.Entry(bar, textvariable=variable, width=4).pack(side='left')
+
+    def set_command_running(self, running):
+        self.command_running = running
+        if self.camera_popout is not None and self.camera_popout.is_open:
+            self.camera_popout.refresh()
 
     def click(self, event, *, transform=None):
+        if getattr(self, 'command_running', False):
+            return
         transform = self.transform if transform is None else transform
         if self.frame is None or transform is None:
             return
@@ -656,6 +688,8 @@ class CalibrationTab:
             messagebox.showerror("Calibration", str(error))
 
     def move_pin_roi(self, event, *, transform=None):
+        if getattr(self, 'command_running', False):
+            return
         transform = self.transform if transform is None else transform
         if (self.frame is None or transform is None or self.mode.get() != "Corners"
                 or self.tracker is not None or self.axis_busy or self.axis_pending
