@@ -16,6 +16,11 @@ Calibration pop-out controls are locked during a Phase 3 run. Commands supports
 target selection and synchronized Next/Finish/Stop.
 Closing only the pop-out never stops tracking, recording or motor execution.
 Closing GUI005 closes all camera windows and finalizes any recording.
+Calibration defaults to one robot. Both views show color-coded steps: 1. 4 pins,
+2. ROI and robot, 3. Axis (green completed, blue active, gray waiting). Capture
+is initially disabled; move to Center/+X/+Y and finish the command's settle wait
+first. It enables for the pending position, then disables after a successful
+capture. The status hint explains waiting, ready, completed or Phase 3 lock states.
 
 Complete Center/+X/+Y calibration (or load a matching setup from `experimental/setups`)
 and select the hardware case in Calibration. Select Live camera for command execution.

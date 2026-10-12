@@ -5,13 +5,15 @@ import tkinter as tk
 
 class CameraPopout:
     def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
-                 toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True):
+                 toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True,
+                 status_builder=None, status_refresh=None):
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry('1100x780')
         self.window.minsize(480, 320)
         self.render, self.status = render, status
         self.mirror_action_text, self.controls_enabled = mirror_action_text, controls_enabled
+        self.status_refresh = status_refresh
         self.after_id = None
         self.closed = False
         bar = tk.Frame(self.window)
@@ -27,7 +29,9 @@ class CameraPopout:
             self.actions.append((button, source))
         tk.Button(bar, text='Maximize', command=self.maximize).pack(side='right', padx=3)
         tk.Button(bar, text='Full screen', command=self.fullscreen).pack(side='right', padx=3)
-        self.status_label = tk.Label(self.window, anchor='w', text='', wraplength=1000)
+        self.status_widgets = status_builder(self.window) if status_builder is not None else None
+        self.status_label = tk.Label(self.window, anchor='w', text='', wraplength=1000,
+                                     background='#edf4ff', foreground='#173c68', padx=6, pady=3)
         self.status_label.pack(fill='x', padx=8)
         self.canvas = tk.Canvas(self.window, background='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
@@ -58,6 +62,8 @@ class CameraPopout:
         if self.closed:
             return
         self.render(self.canvas)
+        if self.status_refresh is not None:
+            self.status_refresh(self.status_widgets)
         self.status_label.config(text=self.status(), wraplength=max(400, self.window.winfo_width() - 16))
         for button, source in self.actions:
             state = source.cget('state') if source is not None else 'normal'

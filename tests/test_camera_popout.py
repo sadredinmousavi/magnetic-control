@@ -19,6 +19,29 @@ def canvas(width, height):
 
 
 class CameraPopoutTests(unittest.TestCase):
+    def test_calibration_progress_and_capture_hint_follow_workflow(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.corners, app.detections, app.axis_samples = [], [], {}
+        app.circle, app.axis_pending, app.axis_busy = None, None, False
+        app.command_running = False
+        app.count_var = Mock(get=Mock(return_value='1'))
+        labels = [Mock(), Mock(), Mock()]
+        app.refresh_step_status(labels)
+        self.assertIn('0/4', labels[0].config.call_args.kwargs['text'])
+        self.assertIn('Move to Center', app.capture_explanation())
+        app.corners = [(0, 0), (100, 0), (100, 100), (0, 100)]
+        app.circle = (50, 50, 30)
+        app.detections = [{'center': (50, 50)}]
+        app.refresh_step_status(labels)
+        self.assertEqual(labels[0].config.call_args.kwargs['foreground'], '#176637')
+        self.assertEqual(labels[1].config.call_args.kwargs['foreground'], '#176637')
+        app.axis_busy = True
+        self.assertIn('still running', app.capture_explanation())
+        app.axis_busy, app.axis_pending = False, 'Origin'
+        self.assertIn('Capture ready for Center', app.capture_explanation())
+        app.command_running = True
+        self.assertIn('Capture locked', app.capture_explanation())
+
     def test_compact_labels_preserved_and_all_actions_lock_during_command_run(self):
         enabled = [True]
         source = Mock()

@@ -157,6 +157,7 @@ class CalibrationTab:
         self.camera_popout = None
         self.command_running = False
 
+        self.step_labels = self.build_step_status(parent)
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
         for label, command in (
@@ -174,7 +175,7 @@ class CalibrationTab:
         self.radius_var = tk.StringVar(value=str(DEFAULT_ROBOT_ROI_RADIUS))
         self.pin_radius_var = tk.StringVar(value=str(DEFAULT_PIN_ROI_RADIUS))
         self.manual_pin_var = tk.BooleanVar(value=False)
-        self.count_var = tk.StringVar(value="3")
+        self.count_var = tk.StringVar(value="1")
         self.area_var = tk.StringVar(value="1")
         self.contrast_var = tk.StringVar(value="10")
         self.show_mask_var = tk.BooleanVar(value=False)
@@ -240,16 +241,19 @@ class CalibrationTab:
             "Choose the case matching your actual magnet count, ring radius, magnet sizes and magnetic properties. "
             "Only the case.py hardware model is used; no condition or sequence file is needed."
         ), wraplength=1000).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        self.axis_status = tk.Label(axes_bar, anchor="w", text=(
+        self.axis_status = tk.Label(axes_bar, anchor="w", background='#edf4ff', foreground='#173c68', padx=6, pady=4, text=(
             "Ratio = 1. Place the ROI around one robot; it follows the robot during moves. Move to Center, +X (10 mm), then +Y (10 mm). "
             "After each move, visually confirm the robot has settled and press Capture settled robot. No mouse marking."
         ), wraplength=1000)
         self.axis_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self.capture_hint = tk.Label(axes_bar, anchor='w', foreground='#855300', background='#fff4d6', padx=6, pady=3)
+        self.capture_hint.grid(row=4, column=0, columnspan=4, sticky='ew')
         tk.Label(parent, anchor="w", text=(
             "Select four corner dots, enter their rectangle size, then place a circular ROI around all robots. "
             "Dark contrast detection only. Calibrate robot axes below to replace the default image-aligned XY."
         ), wraplength=1000).pack(fill="x", padx=10)
-        self.status = tk.Label(parent, text="Waiting for a live camera frame or movie.", anchor="w")
+        self.status = tk.Label(parent, text="Waiting for a live camera frame or movie.", anchor="w",
+                               background='#edf4ff', foreground='#173c68', padx=6, pady=4)
         self.status.pack(fill="x", padx=10, pady=4)
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -616,7 +620,8 @@ class CalibrationTab:
                      ('Freeze', self.freeze_live, None)),
             toolbar_builder=self.build_popout_tools, mirror_action_text=False,
             controls_enabled=lambda: not self.command_running,
-            status=lambda: f"{self.status.cget('text')}  {self.axis_status.cget('text')}",
+            status_builder=self.build_step_status, status_refresh=self.refresh_step_status,
+            status=lambda: f"{self.capture_explanation()}  |  {self.axis_status.cget('text')}  |  {self.status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
         canvas.bind('<Button-1>', lambda event: self.click(event, transform=getattr(canvas, 'camera_transform', None)))
@@ -637,6 +642,48 @@ class CalibrationTab:
         for label, variable in (('Pin r', self.pin_radius_var), ('ROI r', self.radius_var)):
             tk.Label(bar, text=label).pack(side='left', padx=(3, 1))
             tk.Entry(bar, textvariable=variable, width=4).pack(side='left')
+
+    def build_step_status(self, parent):
+        row = tk.Frame(parent)
+        row.pack(fill='x', padx=8, pady=3)
+        labels = []
+        for title in ('1. 4 pins', '2. ROI and robot', '3. Axis'):
+            label = tk.Label(row, text=title, anchor='w', padx=8, pady=4, font=('Segoe UI', 9))
+            label.pack(side='left', fill='x', expand=True, padx=2)
+            labels.append(label)
+        return labels
+
+    def calibration_progress(self):
+        pins = len(self.corners) == 4
+        try:
+            count = int(self.count_var.get())
+        except (ValueError, TypeError):
+            count = 0
+        robot = pins and self.circle is not None and count > 0 and len(self.detections) == count
+        axes = len(self.axis_samples) == 3
+        return (
+            ('1. 4 pins', 'Done' if pins else f'{len(self.corners)}/4 — select pins', pins, not pins),
+            ('2. ROI and robot', 'Detected' if robot else 'Place ROI / detect robot', robot, pins and not robot),
+            ('3. Axis', 'Done' if axes else f'{len(self.axis_samples)}/3 captures', axes, pins and self.circle is not None and not axes),
+        )
+
+    def refresh_step_status(self, labels):
+        for label, (title, detail, done, active) in zip(labels, self.calibration_progress()):
+            background, foreground = (('#e4f5e9', '#176637') if done else
+                                      ('#e4efff', '#174f91') if active else ('#f0f1f3', '#626772'))
+            label.config(text=f'{title}  —  {detail}', background=background, foreground=foreground)
+
+    def capture_explanation(self):
+        if getattr(self, 'command_running', False):
+            return 'Capture locked: stop the Phase 3 run before changing calibration.'
+        if self.axis_busy:
+            return 'Capture disabled: calculation / movement / settle wait is still running.'
+        if self.axis_pending:
+            return f'Capture ready for {AXIS_DISPLAY_NAMES[self.axis_pending]}: confirm the robot is settled, then press Capture.'
+        if len(self.axis_samples) == 3:
+            return 'Axes complete. Save setup; Capture becomes available after another axis move.'
+        next_name = 'Center' if 'Origin' not in self.axis_samples else '+X' if '+X' not in self.axis_samples else '+Y'
+        return f'Capture disabled: press Move to {next_name}, wait for the command to finish, then capture the settled robot.'
 
     def set_command_running(self, running):
         self.command_running = running
@@ -818,6 +865,13 @@ class CalibrationTab:
         self.status.config(text="Tracking stopped. Coordinates remain available for export.")
 
     def render(self, canvas=None):
+        if hasattr(self, 'step_labels'):
+            self.refresh_step_status(self.step_labels)
+        if hasattr(self, 'capture_hint'):
+            ready = bool(self.axis_pending) and not self.axis_busy and not self.command_running
+            self.capture_hint.config(text=self.capture_explanation(),
+                                     background='#e4f5e9' if ready else '#fff4d6',
+                                     foreground='#176637' if ready else '#855300')
         main_view = canvas is None
         canvas = self.canvas if main_view else canvas
         if self.frame is None:
