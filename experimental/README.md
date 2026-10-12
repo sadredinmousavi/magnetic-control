@@ -12,7 +12,7 @@ Pop-out windows open maximized by default.
 Calibration supports pin/ROI mouse placement and settled-robot Capture in the
 pop-out. Its single-row toolbar includes 4 pins / ROI modes, Manual pins,
 pin/robot ROI radius inputs, Center/+X/+Y moves, Capture, Reset axes, Clear pins,
-Track / Stop track, and Freeze. These share the main page's state and settings.
+Track / Stop track. These share the main page's state and settings.
 Calibration pop-out controls are locked during a Phase 3 run. Commands supports
 target selection and synchronized Next/Finish/Stop.
 Closing only the pop-out never stops tracking, recording or motor execution.
@@ -32,8 +32,16 @@ is initially disabled; move to Center/+X/+Y and finish the command's settle wait
 first. It enables for the pending position, then disables after a successful
 capture. The status hint explains waiting, ready, completed or Phase 3 lock states.
 
+Calibration is live-camera only: connect the Pi camera in Connections. Movie
+loading, playback, rewind and movie timers have been removed from GUI005;
+There is no Freeze / Resume: pin/ROI placement also stays live. GUI004 post-processing is unchanged.
+Live processing FPS defaults to 5 (editable 1–15); each cycle drains the frame
+queue and processes only the latest image. It preserves full resolution and
+does not change the Pi's capture FPS. Hidden previews skip drawing, unchanged
+pop-out images skip redraws, and both Calibration views share detection-mask
+preview results. Tracking/capture still operate on current frames.
 Complete Center/+X/+Y calibration (or load a matching setup from `experimental/setups`)
-and select the hardware case in Calibration. Select Live camera for command execution.
+and select the hardware case in Calibration.
 In Commands, load a file from `experimental/xy_sequences`:
 
 `[x, y] | wait_seconds | motor_zero_degrees`
@@ -92,7 +100,7 @@ Stop tracking preserves measurements and pauses arrival progression without
 undoing the motor pose; restart tracking to continue or use command Stop to end.
 
 To export live video, apply calibration, start tracking, set Video FPS to match
-the camera, then Start recording and choose a base name. Recording continues
+Live processing FPS (default 5), then Start recording and choose a base name. Recording continues
 across targets and tab switches until Stop / save recording (or closing GUI005).
 It writes `_camera.mp4` (unmodified frame), `_annotated.mp4` (camera plus overlays),
 `_overlay.mp4` (overlays on blue for chroma-key removal), and `_tracking.csv` with

@@ -74,34 +74,27 @@ class MovingROICalibrationTests(unittest.TestCase):
             MovingROICalibration([(10, 10), (100, 10), (100, 100), (10, 100)],
                                  10, 10, (50, 50, -1), 2, 1)
 
-    def test_movie_tracks_every_frame_through_end(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "robots.avi")
-            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 20, (200, 200))
-            self.assertTrue(writer.isOpened())
-            for step in range(10):
-                writer.write(self.frame([(75 + step * 4, 95), (85 + step * 4, 105)]))
-            writer.release()
-            capture = cv2.VideoCapture(path)
-            try:
-                app = CalibrationTab.__new__(CalibrationTab)
-                app.parent, app.status, app.render = Mock(), Mock(), Mock()
-                app.capture = capture
-                ok, app.frame = capture.read()
-                self.assertTrue(ok)
-                app.tracker = self.tracker()
-                app.frame_number, app.fps = 0, 20
-                app.playing, app.after_id = True, None
-                app.rows, app.detections = [], []
-                app.accept_frame(app.frame)
-                while app.playing:
-                    app.movie_tick()
-                self.assertEqual(sorted({row[0] for row in app.rows}), list(range(10)))
-                self.assertEqual(len(app.rows), 20)
-                self.assertTrue(all(row[2] == 1 for row in app.rows))
-                self.assertAlmostEqual(app.rows[-1][1], 9 / 20)
-            finally:
-                capture.release()
+    def test_live_frames_use_elapsed_time_and_never_pause(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.parent, app.status, app.render = Mock(), Mock(), Mock()
+        app.frame = None
+        app.tracker = self.tracker()
+        app.frame_number, app.live_started = 0, 100
+        app.rows, app.detections = [], []
+        for step in range(10):
+            with patch('closed_loop_calibration.time.monotonic', return_value=100 + step / 20):
+                app.accept_live_frame(self.frame([(75 + step * 4, 95), (85 + step * 4, 105)]))
+        self.assertEqual(sorted({row[0] for row in app.rows}), list(range(10)))
+        self.assertEqual(len(app.rows), 20)
+        self.assertTrue(all(row[2] == 1 for row in app.rows))
+        self.assertAlmostEqual(app.rows[-1][1], 9 / 20)
+        app.accept_live_frame(self.frame([]))
+        self.assertEqual(len(app.rows), 21)
+        self.assertEqual(app.frame_number, 11)
+
+    def test_movie_playback_api_is_removed(self):
+        for method in ('open_movie', 'toggle_play', 'movie_tick', 'rewind', 'close_capture', 'use_live', 'freeze_live'):
+            self.assertFalse(hasattr(CalibrationTab, method), method)
 
     def test_setup_save_uses_setup_folder_and_contains_four_points_and_roi(self):
         app = CalibrationTab.__new__(CalibrationTab)

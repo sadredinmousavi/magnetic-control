@@ -180,7 +180,7 @@ class CommandSequenceTests(unittest.TestCase):
     def test_command_preview_requires_matching_live_calibration(self):
         app = CommandTab.__new__(CommandTab)
         app.steps = [XYStep((0, 0), 0, 180)]
-        app.calibration = Mock(capture=None)
+        app.calibration = Mock()
         app.calibration.setup_data.return_value = setup()
         app.frame = np.zeros((220, 220, 3), np.uint8)
         data, pixels = app.prepare()
@@ -224,7 +224,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.running, app.job, app.active_index = False, 0, None
         app.events, app.stop_event = queue.Queue(), threading.Event()
         app.steps = [XYStep((.07, 0), 0, 180), XYStep((.01, 0), 0, 180)]
-        app.calibration = Mock(capture=None)
+        app.calibration = Mock()
         data = setup()
         data["video_size_px"] = [400, 400]
         app.calibration.setup_data.return_value = data

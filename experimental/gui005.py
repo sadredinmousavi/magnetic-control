@@ -2,6 +2,7 @@
 
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -61,13 +62,15 @@ class ClosedLoopGUI(BaseServoGUI):
 
         connection_tab = tk.Frame(notebook)
         notebook.add(connection_tab, text="1. Connections")
+        self.connection_visible = lambda: notebook.select() == str(connection_tab)
         self.build_serial_panel(connection_tab)
         self.build_ssh_camera_panel(connection_tab)
 
         calibration_tab = tk.Frame(notebook)
         notebook.add(calibration_tab, text="2. Calibration")
         self.calibration = CalibrationTab(calibration_tab, axis_move=self.move_axis_target,
-                                          axis_prepare=self.point_commander.prepare_axes)
+                                          axis_prepare=self.point_commander.prepare_axes,
+                                          visible=lambda: notebook.select() == str(calibration_tab))
         command_tab = tk.Frame(notebook)
         notebook.add(command_tab, text="3. Commands")
         self.commands = CommandTab(
@@ -338,6 +341,7 @@ class ClosedLoopGUI(BaseServoGUI):
         self.camera_fps_entry.config(state="normal")
 
     def poll_camera(self):
+        started = time.monotonic()
         try:
             while True:
                 event = self.camera_event_queue.get_nowait()
@@ -390,11 +394,19 @@ class ClosedLoopGUI(BaseServoGUI):
         except queue.Empty:
             pass
         if latest_frame is not None:
-            self.show_camera_frame(latest_frame)
+            if getattr(self, 'connection_visible', lambda: True)():
+                self.show_camera_frame(latest_frame)
             self.calibration.accept_live_frame(latest_frame)
             self.commands.accept_live_frame(latest_frame)
         self.commands.check_camera_health()
-        self.root.after(40, self.poll_camera)
+        try:
+            fps = max(1., min(15., float(self.calibration.live_fps_var.get())))
+            if not 1 <= fps <= 15:
+                fps = 5.
+        except (ValueError, TypeError):
+            fps = 5.
+        delay = max(40, round(1000 / fps - (time.monotonic() - started) * 1000))
+        self.root.after(delay, self.poll_camera)
 
     def show_camera_frame(self, frame_bgr):
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)

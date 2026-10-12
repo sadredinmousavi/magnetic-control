@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import unittest
+import queue
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'experimental'))
 from camera_popout import CameraPopout
 from closed_loop_calibration import CalibrationTab
 from command_tab import CommandTab
+from gui005 import ClosedLoopGUI
 
 
 def canvas(width, height):
@@ -19,6 +21,41 @@ def canvas(width, height):
 
 
 class CameraPopoutTests(unittest.TestCase):
+    def test_camera_processing_caps_fps_and_uses_only_latest_frame(self):
+        app = ClosedLoopGUI.__new__(ClosedLoopGUI)
+        app.camera_event_queue, app.camera_frame_queue = queue.Queue(), queue.Queue()
+        old, newest = object(), object()
+        app.camera_frame_queue.put(old)
+        app.camera_frame_queue.put(newest)
+        app.calibration, app.commands, app.root, app.show_camera_frame = Mock(), Mock(), Mock(), Mock()
+        app.calibration.live_fps_var.get.return_value = '5'
+        app.connection_visible = lambda: False
+        with patch('gui005.time.monotonic', side_effect=[100, 100.01]):
+            app.poll_camera()
+        app.calibration.accept_live_frame.assert_called_once_with(newest)
+        app.commands.accept_live_frame.assert_called_once_with(newest)
+        app.show_camera_frame.assert_not_called()
+        app.root.after.assert_called_once_with(190, app.poll_camera)
+
+    def test_unchanged_frames_skip_redrawing_but_still_sync_buttons(self):
+        revision = [1]
+        render = Mock()
+        with patch('camera_popout.tk.Toplevel') as window, patch('camera_popout.tk.Frame'), \
+             patch('camera_popout.tk.Button'), patch('camera_popout.tk.Label'), patch('camera_popout.tk.Canvas') as surface:
+            window.return_value.winfo_width.return_value = 1000
+            surface.return_value.winfo_width.return_value = 800
+            surface.return_value.winfo_height.return_value = 600
+            view = CameraPopout(Mock(), 'Camera', render, render_version=lambda: revision[0])
+            view.refresh()
+            self.assertEqual(render.call_count, 1)
+            revision[0] += 1
+            view.refresh()
+            self.assertEqual(render.call_count, 2)
+            surface.return_value.winfo_width.return_value = 900
+            view.refresh()
+            self.assertEqual(render.call_count, 3)
+            view.close()
+
     def test_calibration_progress_and_capture_hint_follow_workflow(self):
         app = CalibrationTab.__new__(CalibrationTab)
         app.corners, app.detections, app.axis_samples = [], [], {}

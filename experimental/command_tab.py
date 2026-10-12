@@ -44,9 +44,10 @@ class CommandTab:
         self.after_id = None
         self.arrival_gate = None
         self.cell_editor = None
+        self.render_revision = 0
         self.camera_popout = None
         self.recording = None
-        self.recording_fps_var = tk.StringVar(value='15')
+        self.recording_fps_var = tk.StringVar(value='5')
         self.arrival_tolerance_var = tk.StringVar(value="1")
         self.arrival_hold_var = tk.StringVar(value="0.5")
         self.tracking_tracker = None
@@ -65,6 +66,18 @@ class CommandTab:
         self.show_path_var = tk.BooleanVar(value=False)
         self.show_roi_var = tk.BooleanVar(value=False)
         self.show_trails_var = tk.BooleanVar(value=False)
+        camera_view_bar = tk.Frame(parent, background='#edf4ff')
+        camera_view_bar.pack(fill='x', padx=8, pady=(6, 2))
+        tk.Label(camera_view_bar, text='Camera view', background='#edf4ff', foreground='#173c68',
+                 font=('Segoe UI', 10, 'bold')).pack(side='left', padx=8)
+        self.popout_button = tk.Button(camera_view_bar, text='Pop-out camera', command=self.open_camera_popout,
+                                       background='#195da8', foreground='white', activebackground='#12477e',
+                                       activeforeground='white', font=('Segoe UI', 10, 'bold'), padx=12)
+        self.popout_button.pack(side='left', padx=8, pady=4)
+        tk.Label(camera_view_bar, text='Live processing FPS', background='#edf4ff', foreground='#173c68').pack(side='left')
+        tk.Spinbox(camera_view_bar, from_=1, to=15, textvariable=self.calibration.live_fps_var, width=3).pack(side='left', padx=4)
+        tk.Label(camera_view_bar, text='Opens the larger camera window; all controls remain here.',
+                 background='#edf4ff', foreground='#173c68').pack(side='left', padx=4)
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
         self.load_button = tk.Button(bar, text="Load XY sequence", command=self.load_sequence)
@@ -72,7 +85,6 @@ class CommandTab:
         tk.Button(bar, text="Export XY sequence", command=self.export_sequence).pack(side="left", padx=3)
         self.calibration_button = tk.Button(bar, text="Use current calibration", command=lambda: self.refresh_calibration(reset_tracking=True))
         self.calibration_button.pack(side="left", padx=3)
-        tk.Button(bar, text='Pop-out camera', command=self.open_camera_popout).pack(side='left', padx=3)
         actions = tk.Frame(parent)
         actions.pack(fill="x", padx=8, pady=3)
         self.show_button = tk.Button(actions, text="Show all points", command=self.show_points)
@@ -302,8 +314,6 @@ class CommandTab:
             self.status.config(text=f'Point edit rejected: {error}')
 
     def current_setup(self):
-        if self.calibration.capture is not None:
-            raise ValueError("Select Live camera in Calibration before using it for commands.")
         setup = json.loads(json.dumps(self.calibration.setup_data()))
         if not setup.get("control_case"):
             raise ValueError("Select the hardware case in Calibration first.")
@@ -607,6 +617,7 @@ class CommandTab:
             actions=(('Show all points', self.show_points, None),
                      ('Next point', self.next_point, self.next_button),
                      ('Stop', self.stop, self.stop_button)),
+            render_version=lambda: (self.render_revision, self.frame_received_at),
             status=lambda: f"{self.status.cget('text')}  {self.tracking_status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
@@ -773,6 +784,8 @@ class CommandTab:
             self.after_id = self.parent.after(50, self.poll)
 
     def render(self, canvas=None):
+        if canvas is None:
+            self.render_revision = getattr(self, 'render_revision', 0) + 1
         main_view = canvas is None
         canvas = self.canvas if main_view else canvas
         canvas.delete("all")

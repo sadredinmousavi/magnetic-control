@@ -36,7 +36,7 @@ def default_setup_name():
 
 
 class MovingROICalibration:
-    """Frame-by-frame tracking shared by live preview and movie playback."""
+    """Frame-by-frame moving-ROI tracking for live camera previews."""
 
     def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area, axis_samples=None,
                  contrast_threshold=10, strict_single=False, limit_to_pins=True):
@@ -123,8 +123,9 @@ class MovingROICalibration:
 
 
 class CalibrationTab:
-    def __init__(self, parent, axis_move=None, axis_prepare=None):
+    def __init__(self, parent, axis_move=None, axis_prepare=None, *, visible=lambda: True):
         self.parent = parent
+        self.visible = visible
         self.frame = None
         self.corners = []
         self.circle = None
@@ -132,15 +133,10 @@ class CalibrationTab:
         self.transform = None
         self.tracker = None
         self.detections = []
-        self.capture = None
         self.frame_number = 0
-        self.fps = 30.0
-        self.playing = False
-        self.frozen = False
+        self.render_revision = 0
         self.rows = []
         self.live_started = None
-        self.after_id = None
-        self.source = "Live Pi camera"
         self.detector = RobotDetector()
         self.axis_move = axis_move
         self.axis_prepare = axis_prepare
@@ -163,15 +159,25 @@ class CalibrationTab:
         self.camera_popout = None
         self.command_running = False
 
+        camera_view_bar = tk.Frame(parent, background='#edf4ff')
+        camera_view_bar.pack(fill='x', padx=8, pady=(6, 2))
+        tk.Label(camera_view_bar, text='Camera view', background='#edf4ff', foreground='#173c68',
+                 font=('Segoe UI', 10, 'bold')).pack(side='left', padx=8)
+        self.popout_button = tk.Button(camera_view_bar, text='Pop-out camera', command=self.open_camera_popout,
+                                       background='#195da8', foreground='white', activebackground='#12477e',
+                                       activeforeground='white', font=('Segoe UI', 10, 'bold'), padx=12)
+        self.popout_button.pack(side='left', padx=8, pady=4)
+        self.live_fps_var = tk.StringVar(value='5')
+        tk.Label(camera_view_bar, text='Live processing FPS', background='#edf4ff', foreground='#173c68').pack(side='left')
+        tk.Spinbox(camera_view_bar, from_=1, to=15, textvariable=self.live_fps_var, width=3).pack(side='left', padx=4)
+        tk.Label(camera_view_bar, text='Opens the larger camera window; all controls remain here.',
+                 background='#edf4ff', foreground='#173c68').pack(side='left', padx=4)
         self.step_labels = self.build_step_status(parent)
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
         for label, command in (
-            ("Live camera", self.use_live), ("Open movie", self.open_movie),
-            ("Play / Pause", self.toggle_play), ("First frame", self.rewind),
             ("Save setup", self.save_setup), ("Load setup", self.load_setup),
             ("Export XY CSV", self.export_csv),
-            ("Pop-out camera", self.open_camera_popout),
         ):
             tk.Button(bar, text=label, command=command).pack(side="left", padx=2)
         settings = tk.Frame(parent)
@@ -211,7 +217,6 @@ class CalibrationTab:
             ttk.Radiobutton(tools, text=label, value=value, variable=self.mode,
                             command=self.clear_pin_roi).pack(side="left", padx=4)
         tk.Button(tools, text="Clear points", command=self.clear_points).pack(side="left", padx=4)
-        tk.Button(tools, text="Freeze / Resume live", command=self.freeze_live).pack(side="left", padx=4)
         tk.Button(tools, text="Start tracking", command=self.start_tracking).pack(side="left", padx=4)
         tk.Button(tools, text="Stop tracking", command=self.stop_tracking).pack(side="left", padx=4)
         pin_tools = tk.Frame(parent)
@@ -263,7 +268,7 @@ class CalibrationTab:
             "Select four corner dots, enter their rectangle size, then place a circular ROI around all robots. "
             "Dark contrast detection only. Calibrate robot axes below to replace the default image-aligned XY."
         ), wraplength=1000).pack(fill="x", padx=10)
-        self.status = tk.Label(parent, text="Waiting for a live camera frame or movie.", anchor="w",
+        self.status = tk.Label(parent, text="Waiting for a live camera frame.", anchor="w",
                                background='#edf4ff', foreground='#173c68', padx=6, pady=4)
         self.status.pack(fill="x", padx=10, pady=4)
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
@@ -368,8 +373,6 @@ class CalibrationTab:
         try:
             if getattr(self, 'axis_prepare', None) is not None and self.prepared_case != self.control_case_var.get():
                 raise ValueError('Press Prepare axis moves beside the selected hardware case first.')
-            if self.capture is not None:
-                raise ValueError("Axis movement requires the live Pi camera.")
             if self.frame is None or self.circle is None or len(self.corners) != 4:
                 raise ValueError("Select four corners and place an ROI around the single robot first.")
             if int(self.count_var.get()) != 1:
@@ -403,7 +406,6 @@ class CalibrationTab:
         self.axis_job += 1
         job = self.axis_job
         case = self.control_case_var.get()
-        self.frozen = False
         for button in self.axis_buttons:
             button.config(state="disabled")
         target = AXIS_TARGETS_M[name]
@@ -454,8 +456,6 @@ class CalibrationTab:
     def record_axis_from_roi(self):
         if self.axis_busy or not self.axis_pending:
             raise ValueError("Move to a calibration position first and wait for the command to finish.")
-        if self.capture is not None or self.frozen:
-            raise ValueError("Capture needs the running live camera, not a movie or frozen frame.")
         received = self.frame_received_at
         if self.frame is None or received is None or time.monotonic() - received > 2:
             raise ValueError("No fresh live frame. Check the camera connection and try again.")
@@ -527,52 +527,8 @@ class CalibrationTab:
             "Axis tracking: robot lost; ROI held at the last position. Capture is blocked until it is found again."
         ))
 
-    def close_capture(self):
-        self.playing = False
-        self.axis_tracker = None
-        self.axis_detections = []
-        self.axis_processed_at = None
-        if self.after_id is not None:
-            self.parent.after_cancel(self.after_id)
-            self.after_id = None
-        if self.capture is not None:
-            self.capture.release()
-            self.capture = None
-
-    def use_live(self):
-        if self.axis_busy or self.axis_pending:
-            self.reset_axes()
-        self.close_capture()
-        self.source = "Live Pi camera"
-        self.frozen = False
-        self.clear_tracking()
-        self.status.config(text="Live camera selected. Connect the Pi in Connections.")
-
-    def open_movie(self):
-        path = filedialog.askopenfilename(title="Calibration movie", filetypes=[
-            ("Movies", "*.mp4 *.avi *.mov *.mkv *.m4v"), ("All files", "*.*")])
-        if not path:
-            return
-        capture = cv2.VideoCapture(path)
-        ok, frame = capture.read()
-        if not ok:
-            capture.release()
-            messagebox.showerror("Movie", "Could not read the first movie frame.")
-            return
-        self.close_capture()
-        self.capture, self.source = capture, path
-        if self.axis_busy or self.axis_pending:
-            self.reset_axes()
-        fps = capture.get(cv2.CAP_PROP_FPS)
-        self.fps = fps if np.isfinite(fps) and fps > 0 else 30.0
-        self.frame_number = 0
-        self.clear_tracking()
-        self.accept_frame(frame)
-        self.status.config(text="Movie frame 0. Select four dots and place the ROI, then Start tracking.")
-
     def accept_live_frame(self, frame):
-        if self.capture is None and not self.frozen:
-            self.accept_frame(frame)
+        self.accept_frame(frame)
 
     def accept_frame(self, frame):
         if self.frame is not None and self.frame.shape[:2] != frame.shape[:2]:
@@ -594,8 +550,7 @@ class CalibrationTab:
             try:
                 self.tracker.contrast_threshold = self.read_contrast_threshold()
                 self.detections, center, xy = self.tracker.process(frame)
-                elapsed = (self.frame_number / self.fps if self.capture is not None
-                           else time.monotonic() - self.live_started)
+                elapsed = time.monotonic() - self.live_started
                 valid = center is not None
                 for item in self.detections or [None]:
                     self.rows.append([
@@ -616,50 +571,7 @@ class CalibrationTab:
                 self.stop_tracking()
                 self.status.config(text=f"Tracking stopped: {error}")
         self.render()
-        if self.capture is None:
-            self.frame_number += 1
-
-    def toggle_play(self):
-        if self.capture is None:
-            return
-        self.playing = not self.playing
-        if self.playing and self.after_id is None:
-            self.movie_tick()
-
-    def movie_tick(self):
-        self.after_id = None
-        if not self.playing or self.capture is None:
-            return
-        started = time.monotonic()
-        ok, frame = self.capture.read()
-        if not ok:
-            self.playing = False
-            self.status.config(text="Movie complete. Export XY CSV to save the tracked coordinates.")
-            return
         self.frame_number += 1
-        self.accept_frame(frame)
-        delay = max(1, round(1000 * (1 / self.fps - (time.monotonic() - started))))
-        self.after_id = self.parent.after(delay, self.movie_tick)
-
-    def rewind(self):
-        if self.capture is None:
-            return
-        self.playing = False
-        self.clear_tracking()
-        self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        ok, frame = self.capture.read()
-        if ok:
-            self.frame_number = 0
-            self.accept_frame(frame)
-            self.status.config(text="First frame. Place ROI on the initial robots, then Start tracking.")
-
-    def freeze_live(self):
-        if self.axis_busy or self.axis_pending:
-            self.axis_status.config(text="Keep the live preview running until the robot measurement is recorded.")
-            return
-        if self.capture is None:
-            self.frozen = not self.frozen
-            self.status.config(text="Live frame frozen for setup." if self.frozen else "Live preview resumed.")
 
     def open_camera_popout(self):
         if self.camera_popout is not None and self.camera_popout.is_open:
@@ -675,11 +587,11 @@ class CalibrationTab:
                      ('Reset axes', self.reset_axes, None),
                      ('Clear pins', self.clear_points, None),
                      ('Track', self.start_tracking, None),
-                     ('Stop track', self.stop_tracking, None),
-                     ('Freeze', self.freeze_live, None)),
+                     ('Stop track', self.stop_tracking, None)),
             toolbar_builder=self.build_popout_tools, mirror_action_text=False,
             controls_enabled=lambda: not self.command_running,
             status_builder=self.build_step_status, status_refresh=self.refresh_step_status,
+            render_version=lambda: self.render_revision,
             status=lambda: f"{self.capture_explanation()}  |  {self.axis_status.cget('text')}  |  {self.status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
@@ -701,6 +613,8 @@ class CalibrationTab:
         for label, variable in (('Pin r', self.pin_radius_var), ('ROI r', self.radius_var)):
             tk.Label(bar, text=label).pack(side='left', padx=(3, 1))
             tk.Entry(bar, textvariable=variable, width=4).pack(side='left')
+        tk.Label(bar, text='FPS').pack(side='left', padx=(3, 1))
+        tk.Spinbox(bar, from_=1, to=15, textvariable=self.live_fps_var, width=3).pack(side='left')
 
     def build_step_status(self, parent):
         row = tk.Frame(parent)
@@ -771,8 +685,6 @@ class CalibrationTab:
         if self.axis_pending is not None:
             self.axis_status.config(text="Use Capture settled robot, not a mouse click. Enlarge ROI radius if needed, or Reset axes to reposition the ROI.")
             return
-        self.playing = False
-        self.frozen = True
         try:
             if self.mode.get() == "Corners":
                 if len(self.corners) == 4:
@@ -881,7 +793,7 @@ class CalibrationTab:
 
     def start_tracking(self):
         if self.frame is None:
-            messagebox.showerror("Calibration", "Connect the camera or open a movie first.")
+            messagebox.showerror("Calibration", "Connect the live camera first.")
             return
         try:
             if self.axis_busy or self.axis_pending or 0 < len(self.axis_samples) < 3:
@@ -911,21 +823,17 @@ class CalibrationTab:
         self.axis_detections = []
         self.axis_processed_at = None
         self.live_started = time.monotonic()
-        self.frozen = False
         self.accept_frame(self.frame)
-        if self.capture is not None:
-            self.playing = True
-            if self.after_id is None:
-                self.movie_tick()
 
     def stop_tracking(self):
-        self.playing = False
         if self.tracker is not None:
             self.circle = (*self.tracker.center, self.tracker.radius)
         self.tracker = None
         self.status.config(text="Tracking stopped. Coordinates remain available for export.")
 
     def render(self, canvas=None):
+        if canvas is None:
+            self.render_revision = getattr(self, 'render_revision', 0) + 1
         if hasattr(self, 'step_labels'):
             self.refresh_step_status(self.step_labels)
         if hasattr(self, 'capture_hint'):
@@ -933,6 +841,8 @@ class CalibrationTab:
             self.capture_hint.config(text=self.capture_explanation(),
                                      background='#e4f5e9' if ready else '#fff4d6',
                                      foreground='#176637' if ready else '#855300')
+        if canvas is None and not getattr(self, 'visible', lambda: True)():
+            return
         main_view = canvas is None
         canvas = self.canvas if main_view else canvas
         if self.frame is None:
@@ -964,14 +874,19 @@ class CalibrationTab:
                 workspace = workspace_detection_mask(self.frame.shape[:2], self.corners)
                 mask = workspace if mask is None else cv2.bitwise_and(mask, workspace)
             try:
-                _, candidates = self.detector.process(
-                    self.frame, mode="Color blobs", color="Dark contrast",
-                    minimum_area=float(self.area_var.get()), morphology_kernel_size=1,
-                    draw_annotations=False, detection_mask=mask,
-                    dark_contrast_threshold=self.read_contrast_threshold(),
-                )
-                candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
-                annotated = cv2.cvtColor(self.detector.last_blob_mask, cv2.COLOR_GRAY2BGR)
+                key = (self.frame_received_at, tuple(circle) if circle is not None else None,
+                       tuple(map(tuple, self.corners)), float(self.area_var.get()), self.read_contrast_threshold())
+                if getattr(self, 'mask_preview_key', None) != key:
+                    _, candidates = self.detector.process(
+                        self.frame, mode="Color blobs", color="Dark contrast",
+                        minimum_area=key[3], morphology_kernel_size=1,
+                        draw_annotations=False, detection_mask=mask, dark_contrast_threshold=key[4],
+                    )
+                    candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
+                    self.mask_preview = (self.detector.last_blob_mask.copy(), candidates)
+                    self.mask_preview_key = key
+                binary_mask, candidates = self.mask_preview
+                annotated = cv2.cvtColor(binary_mask, cv2.COLOR_GRAY2BGR)
                 for item in candidates:
                     marker(item["center"], (0, 180, 255))
                 self.detection_info.config(text=f"{len(candidates)} eligible blobs; white = contrast pixels")
@@ -1066,7 +981,7 @@ class CalibrationTab:
 
     def load_setup(self):
         if self.frame is None:
-            messagebox.showerror("Calibration", "Select a live frame or movie first.")
+            messagebox.showerror("Calibration", "Wait for a live camera frame first.")
             return
         SETUP_DIR.mkdir(parents=True, exist_ok=True)
         path = filedialog.askopenfilename(
@@ -1140,4 +1055,7 @@ class CalibrationTab:
         if self.axis_after is not None:
             self.parent.after_cancel(self.axis_after)
             self.axis_after = None
-        self.close_capture()
+        self.axis_tracker = None
+        self.axis_detections = []
+        self.axis_processed_at = None
+        self.clear_tracking()

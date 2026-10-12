@@ -52,7 +52,6 @@ class RobotAxisTests(unittest.TestCase):
         app.status, app.axis_status, app.render = Mock(), Mock(), Mock()
         app.axis_samples = {"Origin": [100, 100], "+X": [100, 80], "+Y": [98, 100]}
         app.axis_pending, app.axis_busy, app.axis_job = None, False, 0
-        app.capture, app.frozen = None, False
         app.frame_received_at = time.monotonic()
         app.axis_ready_at = app.frame_received_at - .1
         app.axis_capture_button = Mock()
@@ -208,7 +207,7 @@ class RobotAxisTests(unittest.TestCase):
         self.assertIn("ambiguous", tracker.selection_error)
         self.assertEqual(tuple(tracker.center), (100, 100))
 
-    def test_roi_capture_rejects_stale_frozen_unmoved_and_uncommanded_frames(self):
+    def test_roi_capture_rejects_stale_unmoved_and_uncommanded_frames(self):
         app = self.app()
         app.detector = RobotDetector()
         app.axis_pending = "Origin"
@@ -220,10 +219,6 @@ class RobotAxisTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "new camera frame"):
             app.record_axis_from_roi()
         app.axis_ready_at = app.frame_received_at - .1
-        app.frozen = True
-        with self.assertRaisesRegex(ValueError, "running live camera"):
-            app.record_axis_from_roi()
-        app.frozen = False
         app.axis_pending = "+X"
         cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
         original = dict(app.axis_samples)

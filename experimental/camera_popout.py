@@ -6,7 +6,7 @@ import tkinter as tk
 class CameraPopout:
     def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
                  toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True,
-                 status_builder=None, status_refresh=None):
+                 status_builder=None, status_refresh=None, render_version=None):
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry('1100x780')
@@ -14,6 +14,8 @@ class CameraPopout:
         self.render, self.status = render, status
         self.mirror_action_text, self.controls_enabled = mirror_action_text, controls_enabled
         self.status_refresh = status_refresh
+        self.render_version = render_version
+        self.last_render_key = None
         self.after_id = None
         self.closed = False
         bar = tk.Frame(self.window)
@@ -62,7 +64,11 @@ class CameraPopout:
     def refresh(self):
         if self.closed:
             return
-        self.render(self.canvas)
+        key = None if self.render_version is None else (
+            self.render_version(), self.canvas.winfo_width(), self.canvas.winfo_height())
+        if key is None or key != self.last_render_key:
+            self.render(self.canvas)
+            self.last_render_key = key
         if self.status_refresh is not None:
             self.status_refresh(self.status_widgets)
         self.status_label.config(text=self.status(), wraplength=max(400, self.window.winfo_width() - 16))
@@ -72,7 +78,7 @@ class CameraPopout:
             if source is not None and self.mirror_action_text:
                 button.config(text=source.cget('text'))
         for widget in self.extra_controls.winfo_children():
-            if widget.winfo_class() in ('Entry', 'Checkbutton', 'Radiobutton', 'Button'):
+            if widget.winfo_class() in ('Entry', 'Spinbox', 'Checkbutton', 'Radiobutton', 'Button'):
                 widget.config(state='normal' if self.controls_enabled() else 'disabled')
 
     def tick(self):
