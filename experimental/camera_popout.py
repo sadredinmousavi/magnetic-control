@@ -6,7 +6,7 @@ import tkinter as tk
 class CameraPopout:
     def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
                  toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True,
-                 status_builder=None, status_refresh=None, render_version=None):
+                 status_builder=None, status_refresh=None, render_version=None, on_close=None):
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry('1100x780')
@@ -15,6 +15,7 @@ class CameraPopout:
         self.mirror_action_text, self.controls_enabled = mirror_action_text, controls_enabled
         self.status_refresh = status_refresh
         self.render_version = render_version
+        self.on_close = on_close
         self.last_render_key = None
         self.after_id = None
         self.closed = False
@@ -96,3 +97,5 @@ class CameraPopout:
             self.window.after_cancel(self.after_id)
             self.after_id = None
         self.window.destroy()
+        if self.on_close is not None:
+            self.on_close()

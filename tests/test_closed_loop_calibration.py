@@ -10,9 +10,53 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
 from closed_loop_calibration import CalibrationTab, MovingROICalibration
+from robot_vision import RobotDetector
+from gui004 import circle_detection_mask, workspace_detection_mask
 
 
 class MovingROICalibrationTests(unittest.TestCase):
+    def test_unannotated_detector_does_not_copy_or_modify_source(self):
+        frame = self.frame([(80, 100)])
+        original = frame.copy()
+        output, detections = RobotDetector().process(frame, mode='Color blobs', color='Dark contrast',
+            minimum_area=1, morphology_kernel_size=1, draw_annotations=False, dark_contrast_threshold=10)
+        self.assertIs(output, frame)
+        self.assertTrue(detections)
+        np.testing.assert_array_equal(frame, original)
+
+    def test_hidden_idle_axis_tracker_skips_detection_but_keeps_latest_frame(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.frame = None
+        app.visible = lambda: False
+        app.axis_busy, app.axis_pending = False, None
+        app.axis_tracker, app.update_axis_tracking = Mock(), Mock()
+        app.tracker, app.render, app.frame_number = None, Mock(), 0
+        frame = self.frame([])
+        app.accept_live_frame(frame)
+        app.update_axis_tracking.assert_not_called()
+        self.assertIs(app.frame, frame)
+        app.axis_pending = 'Origin'
+        app.accept_live_frame(frame)
+        app.update_axis_tracking.assert_called_once()
+
+    def test_native_roi_detection_matches_full_frame_including_edges_and_coordinates(self):
+        rng = np.random.default_rng(123)
+        frame = np.clip(210 + rng.normal(0, 3, (700, 900, 3)), 0, 255).astype(np.uint8)
+        for point in ((450, 350), (529, 350), (373, 350), (450, 272), (20, 20), (3, 80)):
+            cv2.circle(frame, point, 3, (20, 20, 20), -1)
+        corners = [(10.5, 10.5), (850.5, 40.5), (840.5, 650.5), (20.5, 660.5)]
+        for circle in ((450.25, 350.25, 80), (30, 40, 60), (850, 630, 80)):
+            for limit_to_pins in (True, False):
+                tracker = MovingROICalibration(corners, 10, 10, circle, 1, 1, limit_to_pins=limit_to_pins)
+                mask = circle_detection_mask(frame.shape[:2], circle)
+                if limit_to_pins:
+                    mask = cv2.bitwise_and(mask, workspace_detection_mask(frame.shape[:2], corners))
+                _, expected = RobotDetector().process(frame, mode='Color blobs', color='Dark contrast',
+                    minimum_area=1, morphology_kernel_size=1, draw_annotations=False,
+                    detection_mask=mask, dark_contrast_threshold=10)
+                actual = tracker.detect_candidates(frame)
+                self.assertEqual(actual, expected)
+
     def tracker(self):
         return MovingROICalibration(
             [(10, 10), (190, 10), (190, 190), (10, 190)],

@@ -48,7 +48,9 @@ class RobotDetector:
         dark_contrast_threshold=30,
     ):
         """Return an annotated BGR frame and a list of detected robots."""
-        annotated = frame_bgr.copy()
+        # Pure blob detection never edits the source when annotations are off.
+        # ArUco paths keep their private buffer for whitening outside the mask.
+        annotated = frame_bgr if not draw_annotations and mode in ('Off', 'Color blobs') else frame_bgr.copy()
         detections = []
 
         if mode in ("Color blobs", "Color + ArUco"):

@@ -83,7 +83,7 @@ class ClosedLoopGUI(BaseServoGUI):
                       if notebook.select() == str(command_tab) else None)
         self.build_future_tabs(notebook)
 
-    def move_axis_target(self, target, case_name, settle, active):
+    def move_axis_target(self, target, case_name, active):
         """Calibration policy; reusable synthesis/motion lives in PointCommander."""
         if not active():
             return
@@ -91,7 +91,7 @@ class ClosedLoopGUI(BaseServoGUI):
             raise RuntimeError("Connect the live Pi camera before axis calibration.")
         result = self.point_commander.move_prepared_axis(
             case_name, target,
-            settle_seconds=settle, active=active,
+            settle_seconds=0, active=active,
         )
         if result is not None:
             angles = ", ".join(f"{angle:.2f}" for angle in result["angles_deg"])
@@ -394,7 +394,9 @@ class ClosedLoopGUI(BaseServoGUI):
         except queue.Empty:
             pass
         if latest_frame is not None:
-            if getattr(self, 'connection_visible', lambda: True)():
+            popout_open = any(getattr(tab, 'camera_popout', None) is not None and tab.camera_popout.is_open
+                              for tab in (self.calibration, self.commands))
+            if getattr(self, 'connection_visible', lambda: True)() and not popout_open:
                 self.show_camera_frame(latest_frame)
             self.calibration.accept_live_frame(latest_frame)
             self.commands.accept_live_frame(latest_frame)

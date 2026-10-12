@@ -131,7 +131,6 @@ class RobotAxisTests(unittest.TestCase):
         app = self.app()
         app.axis_tracker = None
         app.axis_after = None
-        app.axis_wait_var = Mock(get=Mock(return_value="3"))
         app.axis_move = Mock()
         app.parent = Mock()
         cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
@@ -149,7 +148,6 @@ class RobotAxisTests(unittest.TestCase):
             app.axis_samples = {}
             app.axis_tracker, app.axis_after = None, None
             app.axis_pending = 'Origin'  # An uncaptured prior command may be replaced.
-            app.axis_wait_var = Mock(get=Mock(return_value='3'))
             app.axis_move, app.parent = Mock(), Mock()
             cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
             with patch('closed_loop_calibration.threading.Thread') as thread:
@@ -163,7 +161,6 @@ class RobotAxisTests(unittest.TestCase):
         app = self.app()
         samples = dict(app.axis_samples)
         app.axis_tracker, app.axis_after = None, None
-        app.axis_wait_var = Mock(get=Mock(return_value='3'))
         app.axis_move, app.parent = Mock(), Mock()
         cv2.circle(app.frame, (100, 100), 3, (20, 20, 20), -1)
         with patch('closed_loop_calibration.threading.Thread'):
@@ -295,7 +292,7 @@ class RobotAxisTests(unittest.TestCase):
             CalibrationTab.render(app)
         widths = [call.kwargs["thickness"] for call in circles.call_args_list]
         self.assertTrue(widths)
-        self.assertEqual(set(widths), {2})
+        self.assertEqual(set(widths), {1})
         self.assertTrue(all(call.kwargs['color'] != (0, 0, 0) for call in circles.call_args_list))
 
     def test_pin_roi_finds_exact_centers_and_orders_four_points(self):
@@ -384,13 +381,13 @@ class RobotAxisTests(unittest.TestCase):
         app.ssh_camera = Mock(is_running=True)
         active = lambda: True
         for target in AXIS_TARGETS_M.values():
-            app.move_axis_target(target, "case_100.cond_016_calibration_cartesian", 3, active)
+            app.move_axis_target(target, "case_100.cond_016_calibration_cartesian", active)
             app.point_commander.move_prepared_axis.assert_called_with(
                 "case_100.cond_016_calibration_cartesian", target,
-                settle_seconds=3, active=active,
+                settle_seconds=0, active=active,
             )
         app.point_commander.move_prepared_axis.reset_mock()
-        app.move_axis_target((.01, 0), "case_100.cond_016_calibration_cartesian", 0, lambda: False)
+        app.move_axis_target((.01, 0), "case_100.cond_016_calibration_cartesian", lambda: False)
         app.point_commander.move_prepared_axis.assert_not_called()
 
 

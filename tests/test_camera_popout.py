@@ -73,7 +73,7 @@ class CameraPopoutTests(unittest.TestCase):
         self.assertEqual(labels[0].config.call_args.kwargs['foreground'], '#176637')
         self.assertEqual(labels[1].config.call_args.kwargs['foreground'], '#176637')
         app.axis_busy = True
-        self.assertIn('still running', app.capture_explanation())
+        self.assertIn('still being sent', app.capture_explanation())
         app.axis_busy, app.axis_pending = False, 'Origin'
         self.assertIn('Capture ready for Center', app.capture_explanation())
         app.command_running = True
@@ -149,6 +149,18 @@ class CameraPopoutTests(unittest.TestCase):
         app.table, app.select_point = Mock(), Mock()
         app.click_target(Mock(x=300, y=300), screen_points=popup_canvas.screen_points)
         app.table.selection_set.assert_called_once_with('1')
+
+    def test_embedded_views_do_not_draw_images_while_popout_is_open(self):
+        for cls in (CalibrationTab, CommandTab):
+            app = cls.__new__(cls)
+            app.canvas = canvas(300, 200)
+            app.camera_popout = Mock(is_open=True)
+            app.frame = np.full((400, 600, 3), 220, np.uint8)
+            with patch(f'{cls.__module__}.ImageTk.PhotoImage') as photo:
+                app.render()
+                photo.assert_not_called()
+            app.canvas.create_image.assert_not_called()
+            self.assertIn('pop-out', app.canvas.create_text.call_args.kwargs['text'])
 
 
 if __name__ == '__main__':

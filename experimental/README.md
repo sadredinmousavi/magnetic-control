@@ -16,20 +16,29 @@ Track / Stop track. These share the main page's state and settings.
 Calibration pop-out controls are locked during a Phase 3 run. Commands supports
 target selection and synchronized Next/Finish/Stop.
 Closing only the pop-out never stops tracking, recording or motor execution.
+While a pop-out is open its embedded camera preview stops drawing and displays
+a placeholder. Closing it immediately restores the embedded view. Tracking and
+recording keep running; the Connections preview also skips drawing while a
+pop-out is open. Tracking processes native-resolution pixels only around the
+moving ROI with a 32-pixel blur halo; detections are translated back to full-frame
+coordinates. Pin clipping, identity checks and physical XY mapping are unchanged.
 Closing GUI005 closes all camera windows and finalizes any recording.
 Press Prepare axis moves beside Hardware case (or Prepare in the pop-out) once.
 It computes Center/+X/+Y poses in the background without connecting or moving
 motors. Afterwards these moves reuse the prepared ratio-1 poses; Phase 3 continues
 to synthesize its own per-point settings freshly. Changing the selected case or
-its hardware model requires preparation again. The settle time still applies.
+its hardware model requires preparation again. Calibration has no settle-time
+input or timed delay: Capture enables after the command is sent. Visually wait
+until the robot settles, then press Capture; sending a command does not prove
+the motors or robot have reached their positions. Fresh-frame checks still apply.
 Moves can be repeated in any order once the current move finishes; a new move
 replaces an uncaptured pending position without silently saving it. For axes,
 capture Center first, then +X/+Y. Capturing a new Center resets dependent X/Y
 samples, but merely testing a Center move does not erase saved axes.
 Calibration defaults to one robot. Both views show color-coded steps: 1. 4 pins,
 2. ROI and robot, 3. Axis (green completed, blue active, gray waiting). Capture
-is initially disabled; move to Center/+X/+Y and finish the command's settle wait
-first. It enables for the pending position, then disables after a successful
+is initially disabled; send a Center/+X/+Y command first.
+It enables for the pending position, then disables after a successful
 capture. The status hint explains waiting, ready, completed or Phase 3 lock states.
 
 Calibration is live-camera only: connect the Pi camera in Connections. Movie
@@ -40,6 +49,12 @@ queue and processes only the latest image. It preserves full resolution and
 does not change the Pi's capture FPS. Hidden previews skip drawing, unchanged
 pop-out images skip redraws, and both Calibration views share detection-mask
 preview results. Tracking/capture still operate on current frames.
+Calibration resizes its preview first, then draws thin overlays only at display
+resolution. Native detection and exported videos are unaffected. Pure detection
+and the two tabs share read-only camera buffers instead of copying full frames.
+Automatic axis tracking skips hidden idle views, but always runs for a pending
+move/capture or open Calibration pop-out. Explicitly started tracking and CSV
+logging are retained, including when changing tabs.
 Complete Center/+X/+Y calibration (or load a matching setup from `experimental/setups`)
 and select the hardware case in Calibration.
 In Commands, load a file from `experimental/xy_sequences`:

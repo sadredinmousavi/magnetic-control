@@ -54,6 +54,7 @@ class MovingROICalibration:
         self.references = []
         self.strict_single = strict_single
         self.limit_to_pins = limit_to_pins
+        self.workspace_mask = None
         self.selection_error = None
         self.detector = RobotDetector()
         self.axes = RobotAxes(corners, width_cm, height_cm, axis_samples) if axis_samples else None
@@ -68,16 +69,40 @@ class MovingROICalibration:
             [{"center": point} for point in points], self.corners, self.width_cm, self.height_cm,
         )
 
-    def process(self, frame):
-        mask = circle_detection_mask(frame.shape[:2], (*self.center, self.radius))
+    def detect_candidates(self, frame):
+        # Keep native pixels, but blur/label only the ROI neighbourhood. The
+        # halo preserves the sigma-5 background estimate at the ROI boundary.
+        h, w = frame.shape[:2]
+        halo = 32
+        x0 = max(0, min(w, int(np.floor(self.center[0] - self.radius)) - halo))
+        y0 = max(0, min(h, int(np.floor(self.center[1] - self.radius)) - halo))
+        x1 = max(0, min(w, int(np.ceil(self.center[0] + self.radius)) + halo + 1))
+        y1 = max(0, min(h, int(np.ceil(self.center[1] + self.radius)) + halo + 1))
+        if x1 <= x0 or y1 <= y0:
+            return []
+        crop = frame[y0:y1, x0:x1]
+        offset = np.array([x0, y0])
+        mask = circle_detection_mask(crop.shape[:2], (*(self.center - offset), self.radius))
         if self.limit_to_pins:
-            mask = cv2.bitwise_and(mask, workspace_detection_mask(frame.shape[:2], self.corners))
+            # Rasterize once in full-frame coordinates so fractional corners
+            # and slanted pin boundaries exactly match the original mask.
+            if self.workspace_mask is None or self.workspace_mask.shape != frame.shape[:2]:
+                self.workspace_mask = workspace_detection_mask(frame.shape[:2], self.corners)
+            mask = cv2.bitwise_and(mask, self.workspace_mask[y0:y1, x0:x1])
         _, candidates = self.detector.process(
-            frame, mode="Color blobs", color="Dark contrast",
+            crop, mode="Color blobs", color="Dark contrast",
             minimum_area=self.minimum_area, morphology_kernel_size=1,
             draw_annotations=False, detection_mask=mask,
             dark_contrast_threshold=self.contrast_threshold,
         )
+        for item in candidates:
+            item['center'] = (item['center'][0] + x0, item['center'][1] + y0)
+            x, y, width, height = item['bbox']
+            item['bbox'] = (x + x0, y + y0, width, height)
+        return candidates
+
+    def process(self, frame):
+        candidates = self.detect_candidates(frame)
         candidates, _ = exclude_calibration_markers(candidates, self.corners, 10)
         self.selection_error = None
         if self.references:
@@ -239,9 +264,6 @@ class CalibrationTab:
                      width=28, state="readonly").pack(side='left')
         self.prepare_button = tk.Button(case_row, text='Prepare axis moves', command=self.prepare_axis_moves)
         self.prepare_button.pack(side='left', padx=4)
-        self.axis_wait_var = tk.StringVar(value="3")
-        tk.Label(axes_bar, text="Settle (s)").grid(row=0, column=2)
-        tk.Entry(axes_bar, textvariable=self.axis_wait_var, width=4).grid(row=0, column=3)
         actions = tk.Frame(axes_bar)
         actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.axis_buttons = []
@@ -364,7 +386,7 @@ class CalibrationTab:
             self.axis_status.config(text='Case changed during preparation. Prepare the selected case again.')
         else:
             self.prepared_case = case
-            self.axis_status.config(text='Axis poses ready. Center/+X/+Y now send prepared angles without another optimization. The settle wait still applies.')
+            self.axis_status.config(text='Axis poses ready. Moves send prepared angles immediately; no timed settle wait. Capture manually when the robot has settled.')
         self.render()
 
     def move_axis(self, name):
@@ -379,9 +401,6 @@ class CalibrationTab:
                 raise ValueError("Set Robots to 1 for axis calibration.")
             if not self.control_case_var.get():
                 raise ValueError("Select the control case matching your hardware geometry first.")
-            wait = float(self.axis_wait_var.get())
-            if not np.isfinite(wait) or wait <= 0:
-                raise ValueError("Settle time must be positive.")
             if self.axis_move is None:
                 raise ValueError("Controller movement is unavailable.")
             calibrated_dwell_coordinates([], self.corners, float(self.width_var.get()), float(self.height_var.get()))
@@ -409,11 +428,11 @@ class CalibrationTab:
         for button in self.axis_buttons:
             button.config(state="disabled")
         target = AXIS_TARGETS_M[name]
-        self.axis_status.config(text=f"Sending {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1, then settling for {wait:g} s. Any uncaptured previous move is replaced.")
+        self.axis_status.config(text=f"Sending {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1. No timed delay; capture manually once the robot has settled. Any uncaptured previous move is replaced.")
 
         def worker():
             try:
-                self.axis_move(target, case, wait, lambda: self.axis_job == job)
+                self.axis_move(target, case, lambda: self.axis_job == job)
                 self.axis_events.put((job, name, None))
             except Exception as error:
                 self.axis_events.put((job, name, str(error)))
@@ -439,7 +458,7 @@ class CalibrationTab:
                     self.axis_pending = name
                     self.axis_ready_at = time.monotonic()
                     self.axis_capture_button.config(state="normal")
-                    self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} commanded. Capture the settled robot to save this position, or move again to test. Moving again replaces the pending capture; settling is not proven by the timer.")
+                    self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} command sent. Confirm visually that the robot has settled, then Capture to save this position. There is no automatic settle check or delay; moving again replaces the pending capture.")
         except queue.Empty:
             pass
         if self.axis_busy:
@@ -537,9 +556,12 @@ class CalibrationTab:
             self.reset_axes()
             self.clear_tracking()
             self.status.config(text="Frame size changed. Select four points and place the ROI again.")
-        self.frame = frame.copy()
+        self.frame = frame
         self.frame_received_at = time.monotonic()
-        if getattr(self, "axis_tracker", None) is not None and self.tracker is None:
+        popup = getattr(self, 'camera_popout', None)
+        axis_needed = (getattr(self, 'axis_busy', False) or getattr(self, 'axis_pending', None) or getattr(self, 'visible', lambda: True)()
+                       or (popup is not None and popup.is_open))
+        if getattr(self, "axis_tracker", None) is not None and self.tracker is None and axis_needed:
             try:
                 self.update_axis_tracking()
             except (ValueError, TypeError) as error:
@@ -592,6 +614,7 @@ class CalibrationTab:
             controls_enabled=lambda: not self.command_running,
             status_builder=self.build_step_status, status_refresh=self.refresh_step_status,
             render_version=lambda: self.render_revision,
+            on_close=self.render,
             status=lambda: f"{self.capture_explanation()}  |  {self.axis_status.cget('text')}  |  {self.status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
@@ -602,6 +625,7 @@ class CalibrationTab:
         self.camera_popout.window.update_idletasks()
         toolbar_width = self.camera_popout.extra_controls.master.winfo_reqwidth()
         self.camera_popout.window.minsize(max(480, toolbar_width + 10), 320)
+        self.render()
 
     def build_popout_tools(self, bar):
         # Shared variables keep both pages synchronized without extra setup dialogs.
@@ -650,7 +674,7 @@ class CalibrationTab:
         if getattr(self, 'command_running', False):
             return 'Capture locked: stop the Phase 3 run before changing calibration.'
         if self.axis_busy:
-            return 'Capture disabled: calculation / movement / settle wait is still running.'
+            return 'Capture disabled: the motor command is still being sent.'
         if getattr(self, 'axis_prepare_busy', False):
             return 'Preparing axis poses: no motors are moved. Wait until preparation finishes.'
         if self.axis_pending:
@@ -666,6 +690,9 @@ class CalibrationTab:
             self.camera_popout.refresh()
 
     def click(self, event, *, transform=None):
+        popup = getattr(self, 'camera_popout', None)
+        if transform is None and popup is not None and popup.is_open:
+            return
         if getattr(self, 'command_running', False):
             return
         transform = self.transform if transform is None else transform
@@ -708,6 +735,9 @@ class CalibrationTab:
             messagebox.showerror("Calibration", str(error))
 
     def move_pin_roi(self, event, *, transform=None):
+        popup = getattr(self, 'camera_popout', None)
+        if transform is None and popup is not None and popup.is_open:
+            return
         if getattr(self, 'command_running', False):
             return
         transform = self.transform if transform is None else transform
@@ -843,20 +873,44 @@ class CalibrationTab:
                                      foreground='#176637' if ready else '#855300')
         if canvas is None and not getattr(self, 'visible', lambda: True)():
             return
+        popup = getattr(self, 'camera_popout', None)
+        if canvas is None and popup is not None and popup.is_open:
+            self.canvas.delete('all')
+            self.canvas.create_text(max(1, self.canvas.winfo_width()) / 2, max(1, self.canvas.winfo_height()) / 2,
+                                    text='Camera is displayed in the pop-out window', fill='#c5d9ee')
+            return
         main_view = canvas is None
         canvas = self.canvas if main_view else canvas
         if self.frame is None:
             return
-        annotated = self.frame.copy()
-        h, w = annotated.shape[:2]
+        h, w = self.frame.shape[:2]
         cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
         scale = min(cw / w, ch / h)
+        dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
+        annotated = cv2.resize(self.frame, (dw, dh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+
+        def screen_point(point):
+            return tuple(np.rint(np.asarray(point) * scale).astype(int))
 
         def stroke(draw, *args, color, width=1, **kwargs):
-            # One screen-pixel colour stroke; no extra black halo obscuring the scene.
+            # Overlay only the display-sized buffer, never the full camera image.
+            args = list(args)
+            if draw == cv2.polylines:
+                args[0] = [np.rint(points * scale).astype(np.int32) for points in args[0]]
+            elif draw == cv2.putText:
+                args[1] = screen_point(args[1])
+                kwargs['fontScale'] *= scale
+            else:
+                args[0] = screen_point(args[0])
+                if draw == cv2.circle:
+                    args[1] = max(1, round(args[1] * scale))
+                elif draw == cv2.arrowedLine:
+                    args[1] = screen_point(args[1])
+                elif draw == cv2.drawMarker:
+                    kwargs['markerSize'] = max(2, round(kwargs['markerSize'] * scale))
             kwargs["line_type" if draw in (cv2.drawMarker, cv2.arrowedLine) else "lineType"] = cv2.LINE_AA
             draw(annotated, *args, color=color,
-                 thickness=max(1, round(width / scale)), **kwargs)
+                 thickness=max(1, round(width)), **kwargs)
 
         def marker(point, color):
             stroke(cv2.drawMarker, point, color=color, width=1,
@@ -886,7 +940,7 @@ class CalibrationTab:
                     self.mask_preview = (self.detector.last_blob_mask.copy(), candidates)
                     self.mask_preview_key = key
                 binary_mask, candidates = self.mask_preview
-                annotated = cv2.cvtColor(binary_mask, cv2.COLOR_GRAY2BGR)
+                annotated = cv2.cvtColor(cv2.resize(binary_mask, (dw, dh), interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR)
                 for item in candidates:
                     marker(item["center"], (0, 180, 255))
                 self.detection_info.config(text=f"{len(candidates)} eligible blobs; white = contrast pixels")
@@ -924,11 +978,10 @@ class CalibrationTab:
                     stroke(cv2.arrowedLine, origin, end, color=color, tipLength=.15)
                     stroke(cv2.circle, point, max(3, round(3 / scale)), color=color, width=1)
                     label(name, end, color)
-        dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
         canvas.camera_transform = ((cw - dw) / 2, (ch - dh) / 2, scale)
         if main_view:
             self.transform = canvas.camera_transform
-        image = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)).resize((dw, dh))
+        image = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
         canvas.camera_photo = ImageTk.PhotoImage(image)
         if main_view:
             self.photo = canvas.camera_photo

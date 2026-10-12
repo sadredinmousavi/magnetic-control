@@ -358,7 +358,7 @@ class CommandTab:
         self.render()
 
     def accept_live_frame(self, frame):
-        self.frame = frame.copy()
+        self.frame = frame
         self.frame_received_at = time.monotonic()
         if self.setup is not None and list(frame.shape[1::-1]) != self.setup["video_size_px"]:
             self.stop_event.set()
@@ -618,10 +618,12 @@ class CommandTab:
                      ('Next point', self.next_point, self.next_button),
                      ('Stop', self.stop, self.stop_button)),
             render_version=lambda: (self.render_revision, self.frame_received_at),
+            on_close=self.render,
             status=lambda: f"{self.status.cget('text')}  {self.tracking_status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
         canvas.bind('<Button-1>', lambda event: self.click_target(event, screen_points=getattr(canvas, 'screen_points', None)))
+        self.render()
 
     def click_target(self, event, *, screen_points=None):
         screen_points = getattr(self, 'screen_points', None) if screen_points is None else screen_points
@@ -786,6 +788,13 @@ class CommandTab:
     def render(self, canvas=None):
         if canvas is None:
             self.render_revision = getattr(self, 'render_revision', 0) + 1
+        popup = getattr(self, 'camera_popout', None)
+        if canvas is None and popup is not None and popup.is_open:
+            self.screen_points = None
+            self.canvas.delete('all')
+            self.canvas.create_text(max(1, self.canvas.winfo_width()) / 2, max(1, self.canvas.winfo_height()) / 2,
+                                    text='Camera is displayed in the pop-out window', fill='#c5d9ee')
+            return
         main_view = canvas is None
         canvas = self.canvas if main_view else canvas
         canvas.delete("all")
