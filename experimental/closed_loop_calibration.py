@@ -23,6 +23,7 @@ from gui004 import (
 from robot_vision import RobotDetector
 from axis_calibration import AXIS_TARGETS_M, AXIS_DISPLAY_NAMES, RobotAxes
 from point_control import hardware_case_name
+from camera_popout import CameraPopout
 
 
 SETUP_DIR = Path(__file__).resolve().parent / "setups"
@@ -153,6 +154,7 @@ class CalibrationTab:
         self.axis_tracker = None
         self.axis_detections = []
         self.axis_processed_at = None
+        self.camera_popout = None
 
         bar = tk.Frame(parent)
         bar.pack(fill="x", padx=8, pady=6)
@@ -161,6 +163,7 @@ class CalibrationTab:
             ("Play / Pause", self.toggle_play), ("First frame", self.rewind),
             ("Save setup", self.save_setup), ("Load setup", self.load_setup),
             ("Export XY CSV", self.export_csv),
+            ("Pop-out camera", self.open_camera_popout),
         ):
             tk.Button(bar, text=label, command=command).pack(side="left", padx=2)
         settings = tk.Frame(parent)
@@ -595,13 +598,29 @@ class CalibrationTab:
             self.frozen = not self.frozen
             self.status.config(text="Live frame frozen for setup." if self.frozen else "Live preview resumed.")
 
-    def click(self, event):
-        if self.frame is None or self.transform is None:
+    def open_camera_popout(self):
+        if self.camera_popout is not None and self.camera_popout.is_open:
+            self.camera_popout.show()
+            return
+        self.camera_popout = CameraPopout(
+            self.parent, 'GUI005 — Calibration camera', self.render,
+            actions=(('Capture settled robot', self.capture_axis, self.axis_capture_button),
+                     ('Freeze / Resume', self.freeze_live, None)),
+            status=lambda: f"{self.status.cget('text')}  {self.axis_status.cget('text')}",
+        )
+        canvas = self.camera_popout.canvas
+        canvas.bind('<Button-1>', lambda event: self.click(event, transform=getattr(canvas, 'camera_transform', None)))
+        canvas.bind('<Motion>', lambda event: self.move_pin_roi(event, transform=getattr(canvas, 'camera_transform', None)))
+        canvas.bind('<Leave>', self.clear_pin_roi)
+
+    def click(self, event, *, transform=None):
+        transform = self.transform if transform is None else transform
+        if self.frame is None or transform is None:
             return
         if self.tracker is not None:
             self.status.config(text="Stop tracking before changing the calibration or ROI.")
             return
-        ox, oy, scale = self.transform
+        ox, oy, scale = transform
         point = (round((event.x - ox) / scale), round((event.y - oy) / scale))
         h, w = self.frame.shape[:2]
         if not (0 <= point[0] < w and 0 <= point[1] < h):
@@ -636,12 +655,13 @@ class CalibrationTab:
             self.render()
             messagebox.showerror("Calibration", str(error))
 
-    def move_pin_roi(self, event):
-        if (self.frame is None or self.transform is None or self.mode.get() != "Corners"
+    def move_pin_roi(self, event, *, transform=None):
+        transform = self.transform if transform is None else transform
+        if (self.frame is None or transform is None or self.mode.get() != "Corners"
                 or self.tracker is not None or self.axis_busy or self.axis_pending
                 or (hasattr(self, "manual_pin_var") and self.manual_pin_var.get())):
             return
-        ox, oy, scale = self.transform
+        ox, oy, scale = transform
         point = (round((event.x - ox) / scale), round((event.y - oy) / scale))
         h, w = self.frame.shape[:2]
         if not (0 <= point[0] < w and 0 <= point[1] < h):
@@ -763,29 +783,29 @@ class CalibrationTab:
         self.tracker = None
         self.status.config(text="Tracking stopped. Coordinates remain available for export.")
 
-    def render(self):
+    def render(self, canvas=None):
+        main_view = canvas is None
+        canvas = self.canvas if main_view else canvas
         if self.frame is None:
             return
         annotated = self.frame.copy()
         h, w = annotated.shape[:2]
-        cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
+        cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
         scale = min(cw / w, ch / h)
 
         def stroke(draw, *args, color, width=1, **kwargs):
-            # Keep overlays readable in screen pixels even at native 5 MP.
+            # One screen-pixel colour stroke; no extra black halo obscuring the scene.
             kwargs["line_type" if draw in (cv2.drawMarker, cv2.arrowedLine) else "lineType"] = cv2.LINE_AA
-            draw(annotated, *args, color=(0, 0, 0),
-                 thickness=max(1, round((width + .5) / scale)), **kwargs)
             draw(annotated, *args, color=color,
                  thickness=max(1, round(width / scale)), **kwargs)
 
         def marker(point, color):
             stroke(cv2.drawMarker, point, color=color, width=1,
-                   markerType=cv2.MARKER_CROSS, markerSize=max(8, round(10 / scale)))
+                   markerType=cv2.MARKER_CROSS, markerSize=max(4, round(6 / scale)))
 
         def label(text, point, color):
             stroke(cv2.putText, text, point, color=color, width=1,
-                   fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=.45 / scale)
+                   fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=.32 / scale)
 
         mask_var = getattr(self, "show_mask_var", None)
         if mask_var is not None and mask_var.get():
@@ -841,11 +861,15 @@ class CalibrationTab:
                     stroke(cv2.circle, point, max(3, round(3 / scale)), color=color, width=1)
                     label(name, end, color)
         dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
-        self.transform = ((cw - dw) / 2, (ch - dh) / 2, scale)
+        canvas.camera_transform = ((cw - dw) / 2, (ch - dh) / 2, scale)
+        if main_view:
+            self.transform = canvas.camera_transform
         image = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)).resize((dw, dh))
-        self.photo = ImageTk.PhotoImage(image)
-        self.canvas.delete("all")
-        self.canvas.create_image(cw / 2, ch / 2, image=self.photo, anchor="center")
+        canvas.camera_photo = ImageTk.PhotoImage(image)
+        if main_view:
+            self.photo = canvas.camera_photo
+        canvas.delete("all")
+        canvas.create_image(cw / 2, ch / 2, image=canvas.camera_photo, anchor="center")
 
     def setup_data(self):
         if getattr(self, "axis_busy", False) or getattr(self, "axis_pending", None):
@@ -956,6 +980,8 @@ class CalibrationTab:
                 messagebox.showerror("Coordinates", str(error))
 
     def close(self):
+        if getattr(self, 'camera_popout', None) is not None:
+            self.camera_popout.close()
         self.axis_job += 1
         self.axis_busy = False
         if self.axis_after is not None:

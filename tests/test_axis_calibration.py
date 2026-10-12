@@ -261,7 +261,7 @@ class RobotAxisTests(unittest.TestCase):
         self.assertEqual(DEFAULT_ROBOT_ROI_RADIUS, 300)
         self.assertEqual(DEFAULT_PIN_ROI_RADIUS, 35)
 
-    def test_overlay_strokes_have_thin_color_and_outline_at_half_scale(self):
+    def test_overlay_strokes_use_one_screen_pixel_without_black_halo_at_half_scale(self):
         app = self.app()
         app.frame = np.full((960, 1280, 3), 240, np.uint8)
         app.canvas = Mock()
@@ -273,7 +273,8 @@ class RobotAxisTests(unittest.TestCase):
             CalibrationTab.render(app)
         widths = [call.kwargs["thickness"] for call in circles.call_args_list]
         self.assertTrue(widths)
-        self.assertEqual(set(widths), {2, 3})
+        self.assertEqual(set(widths), {2})
+        self.assertTrue(all(call.kwargs['color'] != (0, 0, 0) for call in circles.call_args_list))
 
     def test_pin_roi_finds_exact_centers_and_orders_four_points(self):
         app = self.pin_app()

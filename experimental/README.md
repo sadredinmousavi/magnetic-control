@@ -4,6 +4,15 @@ pip install opencv-python
 
 GUI005 Commands tab
 -------------------
+Calibration and Commands both have a Pop-out camera button. The normal full pages
+remain available, while a separate resizable window shows the same source and
+overlays. Maximize or Full screen enlarges that view; Escape exits full screen.
+Reopening the button raises the existing window instead of creating duplicates.
+Calibration supports pin/ROI mouse placement and settled-robot Capture in the
+pop-out; Commands supports target selection and synchronized Next/Finish/Stop.
+Closing only the pop-out never stops tracking, recording or motor execution.
+Closing GUI005 closes all camera windows and finalizes any recording.
+
 Complete Center/+X/+Y calibration (or load a matching setup from `experimental/setups`)
 and select the hardware case in Calibration. Select Live camera for command execution.
 In Commands, load a file from `experimental/xy_sequences`:

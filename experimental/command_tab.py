@@ -24,6 +24,7 @@ from point_control import hardware_case_name, load_hardware_case
 from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay
+from camera_popout import CameraPopout
 
 
 class CommandTab:
@@ -43,6 +44,7 @@ class CommandTab:
         self.after_id = None
         self.arrival_gate = None
         self.cell_editor = None
+        self.camera_popout = None
         self.recording = None
         self.recording_fps_var = tk.StringVar(value='15')
         self.arrival_tolerance_var = tk.StringVar(value="1")
@@ -70,6 +72,7 @@ class CommandTab:
         tk.Button(bar, text="Export XY sequence", command=self.export_sequence).pack(side="left", padx=3)
         self.calibration_button = tk.Button(bar, text="Use current calibration", command=lambda: self.refresh_calibration(reset_tracking=True))
         self.calibration_button.pack(side="left", padx=3)
+        tk.Button(bar, text='Pop-out camera', command=self.open_camera_popout).pack(side='left', padx=3)
         actions = tk.Frame(parent)
         actions.pack(fill="x", padx=8, pady=3)
         self.show_button = tk.Button(actions, text="Show all points", command=self.show_points)
@@ -595,10 +598,25 @@ class CommandTab:
         else:
             self.refresh_calibration()
 
-    def click_target(self, event):
-        if self.running or self.pixels is None or not hasattr(self, "screen_points"):
+    def open_camera_popout(self):
+        if self.camera_popout is not None and self.camera_popout.is_open:
+            self.camera_popout.show()
             return
-        distances = np.linalg.norm(self.screen_points - [event.x, event.y], axis=1)
+        self.camera_popout = CameraPopout(
+            self.parent, 'GUI005 — Phase 3 camera', self.render,
+            actions=(('Show all points', self.show_points, None),
+                     ('Next point', self.next_point, self.next_button),
+                     ('Stop', self.stop, self.stop_button)),
+            status=lambda: f"{self.status.cget('text')}  {self.tracking_status.cget('text')}",
+        )
+        canvas = self.camera_popout.canvas
+        canvas.bind('<Button-1>', lambda event: self.click_target(event, screen_points=getattr(canvas, 'screen_points', None)))
+
+    def click_target(self, event, *, screen_points=None):
+        screen_points = getattr(self, 'screen_points', None) if screen_points is None else screen_points
+        if self.running or self.pixels is None or screen_points is None:
+            return
+        distances = np.linalg.norm(screen_points - [event.x, event.y], axis=1)
         index = int(np.argmin(distances))
         if distances[index] <= 12:
             self.table.selection_set(str(index))
@@ -754,12 +772,15 @@ class CommandTab:
         if self.running:
             self.after_id = self.parent.after(50, self.poll)
 
-    def render(self):
-        self.canvas.delete("all")
+    def render(self, canvas=None):
+        main_view = canvas is None
+        canvas = self.canvas if main_view else canvas
+        canvas.delete("all")
+        canvas.screen_points = None
         if self.frame is None:
             return
         h, w = self.frame.shape[:2]
-        cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
+        cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
         low, high = np.array([0., 0.]), np.array([float(w), float(h)])
         if self.pixels is not None and self.show_all:
             low = np.minimum(low, self.pixels.min(axis=0) - [15, 15])
@@ -768,12 +789,14 @@ class CommandTab:
         scale = min(cw / extent[0], ch / extent[1])
         dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
         ox, oy = (np.array([cw, ch]) - extent * scale) / 2 - low * scale
-        self.photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)).resize((dw, dh)))
-        self.canvas.create_image(ox + dw / 2, oy + dh / 2, image=self.photo, anchor="center")
+        canvas.camera_photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)).resize((dw, dh)))
+        if main_view:
+            self.photo = canvas.camera_photo
+        canvas.create_image(ox + dw / 2, oy + dh / 2, image=canvas.camera_photo, anchor="center")
         if self.setup is None:
             return
         corners = np.asarray(self.setup["corners_px"]) * scale + [ox, oy]
-        self.canvas.create_polygon(*corners.ravel(), fill="", outline="#995599", width=1, dash=(2, 10))
+        canvas.create_polygon(*corners.ravel(), fill="", outline="#995599", width=1, dash=(2, 10))
 
         def enabled(name):
             variable = getattr(self, name, None)
@@ -781,23 +804,25 @@ class CommandTab:
 
         if self.pixels is not None:
             points = self.pixels * scale + [ox, oy]
-            self.screen_points = points
+            canvas.screen_points = points
+            if main_view:
+                self.screen_points = points
             if len(points) > 1 and enabled("show_path_var"):
-                self.canvas.create_line(*points.ravel(), fill="#338888", width=1, dash=(2, 8))
+                canvas.create_line(*points.ravel(), fill="#338888", width=1, dash=(2, 8))
             outside, _ = point_limits(self.pixels, self.setup)
             for index, (x, y) in enumerate(points):
-                self.canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill="", outline="#ff4444" if outside[index] else "#00cccc", width=1)
+                canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill="", outline="#ff4444" if outside[index] else "#00cccc", width=1)
             if self.active_index is not None and self.active_index < len(points):
                 x, y = points[self.active_index]
-                self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4, outline="#ff9900", width=1)
-                self.canvas.create_line(x - 5, y, x + 5, y, fill="#ff9900", width=1)
-                self.canvas.create_line(x, y - 5, x, y + 5, fill="#ff9900", width=1)
-                self.canvas.create_text(x + 7, y - 7, text=f"P{self.active_index + 1}", fill="#ff9900", font=("Segoe UI", 8), anchor="sw")
+                canvas.create_oval(x - 3, y - 3, x + 3, y + 3, outline="#ff9900", width=1)
+                canvas.create_line(x - 3, y, x + 3, y, fill="#ff9900", width=1)
+                canvas.create_line(x, y - 3, x, y + 3, fill="#ff9900", width=1)
+                canvas.create_text(x + 5, y - 5, text=f"P{self.active_index + 1}", fill="#ff9900", font=("Segoe UI", 7), anchor="sw")
         tracker = getattr(self, "tracking_tracker", None)
         if tracker is not None and enabled("show_roi_var"):
             x, y = tracker.center * scale + [ox, oy]
             radius = tracker.radius * scale
-            self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius,
+            canvas.create_oval(x - radius, y - radius, x + radius, y + radius,
                                     outline="#449944", width=1, dash=(2, 10))
         if enabled("show_trails_var"):
             for trail in self.robot_trails.values():
@@ -807,15 +832,17 @@ class CommandTab:
                         segment.append(np.asarray(point) * scale + [ox, oy])
                     else:
                         if len(segment) > 1:
-                            self.canvas.create_line(*np.asarray(segment).ravel(), fill="#449944", width=1)
+                            canvas.create_line(*np.asarray(segment).ravel(), fill="#449944", width=1)
                         segment = []
         for item in getattr(self, "tracking_detections", []):
             x, y = np.asarray(item["center"]) * scale + [ox, oy]
-            self.canvas.create_line(x - 3, y, x + 3, y, fill="#00ff66", width=1)
-            self.canvas.create_line(x, y - 3, x, y + 3, fill="#00ff66", width=1)
-            self.canvas.create_text(x + 5, y + 5, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 8), anchor="nw")
+            canvas.create_line(x - 2, y, x + 2, y, fill="#00ff66", width=1)
+            canvas.create_line(x, y - 2, x, y + 2, fill="#00ff66", width=1)
+            canvas.create_text(x + 4, y + 4, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 7), anchor="nw")
 
     def close(self):
+        if getattr(self, 'camera_popout', None) is not None:
+            self.camera_popout.close()
         if getattr(self, 'recording', None) is not None:
             self.stop_recording()
         self.stop_event.set()

@@ -30,9 +30,9 @@ def draw_command_overlay(image, setup, pixels, active_index, detections, tracker
             cv2.circle(image, (int(x), int(y)), 2, (68, 68, 255) if outside else (204, 204, 0), 1)
         if active_index is not None and active_index < len(points):
             point = tuple(points[active_index])
-            cv2.drawMarker(image, point, (0, 153, 255), cv2.MARKER_CROSS, 10, 1)
+            cv2.drawMarker(image, point, (0, 153, 255), cv2.MARKER_CROSS, 6, 1, cv2.LINE_AA)
             cv2.putText(image, f'P{active_index + 1}', (point[0] + 7, point[1] - 7),
-                        cv2.FONT_HERSHEY_SIMPLEX, .4, (0, 153, 255), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, .32, (0, 153, 255), 1, cv2.LINE_AA)
     if show_roi and tracker is not None:
         cv2.circle(image, tuple(np.rint(tracker.center).astype(int)), round(tracker.radius), (68, 153, 68), 1)
     for trail in (trails or {}).values():
@@ -44,8 +44,8 @@ def draw_command_overlay(image, setup, pixels, active_index, detections, tracker
             previous = current
     for item in detections:
         x, y = np.rint(item['center']).astype(int)
-        cv2.drawMarker(image, (x, y), (102, 255, 0), cv2.MARKER_CROSS, 6, 1)
-        cv2.putText(image, f"R{item['robot_id']}", (x + 5, y + 10), cv2.FONT_HERSHEY_SIMPLEX, .4, (102, 255, 0), 1)
+        cv2.drawMarker(image, (x, y), (102, 255, 0), cv2.MARKER_CROSS, 4, 1, cv2.LINE_AA)
+        cv2.putText(image, f"R{item['robot_id']}", (x + 4, y + 8), cv2.FONT_HERSHEY_SIMPLEX, .32, (102, 255, 0), 1, cv2.LINE_AA)
     return image
 
 
