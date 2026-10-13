@@ -21,6 +21,33 @@ maximum correction 2 mm, slew 1 mm/s and minimum update period 1 s. These are
 conservative starting settings, not experimentally tuned gains. Test on your
 hardware carefully. Settings are locked during a run.
 
+## Adaptive Kp
+
+The GUI's **Adaptive Kp** checkbox defaults on; Control itself still defaults
+off. Uncheck it for the original fixed-gain PID. The existing **Arrival tolerance
+(mm)** is also the feedback goal, default **1 mm**. Starting Kp defaults to 0.2;
+adaptive Kp is bounded between 0.05 and the editable **Kp max** (default 1).
+Ki and Kd are not adapted. Current Kp and the adjustment reason appear in both
+control-detail views and tracking/recording CSVs.
+
+This is a conservative error-based gain scheduler, not a plant-identification
+or guaranteed-convergence controller. It consumes only fresh, complete-group
+observations following successfully SENT corrections, at least one control
+period after the send. Four consecutive responses with less than 2% (or 0.05 mm)
+improvement increase Kp by 10%. Crossing the target (error-vector reversal) or
+error growth greater than 10% (or 0.2 mm) reduces Kp by 20%. Clear improvement
+holds Kp. Correction/slew saturation suppresses increases. These thresholds are
+initial heuristics, not hardware-tuned values.
+
+Within tolerance, corrections pause using the existing arrival logic; gains do
+not keep increasing. For multiple robots this controls the group centroid;
+individual arrival is still reported separately. Tracking loss, Control toggles
+and each new point reset Kp to the starting value and clear response history.
+No new motor-command path is introduced: workspace, freshness, Stop, correction
+and slew limits still apply. Adaptive Kp cannot fix bad calibration, tracking
+noise, a stuck robot or insufficient correction range; reaching 1 mm is not
+guaranteed. Begin with one robot and conservative limits.
+
 ## Execution
 
 The original point is sent first (precalculated if available). Its row wait

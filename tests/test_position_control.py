@@ -12,6 +12,60 @@ from command_sequences import XYStep
 
 
 class PositionControlTests(unittest.TestCase):
+    def test_adaptive_kp_grows_only_after_four_applied_slow_responses(self):
+        pid = PositionPID(adaptive=True, limit_mm=20, slew_mm_s=20)
+        pid.update([3,0], 0)
+        # Merely calculating a pose does not count as an applied response.
+        for timestamp in range(1,6):
+            pid.update([3,0], timestamp)
+        self.assertEqual(pid.kp, .2)
+        for timestamp in range(6,10):
+            pid.mark_sent([3,0], timestamp - 1)
+            pid.update([3,0], timestamp)
+        self.assertAlmostEqual(pid.kp, .22)
+        self.assertIn('increased', pid.adaptation)
+
+    def test_adaptive_kp_reduces_on_overshoot_and_growing_error(self):
+        for error in ([-3,0], [4,0]):
+            pid = PositionPID(adaptive=True, limit_mm=20, slew_mm_s=20)
+            pid.update([3,0], 0)
+            pid.mark_sent([3,0], 0)
+            pid.update(error, 1)
+            self.assertAlmostEqual(pid.kp, .16)
+
+    def test_adaptive_tolerance_bounds_and_reset(self):
+        pid = PositionPID(adaptive=True, kp_max=.21, limit_mm=20, slew_mm_s=20)
+        pid.update([3,0], 0)
+        for timestamp in range(1,40):
+            pid.mark_sent([3,0], timestamp - 1)
+            pid.update([3,0], timestamp)
+        self.assertEqual(pid.kp, .21)
+        pid.mark_sent([3,0], 39)
+        pid.update([.9,0], 40)
+        self.assertEqual(pid.kp, .21)
+        self.assertEqual(pid.adaptation, 'Within tolerance')
+        pid.reset()
+        self.assertEqual(pid.kp, .2)
+        self.assertIsNone(pid.sent_error)
+        for options in ({'kp_max': .1}, {'tolerance_mm': 0}, {'kp_max': float('nan')}):
+            with self.assertRaises(ValueError):
+                PositionPID(adaptive=True, **options)
+
+    def test_adaptive_never_increases_at_saturation_or_before_response_period(self):
+        for limits in ({'limit_mm': .5}, {'slew_mm_s': .01}):
+            pid = PositionPID(adaptive=True, **limits)
+            pid.update([10,0], 0)
+            for timestamp in range(1,10):
+                pid.mark_sent([10,0], timestamp - 1)
+                pid.update([10,0], timestamp)
+            self.assertEqual(pid.kp, .2)
+        pid = PositionPID(adaptive=True)
+        pid.update([3,0], 0)
+        pid.mark_sent([3,0], 0)
+        pid.update([-3,0], .2)
+        self.assertEqual(pid.kp, .2)
+        self.assertIsNotNone(pid.sent_error)
+
     def test_pid_bounds_slew_antiwindup_reset_and_invalid_gains(self):
         pid = PositionPID(kp=10, ki=1, limit_mm=2, slew_mm_s=1)
         np.testing.assert_allclose(pid.update([10, 0], 1), [1, 0])

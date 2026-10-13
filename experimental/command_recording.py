@@ -13,7 +13,7 @@ TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot
                    'active_point desired_x_mm desired_y_mm error_mm roi_x_px roi_y_px '
                    'roi_radius_px sequence_running arrival_ready arrival_max_error_mm '
                    'desired_ratio desired_angle_deg recording_frame recording_time_s '
-                   'control_enabled control_state correction_x_mm correction_y_mm commanded_x_mm commanded_y_mm '
+                   'control_enabled control_state control_kp adaptive_kp kp_adaptation correction_x_mm correction_y_mm commanded_x_mm commanded_y_mm '
                    'proposed_xy_mm calculated_motor_angles_deg sent_motor_angles_deg motor_sent_time_s orientation_measured_deg').split()
 
 

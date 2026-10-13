@@ -44,6 +44,8 @@ class CommandTab:
         self.calibration_revision = None
         self.roi_placement_var = tk.BooleanVar(value=False)
         self.control_requested = False
+        self.adaptive_kp_var = tk.BooleanVar(value=True)
+        self.kp_max_var = tk.StringVar(value='1')
         self.pid_vars = {key: tk.StringVar(value=value) for key, value in
                          [('Kp', '.2'), ('Ki', '0'), ('Kd', '0'), ('Limit mm', '2'), ('Slew mm/s', '1'), ('Period s', '1')]}
         self.precalculating = False
@@ -199,6 +201,15 @@ class CommandTab:
         pid_bar = tk.LabelFrame(parent, text='Position control — opt-in; orientation feedback unavailable')
         pid_bar.pack(fill='x', padx=8, pady=3)
         self.pid_entries = []
+        self.adaptive_kp_check = tk.Checkbutton(pid_bar, text='Adaptive Kp', variable=self.adaptive_kp_var)
+        self.adaptive_kp_check.pack(side='left')
+        HoverHint(self.adaptive_kp_check, 'Adjusts Kp slowly from applied corrections toward Arrival tolerance (default 1 mm). '
+                  'Reduces gain on overshoot/error growth. Bounded; accuracy is not guaranteed. Uncheck for fixed PID.')
+        tk.Label(pid_bar, text='Kp max').pack(side='left')
+        max_entry = tk.Entry(pid_bar, textvariable=self.kp_max_var, width=4)
+        max_entry.pack(side='left')
+        HoverHint(max_entry, 'Upper adaptive Kp bound; default 1. Starting Kp must be between 0.05 and this value. Locked during a run.')
+        self.pid_entries.extend([self.adaptive_kp_check, max_entry])
         for key, variable in self.pid_vars.items():
             tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
             entry = tk.Entry(pid_bar, textvariable=variable, width=5)
@@ -587,6 +598,9 @@ class CommandTab:
                 "desired_angle_deg": "" if self.active_index is None or self.steps[self.active_index].angle_deg is None else self.steps[self.active_index].angle_deg,
                 'control_enabled': int(feedback.enabled.is_set()) if feedback is not None else 0,
                 'control_state': control_data.get('state', 'Off'),
+                'control_kp': control_data.get('kp', ''),
+                'adaptive_kp': int(control_data.get('adaptive', False)),
+                'kp_adaptation': control_data.get('adaptation', ''),
                 'correction_x_mm': (control_data.get('correction_mm') or ['', ''])[0],
                 'correction_y_mm': (control_data.get('correction_mm') or ['', ''])[1],
                 'commanded_x_mm': (control_data.get('commanded_xy_mm') or ['', ''])[0],
@@ -820,9 +834,11 @@ class CommandTab:
         sent = '—' if not angles else ', '.join(f'{angle:.1f}' for angle in angles)
         calculated = data.get('calculated_angles', '')
         calculated = '—' if not calculated else ', '.join(f'{angle:.1f}' for angle in calculated)
+        kp = '—' if data.get('kp') is None else f"{data['kp']:.3f}"
         label.config(text=f"Desired ({xy('desired_xy_mm')}) | Measured ({xy('measured_xy_mm')}) | u ({xy('correction_mm')}) | Commanded ({xy('commanded_xy_mm')})\n"
                           f"Ratio {data.get('ratio', '—')} | Angle {data.get('angle_deg', 'Auto')} | Orientation: unavailable | {data.get('state', 'Control off')}\n"
-                          f"Proposed ({xy('proposed_xy_mm')}) | Calculated motors: {calculated}\nLast sent motors: {sent}")
+                          f"Proposed ({xy('proposed_xy_mm')}) | Kp {kp} | {data.get('adaptation', '')}\n"
+                          f"Calculated motors: {calculated} | Last sent motors: {sent}")
 
     def point_signature(self):
         return (hardware_case_name(self.calibration.control_case_var.get()), tuple(self.steps))
@@ -907,7 +923,9 @@ class CommandTab:
             arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
             feedback = None
             if hasattr(self, 'pid_vars'):
-                pid = PositionPID(*[float(variable.get()) for variable in self.pid_vars.values()])
+                pid = PositionPID(*[float(variable.get()) for variable in self.pid_vars.values()],
+                                  adaptive=self.adaptive_kp_var.get(), tolerance_mm=arrival_gate.tolerance_mm,
+                                  kp_max=float(self.kp_max_var.get()))
                 def validate_correction(target):
                     from dataclasses import replace
                     corrected = [replace(self.steps[0], target_xy_m=tuple(target))]
