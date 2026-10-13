@@ -69,12 +69,15 @@ class PositionFeedback:
         while active():
             with gate.condition:
                 ready = gate._ready()
+                if not gate.require_arrival and gate.next_requested:
+                    gate.next_requested = gate.waiting_for_next = False
+                    return True
                 if ready:
                     gate.waiting_for_next = True
                     if gate.next_requested:
                         gate.next_requested = gate.waiting_for_next = False
                         return True
-                elif gate.next_requested:
+                elif gate.next_requested and gate.require_arrival:
                     gate.next_requested = False
                 positions = None if gate.positions is None else gate.positions.copy()
                 sample = gate.observed_at

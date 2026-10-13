@@ -4,6 +4,25 @@ pip install opencv-python
 
 GUI005 Commands tab
 -------------------
+Connections has a Camera source selector: Pi SSH or Iriun / Local webcam.
+For Iriun, install/start the Iriun desktop client and phone app, choose the webcam
+source, set the local device index (try 0, 1, 2 if another camera appears), and
+Connect webcam. Capture runs in a background thread using Windows DirectShow;
+Requested resolution offers Auto (driver default), common presets and Custom
+width/height. Presets are requests, not an enumerated list of guaranteed modes.
+Disconnect/reconnect after choosing a size. The status always reports dimensions
+of actual frames and warns in amber when the driver returns a different size.
+No software upscaling is used. Resolution changes clear calibration/ROI; load a
+setup matching actual dimensions or recalibrate. Both Phase 2 and Phase 3 consume
+only the selected source's newest frames. Live processing FPS still controls
+GUI/tracking throughput, not the webcam device frame rate.
+Changing source/device cancels running control/precalculation, finalizes recording
+and clears camera calibration/ROI even when resolutions match. New setups include
+the source/device identity and reject a different one. Legacy Pi setups without
+identity are not accepted for the new local-webcam source. Verify camera pose and
+actual pin dimensions every time; reconnecting the same device is not proof it
+has stayed physically aligned. Neither camera starts until you press Connect.
+
 Calibration and Commands both have a Pop-out camera button. The normal full pages
 remain available, while a separate resizable window shows the same source and
 overlays. Maximize or Full screen enlarges that view; Escape exits full screen.
@@ -81,7 +100,7 @@ returns; calibration controls are locked while preparing. Without precalculation
 commands retain fresh per-point synthesis. Arrival, manual Next, waits and motor
 zero settings apply in either mode.
 The Commands pop-out uses short captions: Points, First, Next/Finish, Control,
-Stop. First starts the sequence at point 1, then waits for arrival and your Next
+Stop. First starts the sequence at point 1, then waits for your Next
 press at each step; it is disabled during execution/precalculation. Control is
 an opt-in bounded XY PID mode, disabled by default. It retains row ratio/angle;
 orientation feedback is not yet measurable. Main/pop-out Control details and
@@ -131,12 +150,13 @@ The preview reports sequence and pin extents in mm; the origin is the captured
 robot Center, which need not equal the geometric rectangle center.
 The table displays XY in millimetres. Commands use each row's ratio/angle and calculate fresh
 motor angles for each point; the wait starts after sending that pose.
-The row wait is a minimum motor hold. After it, tracking must confirm that every
-expected robot is within Arrival tolerance (default 1 mm) continuously for the
-In-range hold (default 0.5 seconds). Execution then waits for your Next point
-button press; the last or single selected point uses Finish. There is no automatic
-advance. Missing, stale or out-of-tolerance detections disable the button until
-arrival is confirmed again. Set tolerance and hold before starting the run.
+The row wait is a minimum motor hold. Next enables immediately after a motor pose
+is sent, without waiting for arrival. An early press is queued until the minimum
+hold finishes. The last or single selected point uses Finish. There is no automatic
+advance or queued permission for subsequent rows. Tracking tolerance/hold remain
+arrival indicators and PID deadband settings, not permission to advance. Missing
+robot detection pauses corrections but does not revoke manual Next. Camera loss,
+controller disconnection and Stop still cancel execution.
 Run requires a live camera, connected controller, complete robot axes, and each
 requested target inside the camera frame. Beyond-pin points require the explicit
 Allow beyond pins option and a warning confirmation; their mapping is extrapolated

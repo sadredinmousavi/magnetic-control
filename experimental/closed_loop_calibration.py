@@ -164,6 +164,7 @@ class CalibrationTab:
         self.auto_tracking = True
         self.auto_tracker_signature = None
         self.setup_revision = 0
+        self.camera_source_key = 'Pi SSH'
         self.detections = []
         self.frame_number = 0
         self.render_revision = 0
@@ -1028,6 +1029,7 @@ class CalibrationTab:
                 float(self.radius_var.get()) if self.tracker is None else self.tracker.radius,
             ],
             "robot_count": 1, "minimum_area": float(self.area_var.get()),
+            'camera_source': getattr(self, 'camera_source_key', 'Pi SSH'),
             "dark_contrast_threshold": self.read_contrast_threshold(),
             "axis_samples_px": getattr(self, "axis_samples", {}),
             "axis_targets_m": AXIS_TARGETS_M,
@@ -1074,6 +1076,10 @@ class CalibrationTab:
                 data = json.load(stream)
             if data["version"] not in (1, 2) or data["video_size_px"] != list(self.frame.shape[1::-1]):
                 raise ValueError("Calibration does not match the current frame size.")
+            if data.get('camera_source') is not None and data['camera_source'] != getattr(self, 'camera_source_key', 'Pi SSH'):
+                raise ValueError('This calibration belongs to a different camera source/device. Load a matching setup or recalibrate.')
+            if data.get('camera_source') is None and getattr(self, 'camera_source_key', 'Pi SSH') != 'Pi SSH':
+                raise ValueError('This older setup has no camera identity. Recalibrate and save a setup for the selected webcam.')
             samples = data.get("axis_samples_px", {})
             if samples and set(samples) != set(AXIS_TARGETS_M):
                 raise ValueError("Saved robot axis references are incomplete.")

@@ -10,6 +10,19 @@ from command_sequences import XYStep, execute_xy_sequence
 
 
 class ArrivalControlTests(unittest.TestCase):
+    def test_manual_next_does_not_require_arrival_and_survives_detection_loss(self):
+        gate = ArrivalGate(require_arrival=False)
+        self.assertFalse(gate.request_next())  # No motor pose sent yet.
+        gate.arm((0,0))
+        self.assertTrue(gate.request_next())
+        self.assertFalse(gate.request_next())  # No duplicate permissions.
+        gate.observe(None)
+        self.assertTrue(gate.next_requested)
+        self.assertTrue(gate.wait_for_next(lambda: True))
+        gate.arm((.01,0))
+        self.assertFalse(gate.next_requested)
+        self.assertTrue(gate.wait_for_arrival(lambda: True))
+
     def gate(self, hold=.5):
         self.now = 10.
         return ArrivalGate(1, hold, clock=lambda: self.now)

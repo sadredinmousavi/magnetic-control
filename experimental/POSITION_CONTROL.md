@@ -41,8 +41,11 @@ may all be discarded; this is intentional protection, not a high-rate motor loop
 Missing/ambiguous tracking pauses corrections and resets PID history. Turning
 Control off stops further corrections; it does not undo the last motor pose.
 Once all expected robots are within tolerance of the ORIGINAL desired point,
-corrections pause and Next becomes available after the configured visual hold.
-If robots leave tolerance, feedback can resume. PID history resets per point.
+corrections pause. Next is manually available as soon as the original motor pose
+is sent, whether or not arrival is confirmed. It can be pressed during the row
+wait; advancement occurs after that wait. A queued Next also suppresses unsent
+PID corrections. If robots leave tolerance, feedback can resume unless Next
+was requested. PID history resets per point.
 
 ## Orientation and ratio
 

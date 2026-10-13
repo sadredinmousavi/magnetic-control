@@ -136,7 +136,7 @@ class CommandTab:
             "Table shows mm. Double-click Ratio, Angle, Wait or Zero to edit each point (Enter applies). "
             "Ratio defaults to 1; Angle Auto is unconstrained and is ignored for ratio 1. "
             "Precalculate all prepares motor angles without moving; otherwise each point is calculated on demand. "
-            "After the row's minimum wait, all robots must reach the target and stay within tolerance. "
+            "Next enables once a motor command is sent; arrival is not required. The row's minimum wait still applies. "
             "Press Next point to advance (Finish for the last point). There is no automatic progression. "
             "Stop prevents further commands; it does not undo the last motor pose."
         ))
@@ -901,7 +901,7 @@ class CommandTab:
                 return
             prepared = True
         try:
-            arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()))
+            arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
             feedback = None
             if hasattr(self, 'pid_vars'):
                 pid = PositionPID(*[float(variable.get()) for variable in self.pid_vars.values()])
@@ -944,7 +944,7 @@ class CommandTab:
         extrapolated = sum(bool(outside[index]) for index in indices)
         description = f"selected point {indices[0] + 1}" if selected_only else f"all {len(indices)} points"
         warning = f"\nWARNING: {extrapolated} target(s) beyond pins. Mapping is extrapolated; confirm they are physically safe." if extrapolated else ""
-        if not show_view_dialog(self, messagebox.askyesno, "Run XY targets", f"Run {description} using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nArrival: all tracked robots within {arrival_gate.tolerance_mm:g} mm for {arrival_gate.stable_seconds:g} s; then press Next.\nRow wait is the minimum hold after sending; no automatic advance.\nConfirm the units and physical hardware match.{warning}"):
+        if not show_view_dialog(self, messagebox.askyesno, "Run XY targets", f"Run {description} using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nArrival indicator: {arrival_gate.tolerance_mm:g} mm for {arrival_gate.stable_seconds:g} s. Next does NOT require arrival.\nRow wait is the minimum hold after sending; no automatic advance.\nConfirm the units and physical hardware match.{warning}"):
             return
         self.setup, self.pixels = setup, pixels
         self.running = True
@@ -1007,21 +1007,21 @@ class CommandTab:
     def next_point(self):
         if self.running and self.arrival_gate is not None and self.arrival_gate.request_next():
             self.next_button.config(state="disabled")
-            self.status.config(text="Progression confirmed. Advancing only the current step; no queued Next presses.")
+            self.status.config(text='Next requested. Advancing after the current row minimum wait; no arrival requirement or extra queued presses.')
         else:
-            self.status.config(text="Next is unavailable: wait for a fresh, complete robot detection inside the arrival tolerance.")
+            self.status.config(text='Next is unavailable until the current motor command has been sent, or a Next press is already queued.')
 
     def refresh_next_button(self):
         gate = self.arrival_gate
         waiting = self.running and gate is not None and gate.waiting_for_next
-        ready = waiting and gate.ready and not self.stop_event.is_set() and not gate.next_requested
+        ready = waiting and (not gate.require_arrival or gate.ready) and not self.stop_event.is_set() and not gate.next_requested
         last = self.active_index is not None and self.active_index == self.run_indices[-1] if self.running else False
         self.next_button.config(state="normal" if ready else "disabled", text="Finish" if last else "Next point")
         if waiting and self.active_index is not None and not self.stop_event.is_set():
-            self.table.set(str(self.active_index), "state", "Await Next" if ready else "Arriving")
+            self.table.set(str(self.active_index), "state", "Await Next" if ready else 'Next queued' if gate.next_requested else "Arriving")
             self.status.config(text=(
-                f"Point {self.active_index + 1} reached. Press {'Finish' if last else 'Next point'} when ready."
-                if ready else "Robot left tolerance or tracking is incomplete. Waiting for arrival again; Next is blocked."
+                f"Point {self.active_index + 1} sent. Press {'Finish' if last else 'Next'} when you choose; arrival is not required."
+                if ready else 'Next queued; waiting for the current row minimum wait to finish.' if gate.next_requested else 'Waiting for the motor command.'
             ))
 
     def poll(self):

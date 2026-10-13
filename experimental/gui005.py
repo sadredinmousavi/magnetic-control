@@ -15,6 +15,7 @@ from closed_loop_calibration import CalibrationTab
 from point_control import PointCommander
 from command_tab import CommandTab
 from camera_popout import show_view_dialog
+from local_camera import LocalCameraClient
 
 
 class ClosedLoopGUI(BaseServoGUI):
@@ -27,6 +28,12 @@ class ClosedLoopGUI(BaseServoGUI):
         self.root.minsize(900, 650)
         self.camera_frame_queue = queue.Queue(maxsize=1)
         self.camera_event_queue = queue.Queue()
+        self.local_frame_queue, self.local_event_queue = queue.Queue(maxsize=1), queue.Queue()
+        self.local_camera = LocalCameraClient(self.local_frame_queue, self.local_event_queue)
+        self.webcam_requested_size = None
+        self.camera_source_var = tk.StringVar(value='Pi SSH')
+        self.selected_camera_source = 'Pi SSH'
+        self.camera_source_key = 'Pi SSH'
         self.ssh_camera = SSHCameraClient(
             self.camera_frame_queue, self.camera_event_queue
         )
@@ -65,6 +72,7 @@ class ClosedLoopGUI(BaseServoGUI):
         notebook.add(connection_tab, text="1. Connections")
         self.connection_visible = lambda: notebook.select() == str(connection_tab)
         self.build_serial_panel(connection_tab)
+        self.build_camera_source_panel(connection_tab)
         self.build_ssh_camera_panel(connection_tab)
 
         calibration_tab = tk.Frame(notebook)
@@ -75,7 +83,7 @@ class ClosedLoopGUI(BaseServoGUI):
         command_tab = tk.Frame(notebook)
         notebook.add(command_tab, text="3. Commands")
         self.commands = CommandTab(
-            command_tab, self.calibration, self.point_commander, lambda: self.ssh_camera.is_running,
+            command_tab, self.calibration, self.point_commander, self.selected_camera_running,
             set_running=lambda running: (self.calibration.set_command_running(running),
                                          notebook.tab(calibration_tab, state="disabled" if running else "normal")),
             visible=lambda: notebook.select() == str(command_tab),
@@ -146,11 +154,141 @@ class ClosedLoopGUI(BaseServoGUI):
         super().disconnect_port()
         self.serial_state_label.config(text="Disconnected", fg="red")
 
+    def selected_camera_running(self):
+        return self.local_camera.is_running if self.selected_camera_source == 'Iriun / Local webcam' else self.ssh_camera.is_running
+
+    def build_camera_source_panel(self, parent):
+        bar = tk.LabelFrame(parent, text='Camera source — shared by Calibration and Commands', padx=8, pady=4)
+        bar.pack(fill='x', padx=10, pady=4)
+        controls = tk.Frame(bar)
+        controls.pack(fill='x')
+        source = ttk.Combobox(controls, textvariable=self.camera_source_var, values=('Pi SSH', 'Iriun / Local webcam'),
+                              state='readonly', width=24)
+        source.pack(side='left', padx=4)
+        source.bind('<<ComboboxSelected>>', self.change_camera_source)
+        tk.Label(controls, text='Webcam index').pack(side='left', padx=4)
+        self.webcam_index_var = tk.StringVar(value='0')
+        tk.Spinbox(controls, from_=0, to=10, textvariable=self.webcam_index_var, width=3).pack(side='left')
+        tk.Button(controls, text='Connect webcam', command=self.connect_local_camera).pack(side='left', padx=4)
+        tk.Button(controls, text='Disconnect webcam', command=self.disconnect_local_camera).pack(side='left', padx=4)
+        self.local_state_label = tk.Label(controls, text='Start Iriun on the PC and phone first; try index 0, 1, 2…', anchor='w', wraplength=380)
+        self.local_state_label.pack(side='left', padx=6)
+        resolution = tk.Frame(bar)
+        resolution.pack(fill='x', pady=(4,0))
+        tk.Label(resolution, text='Requested resolution').pack(side='left', padx=4)
+        self.webcam_resolution_var = tk.StringVar(value='Auto')
+        self.webcam_resolution_combo = ttk.Combobox(resolution, textvariable=self.webcam_resolution_var, state='readonly', width=14,
+            values=('Auto','640x480','1280x720','1920x1080','2560x1440','3840x2160','Custom'))
+        self.webcam_resolution_combo.pack(side='left', padx=4)
+        self.webcam_resolution_combo.bind('<<ComboboxSelected>>', self.on_webcam_resolution_selected)
+        self.webcam_width_var, self.webcam_height_var = tk.StringVar(value='1920'), tk.StringVar(value='1080')
+        tk.Label(resolution, text='Custom width').pack(side='left', padx=4)
+        self.webcam_width_entry = tk.Entry(resolution, textvariable=self.webcam_width_var, width=6, state='disabled')
+        self.webcam_width_entry.pack(side='left')
+        tk.Label(resolution, text='Height').pack(side='left', padx=4)
+        self.webcam_height_entry = tk.Entry(resolution, textvariable=self.webcam_height_var, width=6, state='disabled')
+        self.webcam_height_entry.pack(side='left')
+        tk.Label(resolution, text='Requests driver mode, not image resizing. Disconnect/reconnect to apply.', foreground='#555555').pack(side='left', padx=8)
+
+    def on_webcam_resolution_selected(self, event=None):
+        state = 'normal' if self.webcam_resolution_var.get() == 'Custom' else 'disabled'
+        self.webcam_width_entry.config(state=state)
+        self.webcam_height_entry.config(state=state)
+
+    def read_webcam_resolution(self):
+        choice = self.webcam_resolution_var.get()
+        if choice == 'Auto':
+            return None
+        if choice == 'Custom':
+            width, height = int(self.webcam_width_var.get()), int(self.webcam_height_var.get())
+        else:
+            width, height = map(int, choice.split('x'))
+        if not 1 <= width <= 16384 or not 1 <= height <= 16384:
+            raise ValueError('Resolution must contain whole numbers between 1 and 16384.')
+        return width, height
+
+    @staticmethod
+    def drain_frames(frames):
+        try:
+            while True:
+                frames.get_nowait()
+        except queue.Empty:
+            pass
+
+    def reset_camera_geometry(self, source_key):
+        self.commands.stop_event.set()
+        self.commands.preparation_stop.set()
+        self.commands.stop_recording()
+        self.calibration.frame = self.calibration.frame_received_at = None
+        self.calibration.corners, self.calibration.circle = [], None
+        self.calibration.reset_axes()
+        self.calibration.clear_tracking()
+        self.calibration.camera_source_key = source_key
+        self.calibration.setup_revision += 1
+        self.commands.frame = self.commands.frame_received_at = None
+        self.commands.setup = self.commands.pixels = self.commands.tracking_tracker = None
+        self.commands.command_roi = None
+        self.commands.roi_override = False
+        self.commands.tracking_detections, self.commands.tracking_group_xy = [], None
+        self.commands.tracking_signature = None
+        self.commands.render_revision += 1
+        for tab in (self.calibration, self.commands):
+            tab.canvas.delete('all')
+            popup = tab.camera_popout
+            if popup is not None and popup.is_open:
+                popup.canvas.delete('all')
+        self.remote_camera_canvas.delete('all')
+        self.camera_source_key = source_key
+        self.calibration.status.config(text='Camera source changed. Recalibrate or load a setup matching this camera.')
+
+    def change_camera_source(self, event=None):
+        source = self.camera_source_var.get()
+        if source == self.selected_camera_source:
+            return
+        self.ssh_camera.stop()
+        self.local_camera.stop()
+        self.drain_frames(self.camera_frame_queue)
+        self.drain_frames(self.local_frame_queue)
+        self.drain_frames(self.local_event_queue)
+        self.selected_camera_source = source
+        self.reset_camera_geometry(source)
+        self.camera_connect_button.config(state='normal' if source == 'Pi SSH' else 'disabled')
+        self.restore_camera_mode_controls()
+        self.camera_disconnect_button.config(state='disabled')
+        self.ssh_state_label.config(text='Pi disconnected; camera source changed', fg='red')
+        self.set_status(f'Selected {source}. Connect this source; both phases use it.', 'blue')
+
+    def connect_local_camera(self):
+        if self.selected_camera_source != 'Iriun / Local webcam':
+            show_view_dialog(self, messagebox.showerror, 'Camera source', 'Select Iriun / Local webcam first.')
+            return
+        try:
+            index = int(self.webcam_index_var.get())
+            requested = self.read_webcam_resolution()
+            if self.local_camera.thread is not None and self.local_camera.thread.is_alive():
+                raise RuntimeError('Disconnect webcam first, then reconnect to apply resolution.')
+            key = f'Iriun / Local webcam:{index}'
+            if key != self.camera_source_key or requested != self.webcam_requested_size:
+                self.reset_camera_geometry(key)
+            self.drain_frames(self.local_frame_queue)
+            self.drain_frames(self.local_event_queue)
+            self.local_camera.start(index, **({} if requested is None else dict(width=requested[0], height=requested[1])))
+            self.webcam_requested_size = requested
+            self.local_state_label.config(text=f'Opening webcam {index}…', fg='blue')
+        except (ValueError, RuntimeError) as error:
+            show_view_dialog(self, messagebox.showerror, 'Webcam', str(error))
+
+    def disconnect_local_camera(self):
+        self.local_camera.stop()
+        self.drain_frames(self.local_frame_queue)
+        self.local_state_label.config(text='Webcam disconnected', fg='red')
+
     def build_ssh_camera_panel(self, parent):
         frame = tk.LabelFrame(
             parent, text="Raspberry Pi Camera — SSH", padx=10, pady=10
         )
         frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.pi_camera_panel = frame
         frame.columnconfigure(5, weight=1)
         frame.rowconfigure(5, weight=1)
 
@@ -301,6 +439,8 @@ class ClosedLoopGUI(BaseServoGUI):
         threading.Thread(target=query, daemon=True).start()
 
     def connect_ssh_camera(self):
+        if getattr(self, 'selected_camera_source', 'Pi SSH') != 'Pi SSH':
+            return
         try:
             base_settings = self.read_ssh_settings(include_mode=False)
             if self.mode_settings != base_settings or not self.camera_modes:
@@ -335,16 +475,30 @@ class ClosedLoopGUI(BaseServoGUI):
         self.set_status("SSH camera disconnected", "red")
 
     def restore_camera_mode_controls(self):
-        self.camera_modes_button.config(state="normal")
-        self.camera_mode_combo.config(state="readonly")
-        self.camera_fps_entry.config(state="normal")
+        selected = getattr(self, 'selected_camera_source', 'Pi SSH') == 'Pi SSH'
+        self.camera_modes_button.config(state="normal" if selected else 'disabled')
+        self.camera_mode_combo.config(state="readonly" if selected else 'disabled')
+        self.camera_fps_entry.config(state="normal" if selected else 'disabled')
 
     def poll_camera(self):
         started = time.monotonic()
+        if hasattr(self, 'local_event_queue'):
+            try:
+                while True:
+                    kind, message = self.local_event_queue.get_nowait()
+                    if self.selected_camera_source == 'Iriun / Local webcam':
+                        color = 'darkorange' if kind == 'connected' and 'different size' in message else 'green' if kind == 'connected' else 'red'
+                        self.local_state_label.config(text=message, fg=color)
+            except queue.Empty:
+                pass
         try:
             while True:
                 event = self.camera_event_queue.get_nowait()
                 kind = event[0]
+                if getattr(self, 'selected_camera_source', 'Pi SSH') != 'Pi SSH' and kind != 'log':
+                    if kind in ('modes', 'mode_error'):
+                        self.mode_loading = False
+                    continue
                 if kind == "modes":
                     self.mode_loading = False
                     self.camera_connect_button.config(state="normal")
@@ -389,7 +543,8 @@ class ClosedLoopGUI(BaseServoGUI):
         latest_frame = None
         try:
             while True:
-                latest_frame = self.camera_frame_queue.get_nowait()
+                frames = self.local_frame_queue if getattr(self, 'selected_camera_source', 'Pi SSH') == 'Iriun / Local webcam' else self.camera_frame_queue
+                latest_frame = frames.get_nowait()
         except queue.Empty:
             pass
         if latest_frame is not None:
@@ -428,6 +583,7 @@ class ClosedLoopGUI(BaseServoGUI):
         self.commands.close()
         self.calibration.close()
         self.ssh_camera.stop()
+        self.local_camera.stop()
         try:
             if self.port and getattr(self.port, "is_open", False):
                 self.port.close()
