@@ -17,8 +17,9 @@ In calibrated robot XY (millimetres):
 The desired sequence point never changes. PositionPID has separate X/Y state
 with shared gains, a vector correction limit, a slew-rate limit, derivative
 filtering and conservative integral anti-windup. Defaults are P=0.2, I=D=0,
-maximum correction 2 mm, slew 1 mm/s and minimum update period 1 s. These are
-conservative starting settings, not experimentally tuned gains. Test on your
+starting correction 2 mm. GUI defaults are slew 5 mm/s and minimum update period
+0.25 s (the reusable PID class retains its original 1 mm/s and 1 s defaults).
+These are starting settings, not experimentally tuned gains. Test on your
 hardware carefully. Settings are locked during a run.
 
 ## Adaptive Kp
@@ -33,8 +34,13 @@ control-detail views and tracking/recording CSVs.
 This is a conservative error-based gain scheduler, not a plant-identification
 or guaranteed-convergence controller. It consumes only fresh, complete-group
 observations following successfully SENT corrections, at least one control
-period after the send. Four consecutive responses with less than 2% (or 0.05 mm)
-improvement increase Kp by 10%. Crossing the target (error-vector reversal) or
+period after the send. Each response with less than 5% (or 0.05 mm)
+improvement increases Kp immediately: **Adapt %** defaults to 50% per response
+far from the target. The increase tapers toward 10% near tolerance (at the
+default pace); configurable Adapt % must be greater than zero and at most 100.
+For example, stagnant 10 mm error with 1 mm tolerance raises Kp from
+0.2 → 0.3 → 0.45 → 0.675 → 1 in four eligible responses, rather than four checks
+for each 10% step. Crossing the target (error-vector reversal) or
 error growth greater than 10% (or 0.2 mm) reduces Kp by 20%. Clear improvement
 holds Kp. Correction/slew saturation suppresses increases. These thresholds are
 initial heuristics, not hardware-tuned values.
@@ -55,9 +61,9 @@ guaranteed. Begin with one robot and conservative limits.
 (mm)** is the editable ceiling (default 20 mm, not a hardware-tuned value).
 Uncheck Adaptive limit to retain the original fixed cap.
 
-After four valid applied responses at the actual correction cap with error
+After each valid applied response at the actual correction cap with error
 still outside tolerance and without substantial worsening, the radius expands
-by 10% or 0.25 mm, whichever is larger, up to the ceiling. A slew-limited command
+by half of Adapt % (default 25%) or 0.25 mm, whichever is larger, up to the ceiling. A slew-limited command
 that has not reached the cap does not count. Overshoot/error growth reduces the
 radius by 20%, but never below the starting radius or the magnitude of the
 current applied output, avoiding abrupt clipping. Reaching tolerance holds the
@@ -71,6 +77,13 @@ must still be inside the pins and camera. Blocked commands cannot drive limit
 growth. Current radius and its adjustment reason appear in both detail views
 and CSVs. This does not introduce integral bias learning or guarantee 1 mm
 accuracy; Ki remains user-configured (default zero).
+
+There is no added settling sleep between corrections. Updates require a new
+valid camera sample and the configured minimum period. One motor-angle solve
+and send runs at a time; actual cadence also depends on live FPS, solver runtime
+and serial throughput. The 0.25 s setting is not a guaranteed 4 Hz send rate.
+The initial sequence row's Wait still applies before feedback begins. This
+change accelerates gain/limit scheduling, not integral accumulation.
 
 ## Execution
 

@@ -12,22 +12,68 @@ from command_sequences import XYStep
 
 
 class PositionControlTests(unittest.TestCase):
-    def test_adaptive_limit_expands_after_four_applied_cap_responses(self):
+    def test_fast_adaptation_reaches_kp_ceiling_in_four_far_stagnant_responses(self):
+        pid = PositionPID(adaptive=True, period_s=.25, limit_mm=30, slew_mm_s=100)
+        pid.update([10,0], 0)
+        gains = []
+        for index in range(1,5):
+            pid.mark_sent([10,0], (index - 1) * .25)
+            pid.update([10,0], index * .25)
+            gains.append(pid.kp)
+        np.testing.assert_allclose(gains, [.3,.45,.675,1.])
+
+    def test_fast_adaptation_tapers_near_target_and_accepts_custom_pace(self):
+        for error, pace, expected in ((1.5,50,.22), (10,20,.24)):
+            pid = PositionPID(adaptive=True, adapt_percent=pace, limit_mm=30, slew_mm_s=100)
+            pid.update([error,0], 0)
+            pid.mark_sent([error,0], 0)
+            pid.update([error,0], 1)
+            self.assertAlmostEqual(pid.kp, expected)
+        for pace in (0, -1, 101, float('nan')):
+            with self.assertRaises(ValueError):
+                PositionPID(adapt_percent=pace)
+
+    def test_feedback_changes_command_each_fresh_semi_static_response(self):
+        now, active = [.01], [True]
+        gate = ArrivalGate(clock=lambda: now[0])
+        gate.arm((0,0))
+        gate.observe([[-.01,0]])
+        feedback = PositionFeedback(PositionPID(adaptive=True, period_s=.25,
+                                    limit_mm=30, slew_mm_s=100), clock=lambda: now[0])
+        feedback.enabled.set()
+        commands = []
+        def advance(timeout):
+            now[0] += .3
+            gate.observe([[-.01,0]])
+        gate.condition.wait = advance
+        def move(case, target, **kwargs):
+            self.assertTrue(kwargs['active']())
+            commands.append(np.asarray(target) * 1000)
+            result = {'angles_deg':[60,70]}
+            kwargs['on_sent'](result)
+            if len(commands) == 4:
+                active[0] = False
+            return result
+        commander = Mock(move=move)
+        feedback.wait_at_target(XYStep((0,0),0,180), commander, 'case', gate, lambda: active[0], Mock())
+        np.testing.assert_allclose(np.asarray(commands)[:,0], [2,3,4.5,6.75])
+
+    def test_adaptive_limit_expands_on_each_applied_cap_response(self):
         pid = PositionPID(kp=1, adaptive_limit=True, slew_mm_s=20, limit_max_mm=3)
         pid.update([10,0], 0)
-        for timestamp in range(1,5):
+        for timestamp in range(1,2):
             pid.mark_sent([10,0], timestamp - 1)
             pid.update([10,0], timestamp)
-        self.assertEqual(pid.limit, 2.25)
+        self.assertEqual(pid.limit, 2.5)
         self.assertEqual(pid.kp, 1)  # Limit adaptation is independent of gain adaptation.
-        for timestamp in range(5,50):
+        for timestamp in range(2,50):
             pid.mark_sent([10,0], timestamp - 1)
             output = pid.update([10,0], timestamp)
             self.assertLessEqual(np.linalg.norm(output), pid.limit + 1e-9)
         self.assertEqual(pid.limit, 3)
         pid.reset()
         self.assertEqual(pid.limit, 2)
-        self.assertEqual(pid.limit_responses, 0)
+        self.assertIsNone(pid.sent_error)
 
     def test_adaptive_limit_does_not_grow_without_sent_cap_responses(self):
         for kwargs, error in (({}, [1,0]), ({'slew_mm_s': .01}, [10,0])):
@@ -69,17 +115,17 @@ class PositionControlTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 PositionPID(adaptive_limit=True, limit_max_mm=maximum)
 
-    def test_adaptive_kp_grows_only_after_four_applied_slow_responses(self):
+    def test_adaptive_kp_grows_on_each_applied_slow_response(self):
         pid = PositionPID(adaptive=True, limit_mm=20, slew_mm_s=20)
         pid.update([3,0], 0)
         # Merely calculating a pose does not count as an applied response.
         for timestamp in range(1,6):
             pid.update([3,0], timestamp)
         self.assertEqual(pid.kp, .2)
-        for timestamp in range(6,10):
+        for timestamp in range(6,7):
             pid.mark_sent([3,0], timestamp - 1)
             pid.update([3,0], timestamp)
-        self.assertAlmostEqual(pid.kp, .22)
+        self.assertAlmostEqual(pid.kp, .25)
         self.assertIn('increased', pid.adaptation)
 
     def test_adaptive_kp_reduces_on_overshoot_and_growing_error(self):

@@ -48,8 +48,9 @@ class CommandTab:
         self.kp_max_var = tk.StringVar(value='1')
         self.adaptive_limit_var = tk.BooleanVar(value=True)
         self.limit_max_var = tk.StringVar(value='20')
+        self.adapt_percent_var = tk.StringVar(value='50')
         self.pid_vars = {key: tk.StringVar(value=value) for key, value in
-                         [('Kp', '.2'), ('Ki', '0'), ('Kd', '0'), ('Limit mm', '2'), ('Slew mm/s', '1'), ('Period s', '1')]}
+                         [('Kp', '.2'), ('Ki', '0'), ('Kd', '0'), ('Limit mm', '2'), ('Slew mm/s', '5'), ('Period s', '.25')]}
         self.precalculating = False
         self.precalculated_signature = None
         self.preparation_stop = threading.Event()
@@ -205,7 +206,7 @@ class CommandTab:
         self.pid_entries = []
         self.adaptive_kp_check = tk.Checkbutton(pid_bar, text='Adaptive Kp', variable=self.adaptive_kp_var)
         self.adaptive_kp_check.pack(side='left')
-        HoverHint(self.adaptive_kp_check, 'Adjusts Kp slowly from applied corrections toward Arrival tolerance (default 1 mm). '
+        HoverHint(self.adaptive_kp_check, 'Adjusts Kp after each applied response toward Arrival tolerance (default 1 mm). '
                   'Reduces gain on overshoot/error growth. Bounded; accuracy is not guaranteed. Uncheck for fixed PID.')
         tk.Label(pid_bar, text='Kp max').pack(side='left')
         max_entry = tk.Entry(pid_bar, textvariable=self.kp_max_var, width=4)
@@ -216,7 +217,7 @@ class CommandTab:
         limit_bar.pack(fill='x', padx=8, pady=2)
         limit_check = tk.Checkbutton(limit_bar, text='Adaptive limit', variable=self.adaptive_limit_var)
         limit_check.pack(side='left')
-        HoverHint(limit_check, 'Starts at Limit mm. Four applied responses at the cap with persistent error gradually expand it. '
+        HoverHint(limit_check, 'Starts at Limit mm. Each applied response at the cap with persistent error gradually expands it. '
                   'Workspace and slew limits remain. Uncheck for a fixed correction limit.')
         tk.Label(limit_bar, text='Limit max (mm)').pack(side='left')
         limit_entry = tk.Entry(limit_bar, textvariable=self.limit_max_var, width=5)
@@ -224,6 +225,12 @@ class CommandTab:
         HoverHint(limit_entry, 'Maximum adaptive correction magnitude, default 20 mm. This is a ceiling, not a jump command. '
                   'Choose for your hardware; must be at least Limit mm. Locked during a run.')
         self.pid_entries.extend([limit_check, limit_entry])
+        tk.Label(limit_bar, text='Adapt %').pack(side='left', padx=(8,2))
+        adapt_entry = tk.Entry(limit_bar, textvariable=self.adapt_percent_var, width=4)
+        adapt_entry.pack(side='left')
+        HoverHint(adapt_entry, 'Maximum Kp increase per valid response (default 50%, range >0 to 100%). '
+                  'Tapers near tolerance. Limit expansion uses half this rate. No four-cycle wait.')
+        self.pid_entries.append(adapt_entry)
         for key, variable in self.pid_vars.items():
             tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
             entry = tk.Entry(pid_bar, textvariable=variable, width=5)
@@ -944,7 +951,8 @@ class CommandTab:
                 pid = PositionPID(*[float(variable.get()) for variable in self.pid_vars.values()],
                                   adaptive=self.adaptive_kp_var.get(), tolerance_mm=arrival_gate.tolerance_mm,
                                   kp_max=float(self.kp_max_var.get()), adaptive_limit=self.adaptive_limit_var.get(),
-                                  limit_max_mm=float(self.limit_max_var.get()))
+                                  limit_max_mm=float(self.limit_max_var.get()),
+                                  adapt_percent=float(self.adapt_percent_var.get()))
                 def validate_correction(target):
                     from dataclasses import replace
                     corrected = [replace(self.steps[0], target_xy_m=tuple(target))]

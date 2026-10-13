@@ -8,7 +8,7 @@ import numpy as np
 class PositionPID:
     def __init__(self, kp=.2, ki=0., kd=0., limit_mm=2., slew_mm_s=1., period_s=1., *,
                  adaptive=False, tolerance_mm=1., kp_min=.05, kp_max=1.,
-                 adaptive_limit=False, limit_max_mm=20.):
+                 adaptive_limit=False, limit_max_mm=20., adapt_percent=50.):
         values = np.asarray([kp, ki, kd, limit_mm, slew_mm_s, period_s], float)
         if not np.isfinite(values).all() or np.any(values[:3] < 0) or np.any(values[3:] <= 0):
             raise ValueError('PID gains must be finite/nonnegative; limits and period positive.')
@@ -25,6 +25,9 @@ class PositionPID:
             raise ValueError('Limit max must be positive/finite and at least the starting limit when adaptive.')
         self.initial_limit = self.limit
         self.adaptive_limit, self.limit_max = bool(adaptive_limit), float(limit_max_mm)
+        if not np.isfinite(adapt_percent) or not 0 < adapt_percent <= 100:
+            raise ValueError('Adapt % must be finite and between 0 and 100 (exclusive of zero).')
+        self.adapt_rate = float(adapt_percent) / 100
         self.reset()
 
     def reset(self):
@@ -34,9 +37,7 @@ class PositionPID:
         self.sent_at = None
         self.sent_limited = False
         self.sent_at_cap = False
-        self.limit_responses = 0
         self.limit_adaptation = 'Waiting for applied response' if self.adaptive_limit else 'Fixed limit'
-        self.slow_responses = 0
         self.adaptation = 'Waiting for applied response' if self.adaptive else 'Fixed Kp'
         self.integral = np.zeros(2)
         self.derivative = np.zeros(2)
@@ -65,44 +66,32 @@ class PositionPID:
         worsening = np.dot(previous, error) < 0 or size > old_size + max(.2, old_size * .1)
         if self.adaptive_limit:
             if size <= self.tolerance:
-                self.limit_responses = 0
                 self.limit_adaptation = 'Within tolerance; limit held'
             elif worsening:
                 # Do not suddenly clip an already-applied correction on shrink.
                 self.limit = max(self.initial_limit, float(np.linalg.norm(self.output)), self.limit * .8)
-                self.limit_responses = 0
                 self.limit_adaptation = 'Limit reduced/held: overshoot / error grew'
             elif self.sent_at_cap:
-                self.limit_responses += 1
-                self.limit_adaptation = 'Checking persistent error at limit'
-                if self.limit_responses >= 4:
-                    self.limit = min(self.limit_max, self.limit + max(.25, self.limit * .1))
-                    self.limit_responses = 0
-                    self.limit_adaptation = 'Limit max reached' if self.limit >= self.limit_max else 'Limit increased: persistent error'
+                self.limit = min(self.limit_max, self.limit + max(.25, self.limit * self.adapt_rate * .5))
+                self.limit_adaptation = 'Limit max reached' if self.limit >= self.limit_max else 'Limit increased: persistent error'
             else:
-                self.limit_responses = 0
                 self.limit_adaptation = 'Below limit / slew ramp; limit held'
         if not self.adaptive:
             return
         if size <= self.tolerance:
-            self.slow_responses = 0
             self.adaptation = 'Within tolerance'
         elif worsening:
             self.kp = max(self.kp_min, self.kp * .8)
-            self.slow_responses = 0
             self.adaptation = 'Kp reduced: overshoot / error grew'
         elif self.sent_limited:
-            self.slow_responses = 0
             self.adaptation = 'At correction / slew limit; no gain increase'
-        elif old_size - size < max(.05, old_size * .02):
-            self.slow_responses += 1
-            self.adaptation = 'Checking slow progress'
-            if self.slow_responses >= 4:
-                self.kp = min(self.kp_max, self.kp * 1.1)
-                self.slow_responses = 0
-                self.adaptation = 'Kp max reached' if self.kp >= self.kp_max else 'Kp increased: slow progress'
+        elif old_size - size < max(.05, old_size * .05):
+            # Semi-static plant: act on each applied response, not a four-cycle vote.
+            # Taper aggressiveness near tolerance to avoid chasing pixel noise.
+            rate = self.adapt_rate * float(np.clip((size / self.tolerance - 1) / 4, .2, 1))
+            self.kp = min(self.kp_max, self.kp * (1 + rate))
+            self.adaptation = 'Kp max reached' if self.kp >= self.kp_max else 'Kp increased: slow progress'
         else:
-            self.slow_responses = 0
             self.adaptation = 'Error improving; Kp held'
 
     def update(self, error_mm, timestamp):
