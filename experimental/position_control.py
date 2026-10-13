@@ -7,7 +7,8 @@ import numpy as np
 
 class PositionPID:
     def __init__(self, kp=.2, ki=0., kd=0., limit_mm=2., slew_mm_s=1., period_s=1., *,
-                 adaptive=False, tolerance_mm=1., kp_min=.05, kp_max=1.):
+                 adaptive=False, tolerance_mm=1., kp_min=.05, kp_max=1.,
+                 adaptive_limit=False, limit_max_mm=20.):
         values = np.asarray([kp, ki, kd, limit_mm, slew_mm_s, period_s], float)
         if not np.isfinite(values).all() or np.any(values[:3] < 0) or np.any(values[3:] <= 0):
             raise ValueError('PID gains must be finite/nonnegative; limits and period positive.')
@@ -20,13 +21,21 @@ class PositionPID:
         self.initial_kp = self.kp
         self.adaptive, self.tolerance = bool(adaptive), tolerance_mm
         self.kp_min, self.kp_max = kp_min, kp_max
+        if not np.isfinite(limit_max_mm) or limit_max_mm <= 0 or (adaptive_limit and limit_max_mm < limit_mm):
+            raise ValueError('Limit max must be positive/finite and at least the starting limit when adaptive.')
+        self.initial_limit = self.limit
+        self.adaptive_limit, self.limit_max = bool(adaptive_limit), float(limit_max_mm)
         self.reset()
 
     def reset(self):
         self.kp = self.initial_kp
+        self.limit = self.initial_limit
         self.sent_error = None
         self.sent_at = None
         self.sent_limited = False
+        self.sent_at_cap = False
+        self.limit_responses = 0
+        self.limit_adaptation = 'Waiting for applied response' if self.adaptive_limit else 'Fixed limit'
         self.slow_responses = 0
         self.adaptation = 'Waiting for applied response' if self.adaptive else 'Fixed Kp'
         self.integral = np.zeros(2)
@@ -34,25 +43,51 @@ class PositionPID:
         self.previous_error = None
         self.previous_time = None
         self.output = np.zeros(2)
+        self.output_limited = self.output_at_cap = False
 
     def mark_sent(self, error_mm, timestamp):
         """Only successfully sent corrections may inform the next gain update."""
+        if self.sent_error is not None:
+            return  # Keep the response anchor; a newer send must not postpone it forever.
         self.sent_error = np.asarray(error_mm, float).copy()
         self.sent_at = timestamp
         self.sent_limited = self.output_limited
+        self.sent_at_cap = self.output_at_cap
 
     def adapt_response(self, error, timestamp):
-        if not self.adaptive or self.sent_error is None:
+        if not (self.adaptive or self.adaptive_limit) or self.sent_error is None:
             return
         if timestamp - self.sent_at < self.period:
             return
         previous = self.sent_error
         self.sent_error = None  # Consume each applied response only once.
         size, old_size = np.linalg.norm(error), np.linalg.norm(previous)
+        worsening = np.dot(previous, error) < 0 or size > old_size + max(.2, old_size * .1)
+        if self.adaptive_limit:
+            if size <= self.tolerance:
+                self.limit_responses = 0
+                self.limit_adaptation = 'Within tolerance; limit held'
+            elif worsening:
+                # Do not suddenly clip an already-applied correction on shrink.
+                self.limit = max(self.initial_limit, float(np.linalg.norm(self.output)), self.limit * .8)
+                self.limit_responses = 0
+                self.limit_adaptation = 'Limit reduced/held: overshoot / error grew'
+            elif self.sent_at_cap:
+                self.limit_responses += 1
+                self.limit_adaptation = 'Checking persistent error at limit'
+                if self.limit_responses >= 4:
+                    self.limit = min(self.limit_max, self.limit + max(.25, self.limit * .1))
+                    self.limit_responses = 0
+                    self.limit_adaptation = 'Limit max reached' if self.limit >= self.limit_max else 'Limit increased: persistent error'
+            else:
+                self.limit_responses = 0
+                self.limit_adaptation = 'Below limit / slew ramp; limit held'
+        if not self.adaptive:
+            return
         if size <= self.tolerance:
             self.slow_responses = 0
             self.adaptation = 'Within tolerance'
-        elif np.dot(previous, error) < 0 or size > old_size + max(.2, old_size * .1):
+        elif worsening:
             self.kp = max(self.kp_min, self.kp * .8)
             self.slow_responses = 0
             self.adaptation = 'Kp reduced: overshoot / error grew'
@@ -90,6 +125,7 @@ class PositionPID:
         delta = bounded - self.output
         bounded = self.output + delta * min(1., self.slew * dt / max(np.linalg.norm(delta), 1e-12))
         self.output_limited = norm >= self.limit or np.linalg.norm(delta) > self.slew * dt
+        self.output_at_cap = norm >= self.limit and np.linalg.norm(bounded) >= self.limit - 1e-9
         if np.linalg.norm(raw - bounded) < 1e-9:
             self.integral = proposed_integral
         self.output = bounded
@@ -117,6 +153,7 @@ class PositionFeedback:
         target_mm = np.asarray(step.target_xy_m) * 1000
         self.publish(desired_xy_mm=target_mm.tolist(), commanded_xy_mm=target_mm.tolist(), correction_mm=[0., 0.],
                      kp=float(self.pid.kp), adaptive=self.pid.adaptive, adaptation=self.pid.adaptation,
+                     limit_mm=float(self.pid.limit), adaptive_limit=self.pid.adaptive_limit, limit_adaptation=self.pid.limit_adaptation,
                      ratio=step.ratio, angle_deg=step.angle_deg, state='Waiting', calculated_angles='',
                      sent_angles=[] if initial_result is None else [float(value) for value in initial_result['angles_deg']])
         last_update = last_sample = None
@@ -158,7 +195,8 @@ class PositionFeedback:
                 elif sample != last_sample and (last_update is None or now - last_update >= self.pid.period):
                     last_sample, last_update = sample, now
                     correction = self.pid.update(target_mm - measured, sample)
-                    self.publish(kp=float(self.pid.kp), adaptation=self.pid.adaptation)
+                    self.publish(kp=float(self.pid.kp), adaptation=self.pid.adaptation,
+                                 limit_mm=float(self.pid.limit), limit_adaptation=self.pid.limit_adaptation)
                     command = (target_mm + correction) / 1000
                     self.publish(proposed_xy_mm=(command * 1000).tolist(), state='Calculating', calculated_angles='')
                     try:
@@ -191,6 +229,7 @@ class PositionFeedback:
                     if result is None:
                         self.publish(state='Correction discarded: stale observation / Control off / arrival')
             with gate.condition:
-                self.publish(kp=float(self.pid.kp), adaptation=self.pid.adaptation)
+                self.publish(kp=float(self.pid.kp), adaptation=self.pid.adaptation,
+                             limit_mm=float(self.pid.limit), limit_adaptation=self.pid.limit_adaptation)
                 gate.condition.wait(.1)
         return False

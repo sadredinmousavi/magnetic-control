@@ -12,6 +12,63 @@ from command_sequences import XYStep
 
 
 class PositionControlTests(unittest.TestCase):
+    def test_adaptive_limit_expands_after_four_applied_cap_responses(self):
+        pid = PositionPID(kp=1, adaptive_limit=True, slew_mm_s=20, limit_max_mm=3)
+        pid.update([10,0], 0)
+        for timestamp in range(1,5):
+            pid.mark_sent([10,0], timestamp - 1)
+            pid.update([10,0], timestamp)
+        self.assertEqual(pid.limit, 2.25)
+        self.assertEqual(pid.kp, 1)  # Limit adaptation is independent of gain adaptation.
+        for timestamp in range(5,50):
+            pid.mark_sent([10,0], timestamp - 1)
+            output = pid.update([10,0], timestamp)
+            self.assertLessEqual(np.linalg.norm(output), pid.limit + 1e-9)
+        self.assertEqual(pid.limit, 3)
+        pid.reset()
+        self.assertEqual(pid.limit, 2)
+        self.assertEqual(pid.limit_responses, 0)
+
+    def test_adaptive_limit_does_not_grow_without_sent_cap_responses(self):
+        for kwargs, error in (({}, [1,0]), ({'slew_mm_s': .01}, [10,0])):
+            pid = PositionPID(adaptive_limit=True, **kwargs)
+            pid.update(error, 0)
+            for timestamp in range(1,10):
+                pid.mark_sent(error, timestamp - 1)
+                pid.update(error, timestamp)
+            self.assertEqual(pid.limit, 2)
+        pid = PositionPID(adaptive_limit=True)
+        for timestamp in range(10):
+            pid.update([10,0], timestamp)
+        self.assertEqual(pid.limit, 2)
+
+    def test_adaptive_limit_holds_on_arrival_and_shrinks_without_abrupt_clipping(self):
+        pid = PositionPID(kp=1, adaptive_limit=True, slew_mm_s=20)
+        pid.limit = 4
+        pid.update([3,0], 0)
+        pid.mark_sent([3,0], 0)
+        pid.update([.5,0], 1)
+        self.assertEqual(pid.limit, 4)
+        pid.mark_sent([.5,0], 1)
+        pid.update([-3,0], 2)
+        self.assertAlmostEqual(pid.limit, 3.2)
+        self.assertLessEqual(np.linalg.norm(pid.output), pid.limit)
+
+    def test_new_sends_do_not_postpone_response_anchor_forever(self):
+        pid = PositionPID(adaptive_limit=True)
+        pid.update([10,0], 0)
+        pid.mark_sent([10,0], .1)
+        pid.update([10,0], 1)
+        pid.mark_sent([10,0], 1.1)
+        self.assertEqual(pid.sent_at, .1)
+        pid.update([10,0], 2)
+        self.assertIsNone(pid.sent_error)
+
+    def test_invalid_adaptive_limit_ceiling(self):
+        for maximum in (0, float('nan'), float('inf'), 1):
+            with self.assertRaises(ValueError):
+                PositionPID(adaptive_limit=True, limit_max_mm=maximum)
+
     def test_adaptive_kp_grows_only_after_four_applied_slow_responses(self):
         pid = PositionPID(adaptive=True, limit_mm=20, slew_mm_s=20)
         pid.update([3,0], 0)

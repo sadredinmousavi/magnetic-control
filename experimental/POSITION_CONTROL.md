@@ -48,6 +48,30 @@ and slew limits still apply. Adaptive Kp cannot fix bad calibration, tracking
 noise, a stuck robot or insufficient correction range; reaching 1 mm is not
 guaranteed. Begin with one robot and conservative limits.
 
+## Adaptive correction limit
+
+**Adaptive limit** defaults on in the GUI, independently of Adaptive Kp.
+**Limit mm** is now the starting correction radius (default 2 mm); **Limit max
+(mm)** is the editable ceiling (default 20 mm, not a hardware-tuned value).
+Uncheck Adaptive limit to retain the original fixed cap.
+
+After four valid applied responses at the actual correction cap with error
+still outside tolerance and without substantial worsening, the radius expands
+by 10% or 0.25 mm, whichever is larger, up to the ceiling. A slew-limited command
+that has not reached the cap does not count. Overshoot/error growth reduces the
+radius by 20%, but never below the starting radius or the magnitude of the
+current applied output, avoiding abrupt clipping. Reaching tolerance holds the
+radius. No successfully sent response means no expansion. New sends preserve
+an unconsumed response anchor so camera/solver timing cannot indefinitely
+postpone adaptation. Reset conditions also restore the starting radius.
+
+Kp remains held while capped; once the radius opens enough, gain adaptation can
+resume. The existing slew limit remains unchanged and every corrected target
+must still be inside the pins and camera. Blocked commands cannot drive limit
+growth. Current radius and its adjustment reason appear in both detail views
+and CSVs. This does not introduce integral bias learning or guarantee 1 mm
+accuracy; Ki remains user-configured (default zero).
+
 ## Execution
 
 The original point is sent first (precalculated if available). Its row wait

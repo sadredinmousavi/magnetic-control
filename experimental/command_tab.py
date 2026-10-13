@@ -46,6 +46,8 @@ class CommandTab:
         self.control_requested = False
         self.adaptive_kp_var = tk.BooleanVar(value=True)
         self.kp_max_var = tk.StringVar(value='1')
+        self.adaptive_limit_var = tk.BooleanVar(value=True)
+        self.limit_max_var = tk.StringVar(value='20')
         self.pid_vars = {key: tk.StringVar(value=value) for key, value in
                          [('Kp', '.2'), ('Ki', '0'), ('Kd', '0'), ('Limit mm', '2'), ('Slew mm/s', '1'), ('Period s', '1')]}
         self.precalculating = False
@@ -210,6 +212,18 @@ class CommandTab:
         max_entry.pack(side='left')
         HoverHint(max_entry, 'Upper adaptive Kp bound; default 1. Starting Kp must be between 0.05 and this value. Locked during a run.')
         self.pid_entries.extend([self.adaptive_kp_check, max_entry])
+        limit_bar = tk.Frame(parent)
+        limit_bar.pack(fill='x', padx=8, pady=2)
+        limit_check = tk.Checkbutton(limit_bar, text='Adaptive limit', variable=self.adaptive_limit_var)
+        limit_check.pack(side='left')
+        HoverHint(limit_check, 'Starts at Limit mm. Four applied responses at the cap with persistent error gradually expand it. '
+                  'Workspace and slew limits remain. Uncheck for a fixed correction limit.')
+        tk.Label(limit_bar, text='Limit max (mm)').pack(side='left')
+        limit_entry = tk.Entry(limit_bar, textvariable=self.limit_max_var, width=5)
+        limit_entry.pack(side='left')
+        HoverHint(limit_entry, 'Maximum adaptive correction magnitude, default 20 mm. This is a ceiling, not a jump command. '
+                  'Choose for your hardware; must be at least Limit mm. Locked during a run.')
+        self.pid_entries.extend([limit_check, limit_entry])
         for key, variable in self.pid_vars.items():
             tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
             entry = tk.Entry(pid_bar, textvariable=variable, width=5)
@@ -601,6 +615,9 @@ class CommandTab:
                 'control_kp': control_data.get('kp', ''),
                 'adaptive_kp': int(control_data.get('adaptive', False)),
                 'kp_adaptation': control_data.get('adaptation', ''),
+                'control_limit_mm': control_data.get('limit_mm', ''),
+                'adaptive_limit': int(control_data.get('adaptive_limit', False)),
+                'limit_adaptation': control_data.get('limit_adaptation', ''),
                 'correction_x_mm': (control_data.get('correction_mm') or ['', ''])[0],
                 'correction_y_mm': (control_data.get('correction_mm') or ['', ''])[1],
                 'commanded_x_mm': (control_data.get('commanded_xy_mm') or ['', ''])[0],
@@ -835,9 +852,10 @@ class CommandTab:
         calculated = data.get('calculated_angles', '')
         calculated = '—' if not calculated else ', '.join(f'{angle:.1f}' for angle in calculated)
         kp = '—' if data.get('kp') is None else f"{data['kp']:.3f}"
+        limit = '—' if data.get('limit_mm') is None else f"{data['limit_mm']:.2f}"
         label.config(text=f"Desired ({xy('desired_xy_mm')}) | Measured ({xy('measured_xy_mm')}) | u ({xy('correction_mm')}) | Commanded ({xy('commanded_xy_mm')})\n"
                           f"Ratio {data.get('ratio', '—')} | Angle {data.get('angle_deg', 'Auto')} | Orientation: unavailable | {data.get('state', 'Control off')}\n"
-                          f"Proposed ({xy('proposed_xy_mm')}) | Kp {kp} | {data.get('adaptation', '')}\n"
+                          f"Proposed ({xy('proposed_xy_mm')}) | Kp {kp}: {data.get('adaptation', '')} | Limit {limit} mm: {data.get('limit_adaptation', '')}\n"
                           f"Calculated motors: {calculated} | Last sent motors: {sent}")
 
     def point_signature(self):
@@ -925,7 +943,8 @@ class CommandTab:
             if hasattr(self, 'pid_vars'):
                 pid = PositionPID(*[float(variable.get()) for variable in self.pid_vars.values()],
                                   adaptive=self.adaptive_kp_var.get(), tolerance_mm=arrival_gate.tolerance_mm,
-                                  kp_max=float(self.kp_max_var.get()))
+                                  kp_max=float(self.kp_max_var.get()), adaptive_limit=self.adaptive_limit_var.get(),
+                                  limit_max_mm=float(self.limit_max_var.get()))
                 def validate_correction(target):
                     from dataclasses import replace
                     corrected = [replace(self.steps[0], target_xy_m=tuple(target))]
