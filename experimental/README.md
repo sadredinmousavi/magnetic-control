@@ -9,10 +9,12 @@ remain available, while a separate resizable window shows the same source and
 overlays. Maximize or Full screen enlarges that view; Escape exits full screen.
 Reopening the button raises the existing window instead of creating duplicates.
 Pop-out windows open maximized by default.
+They stay on top until closed. Error, confirmation and file dialogs are owned by
+the active camera view and restore it afterward instead of raising the main page.
 Calibration supports pin/ROI mouse placement and settled-robot Capture in the
 pop-out. Its single-row toolbar includes 4 pins / ROI modes, Manual pins,
 pin/robot ROI radius inputs, Center/+X/+Y moves, Capture, Reset axes, Clear pins,
-Track / Stop track. These share the main page's state and settings.
+Clear ROI. These share the main page's state and settings.
 Calibration pop-out controls are locked during a Phase 3 run. Commands supports
 target selection and synchronized Next/Finish/Stop.
 Closing only the pop-out never stops tracking, recording or motor execution.
@@ -32,10 +34,22 @@ input or timed delay: Capture enables after the command is sent. Visually wait
 until the robot settles, then press Capture; sending a command does not prove
 the motors or robot have reached their positions. Fresh-frame checks still apply.
 Moves can be repeated in any order once the current move finishes; a new move
+only requires selected/prepared hardware and a connected serial controller, not
+pins, ROI, a camera or a robot detection. The command uses physical case XY, not
+image coordinates. Capture still requires fresh live frames, four pins, a valid
+ROI and exactly one unambiguously tracked robot.
+Each new move
 replaces an uncaptured pending position without silently saving it. For axes,
 capture Center first, then +X/+Y. Capturing a new Center resets dependent X/Y
 samples, but merely testing a Center move does not erase saved axes.
-Calibration defaults to one robot. Both views show color-coded steps: 1. 4 pins,
+Calibration is fixed to one robot. Placing an ROI automatically starts detection
+and following, without requiring pins. Without four pins, physical XY fields are
+blank and pixel positions remain available. The same tracker supplies axis Capture;
+no second detector runs per frame. Clear ROI stops detection. Pins and fresh
+unambiguous observations are still required to save axis captures.
+Phase 3 has its own Phase 3 robots input (default 1). Enter the experimental
+robot count there; applying/loading Phase 2 calibration does not overwrite it.
+Both views show color-coded steps: 1. 4 pins,
 2. ROI and robot, 3. Axis (green completed, blue active, gray waiting). Capture
 is initially disabled; send a Center/+X/+Y command first.
 It enables for the pending position, then disables after a successful

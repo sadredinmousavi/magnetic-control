@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'experimental'))
-from camera_popout import CameraPopout
+from camera_popout import CameraPopout, show_view_dialog
 from closed_loop_calibration import CalibrationTab
 from command_tab import CommandTab
 from gui005 import ClosedLoopGUI
@@ -21,6 +21,19 @@ def canvas(width, height):
 
 
 class CameraPopoutTests(unittest.TestCase):
+    def test_dialog_is_owned_by_open_popout_and_restores_it_after_error(self):
+        view = CameraPopout.__new__(CameraPopout)
+        view.closed, view.window, view.show = False, Mock(), Mock()
+        owner = Mock(camera_popout=view)
+        dialog = Mock(return_value=True)
+        self.assertTrue(show_view_dialog(owner, dialog, 'Error', 'Message'))
+        dialog.assert_called_once_with('Error', 'Message', parent=view.window)
+        view.show.assert_called_once()
+        dialog.side_effect = RuntimeError('Dialog failed')
+        with self.assertRaises(RuntimeError):
+            show_view_dialog(owner, dialog, 'Error', 'Message')
+        self.assertEqual(view.show.call_count, 2)
+
     def test_camera_processing_caps_fps_and_uses_only_latest_frame(self):
         app = ClosedLoopGUI.__new__(ClosedLoopGUI)
         app.camera_event_queue, app.camera_frame_queue = queue.Queue(), queue.Queue()

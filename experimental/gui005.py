@@ -14,6 +14,7 @@ from ssh_camera import SSHCameraClient, SSHCameraSettings, preferred_camera_mode
 from closed_loop_calibration import CalibrationTab
 from point_control import PointCommander
 from command_tab import CommandTab
+from camera_popout import show_view_dialog
 
 
 class ClosedLoopGUI(BaseServoGUI):
@@ -87,8 +88,6 @@ class ClosedLoopGUI(BaseServoGUI):
         """Calibration policy; reusable synthesis/motion lives in PointCommander."""
         if not active():
             return
-        if not self.ssh_camera.is_running:
-            raise RuntimeError("Connect the live Pi camera before axis calibration.")
         result = self.point_commander.move_prepared_axis(
             case_name, target,
             settle_seconds=0, active=active,
@@ -284,7 +283,7 @@ class ClosedLoopGUI(BaseServoGUI):
         try:
             settings = self.read_ssh_settings(include_mode=False)
         except ValueError as error:
-            messagebox.showerror("SSH Camera Error", str(error))
+            show_view_dialog(self, messagebox.showerror, "SSH Camera Error", str(error))
             return
         self.mode_loading = True
         self.camera_connect_button.config(state="disabled")
@@ -310,7 +309,7 @@ class ClosedLoopGUI(BaseServoGUI):
             settings = self.read_ssh_settings()
             self.ssh_camera.start(settings)
         except Exception as error:
-            messagebox.showerror("SSH Camera Error", str(error))
+            show_view_dialog(self, messagebox.showerror, "SSH Camera Error", str(error))
             self.set_status("SSH camera connection failed", "red")
             return
         self.camera_connect_button.config(state="disabled")
@@ -370,7 +369,7 @@ class ClosedLoopGUI(BaseServoGUI):
                     self.camera_connect_button.config(state="normal")
                     self.restore_camera_mode_controls()
                     self.ssh_state_label.config(text="Could not query camera modes", fg="red")
-                    messagebox.showerror("Camera modes", event[1])
+                    show_view_dialog(self, messagebox.showerror, "Camera modes", event[1])
                 elif kind == "connected":
                     self.ssh_state_label.config(
                         text="Camera connected — receiving video", fg="green"

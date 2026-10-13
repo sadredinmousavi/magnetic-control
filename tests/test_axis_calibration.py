@@ -142,6 +142,32 @@ class RobotAxisTests(unittest.TestCase):
         thread.return_value.start.assert_called_once()
         app.axis_move.assert_not_called()
 
+    def test_prepared_axis_moves_without_any_vision_setup(self):
+        for target in ('Origin', '+X', '+Y'):
+            app = self.app()
+            app.frame, app.circle, app.corners = None, None, []
+            app.axis_samples = {}
+            app.axis_tracker, app.axis_after = None, None
+            app.count_var.get.return_value = '3'
+            app.axis_prepare, app.prepared_case = Mock(), app.control_case_var.get()
+            app.axis_move, app.parent = Mock(), Mock()
+            with patch('closed_loop_calibration.threading.Thread') as thread, \
+                 patch('closed_loop_calibration.messagebox.showerror') as error:
+                app.move_axis(target)
+            error.assert_not_called()
+            thread.return_value.start.assert_called_once()
+            self.assertTrue(app.axis_busy)
+            self.assertIsNone(app.axis_tracker)
+
+    def test_axis_move_does_not_require_a_robot_detection(self):
+        app = self.app()
+        app.axis_tracker, app.axis_after = None, None
+        app.axis_move, app.parent = Mock(), Mock()
+        with patch('closed_loop_calibration.threading.Thread') as thread:
+            app.move_axis('Origin')
+        self.assertTrue(app.axis_busy)
+        thread.return_value.start.assert_called_once()
+
     def test_test_moves_allow_any_axis_without_center_capture(self):
         for target in ('+X', '+Y'):
             app = self.app()
@@ -378,7 +404,7 @@ class RobotAxisTests(unittest.TestCase):
         app.point_commander = Mock()
         app.point_commander.move_prepared_axis.return_value = {"angles_deg": [60] * 8}
         app.camera_event_queue = queue.Queue()
-        app.ssh_camera = Mock(is_running=True)
+        app.ssh_camera = Mock(is_running=False)
         active = lambda: True
         for target in AXIS_TARGETS_M.values():
             app.move_axis_target(target, "case_100.cond_016_calibration_cartesian", active)

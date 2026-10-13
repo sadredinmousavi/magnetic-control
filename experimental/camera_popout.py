@@ -3,6 +3,24 @@
 import tkinter as tk
 
 
+def show_view_dialog(owner, dialog, *args, **kwargs):
+    """Keep errors/file dialogs attached to the camera view instead of the root."""
+    views = [getattr(owner, 'camera_popout', None)]
+    for name in ('calibration', 'commands'):
+        tab = getattr(owner, name, None)
+        if tab is not None:
+            views.append(getattr(tab, 'camera_popout', None))
+    popup = next((view for view in views if isinstance(view, CameraPopout) and view.is_open), None)
+    parent = popup.window if popup is not None else getattr(owner, 'parent', getattr(owner, 'root', None))
+    if parent is not None:
+        kwargs.setdefault('parent', parent)
+    try:
+        return dialog(*args, **kwargs)
+    finally:
+        if popup is not None and popup.is_open:
+            popup.show()
+
+
 class CameraPopout:
     def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
                  toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True,
@@ -11,6 +29,7 @@ class CameraPopout:
         self.window.title(title)
         self.window.geometry('1100x780')
         self.window.minsize(480, 320)
+        self.window.attributes('-topmost', True)
         self.render, self.status = render, status
         self.mirror_action_text, self.controls_enabled = mirror_action_text, controls_enabled
         self.status_refresh = status_refresh
@@ -50,6 +69,7 @@ class CameraPopout:
 
     def show(self):
         self.window.deiconify()
+        self.window.attributes('-topmost', True)
         self.window.lift()
 
     def maximize(self):

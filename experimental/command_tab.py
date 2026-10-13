@@ -24,7 +24,7 @@ from point_control import hardware_case_name, load_hardware_case
 from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay
-from camera_popout import CameraPopout
+from camera_popout import CameraPopout, show_view_dialog
 
 
 class CommandTab:
@@ -154,7 +154,7 @@ class CommandTab:
         tk.Button(tracking_bar, text="Start tracking", command=self.start_tracking).pack(side="left", padx=2)
         tk.Button(tracking_bar, text="Stop tracking", command=self.stop_tracking).pack(side="left", padx=2)
         tk.Button(tracking_bar, text="Export tracking CSV", command=self.export_tracking).pack(side="left", padx=2)
-        for label, variable in (("Robots", self.tracking_count_var), ("Min area", self.tracking_area_var),
+        for label, variable in (("Phase 3 robots", self.tracking_count_var), ("Min area", self.tracking_area_var),
                                 ("Contrast", self.tracking_contrast_var), ("ROI radius (px)", self.tracking_radius_var)):
             tk.Label(tracking_bar, text=label).pack(side="left", padx=(7, 2))
             tk.Entry(tracking_bar, textvariable=variable, width=4).pack(side="left")
@@ -190,14 +190,14 @@ class CommandTab:
     def load_sequence(self):
         if self.running:
             return
-        path = filedialog.askopenfilename(title="Load desired XY sequence", initialdir=str(XY_SEQUENCE_DIR),
+        path = show_view_dialog(self, filedialog.askopenfilename, title="Load desired XY sequence", initialdir=str(XY_SEQUENCE_DIR),
                                           filetypes=[("XY sequences", "*.txt"), ("All files", "*.*")])
         if not path:
             return
         try:
             self.load_path(path)
         except (ValueError, OSError) as error:
-            messagebox.showerror("XY sequence", str(error))
+            show_view_dialog(self, messagebox.showerror, "XY sequence", str(error))
             return
 
     def change_units(self, event=None):
@@ -209,7 +209,7 @@ class CommandTab:
             self.steps, self.pixels, self.setup = [], None, None
             self.status.config(text=f"Not ready: {error}")
             self.render()
-            messagebox.showerror("XY sequence units", str(error))
+            show_view_dialog(self, messagebox.showerror, "XY sequence units", str(error))
 
     def load_path(self, path):
         units = self.units_var.get()
@@ -278,9 +278,9 @@ class CommandTab:
 
     def export_sequence(self):
         if not self.steps:
-            messagebox.showerror('Sequence export', 'Load a sequence first.')
+            show_view_dialog(self, messagebox.showerror, 'Sequence export', 'Load a sequence first.')
             return
-        path = filedialog.asksaveasfilename(title='Save edited XY sequence', initialdir=str(XY_SEQUENCE_DIR),
+        path = show_view_dialog(self, filedialog.asksaveasfilename, title='Save edited XY sequence', initialdir=str(XY_SEQUENCE_DIR),
                                            initialfile=Path(self.sequence_path).name, defaultextension='.txt',
                                            filetypes=[('XY sequence', '*.txt')])
         if path:
@@ -288,7 +288,7 @@ class CommandTab:
                 write_xy_sequence(path, self.steps)
                 self.status.config(text=f'Saved XY, wait, motor zero, ratio and equilibrium angle: {path}')
             except OSError as error:
-                messagebox.showerror('Sequence export', str(error))
+                show_view_dialog(self, messagebox.showerror, 'Sequence export', str(error))
 
     def apply_point_settings(self):
         if self.running:
@@ -402,7 +402,6 @@ class CommandTab:
             return
         self.tracking_signature = signature
         self.setup = setup
-        self.tracking_count_var.set(str(setup["robot_count"]))
         self.tracking_area_var.set(str(setup["minimum_area"]))
         self.tracking_contrast_var.set(str(setup.get("dark_contrast_threshold", 10)))
         self.tracking_radius_var.set(str(setup["roi_circle_px"][2]))
@@ -548,9 +547,9 @@ class CommandTab:
 
     def export_tracking(self):
         if not self.tracking_rows:
-            messagebox.showerror("Tracking export", "No measurements recorded. Start tracking with a live camera first.")
+            show_view_dialog(self, messagebox.showerror, "Tracking export", "No measurements recorded. Start tracking with a live camera first.")
             return
-        path = filedialog.asksaveasfilename(title="Save robot tracking", initialdir=str(XY_SEQUENCE_DIR.parent),
+        path = show_view_dialog(self, filedialog.asksaveasfilename, title="Save robot tracking", initialdir=str(XY_SEQUENCE_DIR.parent),
                                            initialfile=default_setup_name().replace(".json", "_tracking.csv"),
                                            defaultextension=".csv", filetypes=[("Tracking measurements", "*.csv")])
         if path:
@@ -561,18 +560,18 @@ class CommandTab:
                     writer.writerows(self.tracking_rows)
                 self.tracking_status.config(text=f"Exported {len(self.tracking_rows)} tracking measurements.")
             except OSError as error:
-                messagebox.showerror("Tracking export", str(error))
+                show_view_dialog(self, messagebox.showerror, "Tracking export", str(error))
 
     def start_recording(self):
         if self.recording is not None:
             return
         if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
-            messagebox.showerror('Recording', 'Connect the camera and wait for a fresh frame first.')
+            show_view_dialog(self, messagebox.showerror, 'Recording', 'Connect the camera and wait for a fresh frame first.')
             return
         if self.tracking_tracker is None or not self.tracking_enabled:
-            messagebox.showerror('Recording', 'Apply calibration and start tracking first to record synchronized measurements.')
+            show_view_dialog(self, messagebox.showerror, 'Recording', 'Apply calibration and start tracking first to record synchronized measurements.')
             return
-        path = filedialog.asksaveasfilename(title='Choose recording base name (four files will be created)',
+        path = show_view_dialog(self, filedialog.asksaveasfilename, title='Choose recording base name (four files will be created)',
                                            initialdir=str(XY_SEQUENCE_DIR.parent),
                                            initialfile=default_setup_name().replace('.json', '.mp4'),
                                            defaultextension='.mp4', filetypes=[('Recording', '*.mp4')])
@@ -583,7 +582,7 @@ class CommandTab:
             self.recording_stop_button.config(state='normal')
             self.recording_status.config(text='Recording started. Stop / save finalizes all four files.')
         except (ValueError, OSError, cv2.error) as error:
-            messagebox.showerror('Recording', str(error))
+            show_view_dialog(self, messagebox.showerror, 'Recording', str(error))
 
     def stop_recording(self):
         if self.recording is not None:
@@ -665,13 +664,13 @@ class CommandTab:
             if self.tracking_tracker is None or not self.tracking_enabled:
                 raise ValueError("Start robot tracking before running an arrival-controlled sequence.")
         except (ValueError, TypeError, KeyError, ImportError) as error:
-            messagebox.showerror("Cannot run sequence", str(error))
+            show_view_dialog(self, messagebox.showerror, "Cannot run sequence", str(error))
             return
         outside, _ = point_limits(pixels, setup)
         extrapolated = sum(bool(outside[index]) for index in indices)
         description = f"selected point {indices[0] + 1}" if selected_only else f"all {len(indices)} points"
         warning = f"\nWARNING: {extrapolated} target(s) beyond pins. Mapping is extrapolated; confirm they are physically safe." if extrapolated else ""
-        if not messagebox.askyesno("Run XY targets", f"Run {description} using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nArrival: all tracked robots within {arrival_gate.tolerance_mm:g} mm for {arrival_gate.stable_seconds:g} s; then press Next.\nRow wait is the minimum hold after sending; no automatic advance.\nConfirm the units and physical hardware match.{warning}"):
+        if not show_view_dialog(self, messagebox.askyesno, "Run XY targets", f"Run {description} using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nArrival: all tracked robots within {arrival_gate.tolerance_mm:g} mm for {arrival_gate.stable_seconds:g} s; then press Next.\nRow wait is the minimum hold after sending; no automatic advance.\nConfirm the units and physical hardware match.{warning}"):
             return
         self.setup, self.pixels = setup, pixels
         self.running = True
@@ -779,7 +778,7 @@ class CommandTab:
                                              f"Sequence failed: {result}. No further points sent." if kind == "error" else
                                              "Sequence stopped (Stop, camera loss, or controller disconnect). Last sent pose remains applied."))
                     if kind == "error":
-                        messagebox.showerror("Sequence stopped", str(result))
+                        show_view_dialog(self, messagebox.showerror, "Sequence stopped", str(result))
         except queue.Empty:
             pass
         if self.running:

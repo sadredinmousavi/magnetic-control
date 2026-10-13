@@ -342,6 +342,17 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertEqual(row["group_valid"], 1)
         self.assertFalse(app.tracking_tracker.limit_to_pins)
 
+    def test_applying_phase2_calibration_does_not_overwrite_phase3_robot_count(self):
+        app = self.tracking_app()
+        app.tracking_count_var.get.return_value = '3'
+        app.tracking_signature = None
+        app.tracking_enabled = False
+        data = setup()
+        data.update(robot_count=1, minimum_area=1, roi_circle_px=[110,110,90])
+        app.configure_tracking(data)
+        app.tracking_count_var.set.assert_not_called()
+        self.assertEqual(app.tracking_count_var.get(), '3')
+
     def test_missing_robot_leaves_gap_and_holds_roi_until_reacquisition(self):
         app = self.tracking_app()
         app.start_tracking()

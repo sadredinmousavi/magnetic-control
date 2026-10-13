@@ -23,7 +23,7 @@ from gui004 import (
 from robot_vision import RobotDetector
 from axis_calibration import AXIS_TARGETS_M, AXIS_DISPLAY_NAMES, RobotAxes
 from point_control import hardware_case_name
-from camera_popout import CameraPopout
+from camera_popout import CameraPopout, show_view_dialog
 
 
 SETUP_DIR = Path(__file__).resolve().parent / "setups"
@@ -39,8 +39,10 @@ class MovingROICalibration:
     """Frame-by-frame moving-ROI tracking for live camera previews."""
 
     def __init__(self, corners, width_cm, height_cm, circle, count, minimum_area, axis_samples=None,
-                 contrast_threshold=10, strict_single=False, limit_to_pins=True):
-        calibrated_dwell_coordinates([], corners, width_cm, height_cm)
+                 contrast_threshold=10, strict_single=False, limit_to_pins=True, allow_uncalibrated=False):
+        self.metric_ready = len(corners) == 4
+        if self.metric_ready or not allow_uncalibrated:
+            calibrated_dwell_coordinates([], corners, width_cm, height_cm)
         if count < 1 or not np.isfinite(minimum_area) or minimum_area <= 0:
             raise ValueError("Robot count and minimum area must be positive.")
         circle = np.asarray(circle, dtype=float)
@@ -53,7 +55,7 @@ class MovingROICalibration:
         self.count, self.minimum_area = count, minimum_area
         self.references = []
         self.strict_single = strict_single
-        self.limit_to_pins = limit_to_pins
+        self.limit_to_pins = limit_to_pins and self.metric_ready
         self.workspace_mask = None
         self.selection_error = None
         self.detector = RobotDetector()
@@ -63,6 +65,8 @@ class MovingROICalibration:
             raise ValueError("Dark contrast threshold must be between 1 and 255.")
 
     def coordinates(self, points):
+        if not self.metric_ready:
+            raise ValueError('Physical XY requires four calibrated pins.')
         if self.axes is not None:
             return self.axes.coordinates(points)
         return calibrated_dwell_coordinates(
@@ -140,10 +144,10 @@ class MovingROICalibration:
             self.center = np.asarray(center, dtype=float)
             self.references = [item["center"] for item in sorted(
                 selected, key=lambda item: item["robot_id"])]
-        xy = self.coordinates([item["center"] for item in selected])
-        for item, coordinates in zip(selected, xy):
-            item["xy_cm"] = tuple(coordinates)
-        group_xy = None if center is None else tuple(self.coordinates([center])[0])
+        xy = self.coordinates([item['center'] for item in selected]) if self.metric_ready else None
+        for index, item in enumerate(selected):
+            item['xy_cm'] = None if xy is None else tuple(xy[index])
+        group_xy = None if center is None or not self.metric_ready else tuple(self.coordinates([center])[0])
         return selected, center, group_xy
 
 
@@ -157,6 +161,8 @@ class CalibrationTab:
         self.pin_search_circle = None
         self.transform = None
         self.tracker = None
+        self.auto_tracking = True
+        self.auto_tracker_signature = None
         self.detections = []
         self.frame_number = 0
         self.render_revision = 0
@@ -219,10 +225,10 @@ class CalibrationTab:
         for label, variable in (("Width (cm)", self.width_var),
                                 ("Height (cm)", self.height_var),
                                 ("ROI radius (px)", self.radius_var),
-                                ("Robots", self.count_var),
                                 ("Min area (px²)", self.area_var)):
             tk.Label(settings, text=label).pack(side="left", padx=(4, 2))
             tk.Entry(settings, textvariable=variable, width=6).pack(side="left")
+        tk.Label(settings, text='Phase 2: one robot (fixed)').pack(side='left', padx=8)
         sensitivity = tk.Frame(parent)
         sensitivity.pack(fill="x", padx=8, pady=3)
         tk.Label(sensitivity, text="Dark contrast threshold").pack(side="left")
@@ -242,8 +248,7 @@ class CalibrationTab:
             ttk.Radiobutton(tools, text=label, value=value, variable=self.mode,
                             command=self.clear_pin_roi).pack(side="left", padx=4)
         tk.Button(tools, text="Clear points", command=self.clear_points).pack(side="left", padx=4)
-        tk.Button(tools, text="Start tracking", command=self.start_tracking).pack(side="left", padx=4)
-        tk.Button(tools, text="Stop tracking", command=self.stop_tracking).pack(side="left", padx=4)
+        tk.Button(tools, text='Clear ROI', command=self.clear_roi).pack(side='left', padx=4)
         pin_tools = tk.Frame(parent)
         pin_tools.pack(fill="x", padx=8, pady=2)
         tk.Label(pin_tools, text="Pin search radius (px)").pack(side="left")
@@ -314,6 +319,39 @@ class CalibrationTab:
         self.detections = []
         self.rows = []
         self.live_started = None
+        self.auto_tracker_signature = None
+
+    def ensure_roi_tracking(self):
+        if self.circle is None:
+            self.tracker = self.axis_tracker = None
+            self.detections = []
+            return
+        samples = self.axis_samples if len(self.axis_samples) == 3 else None
+        signature = json.dumps([self.corners, self.width_var.get(), self.height_var.get(), samples], sort_keys=True)
+        if self.tracker is None or signature != self.auto_tracker_signature:
+            circle = self.circle if self.tracker is None else (*self.tracker.center, self.tracker.radius)
+            self.tracker = MovingROICalibration(self.corners, float(self.width_var.get()), float(self.height_var.get()),
+                circle, 1, float(self.area_var.get()), samples, strict_single=True,
+                contrast_threshold=self.read_contrast_threshold(), allow_uncalibrated=True)
+            self.axis_tracker = self.tracker
+            self.auto_tracker_signature = signature
+            if self.live_started is None:
+                self.live_started = time.monotonic()
+        self.tracker.minimum_area = float(self.area_var.get())
+        self.axis_tracker = self.tracker
+        self.tracker.radius = float(self.radius_var.get())
+        if not np.isfinite([self.tracker.minimum_area, self.tracker.radius]).all() or self.tracker.minimum_area <= 0 or self.tracker.radius <= 0:
+            raise ValueError('Minimum area and ROI radius must be positive and finite.')
+
+    def clear_roi(self):
+        if self.axis_busy or self.axis_pending:
+            self.axis_status.config(text='Finish capture or Reset axes before clearing the ROI.')
+            return
+        self.circle = None
+        self.tracker = self.axis_tracker = None
+        self.detections, self.axis_detections = [], []
+        self.auto_tracker_signature = None
+        self.render()
 
     def read_contrast_threshold(self):
         variable = getattr(self, "contrast_var", None)
@@ -345,7 +383,7 @@ class CalibrationTab:
             return
         case = self.control_case_var.get()
         if not case or self.axis_prepare is None:
-            messagebox.showerror('Prepare axes', 'Select a hardware case; axis preparation must be available.')
+            show_view_dialog(self, messagebox.showerror, 'Prepare axes', 'Select a hardware case; axis preparation must be available.')
             return
         self.prepared_case = None
         self.axis_prepare_busy = True
@@ -395,30 +433,35 @@ class CalibrationTab:
         try:
             if getattr(self, 'axis_prepare', None) is not None and self.prepared_case != self.control_case_var.get():
                 raise ValueError('Press Prepare axis moves beside the selected hardware case first.')
-            if self.frame is None or self.circle is None or len(self.corners) != 4:
-                raise ValueError("Select four corners and place an ROI around the single robot first.")
-            if int(self.count_var.get()) != 1:
-                raise ValueError("Set Robots to 1 for axis calibration.")
             if not self.control_case_var.get():
                 raise ValueError("Select the control case matching your hardware geometry first.")
             if self.axis_move is None:
                 raise ValueError("Controller movement is unavailable.")
-            calibrated_dwell_coordinates([], self.corners, float(self.width_var.get()), float(self.height_var.get()))
-            if self.axis_tracker is None:
+        except ValueError as error:
+            show_view_dialog(self, messagebox.showerror, "Robot axes", str(error))
+            return
+        # Vision is optional for testing a prepared motor pose, mandatory only
+        # when saving a calibration capture. Acquire it opportunistically.
+        try:
+            vision_ready = self.frame is not None and self.circle is not None and len(self.corners) == 4 and int(self.count_var.get()) == 1
+            if vision_ready and self.axis_tracker is None:
                 circle = self.circle if self.tracker is None else (*self.tracker.center, self.tracker.radius)
                 self.axis_tracker = MovingROICalibration(
                     self.corners, float(self.width_var.get()), float(self.height_var.get()),
                     (*circle[:2], float(self.radius_var.get())), 1, float(self.area_var.get()),
                     contrast_threshold=self.read_contrast_threshold(), strict_single=True,
                 )
-            self.update_axis_tracking()
-            if not self.axis_detections:
-                raise ValueError(self.axis_tracker.selection_error or "Robot not acquired. Check Show detection mask and the ROI before commanding a move.")
-        except ValueError as error:
-            messagebox.showerror("Robot axes", str(error))
-            return
-        self.stop_tracking()
-        self.clear_tracking()
+            if vision_ready:
+                self.update_axis_tracking()
+            else:
+                self.axis_tracker = None
+                self.axis_detections = []
+        except (ValueError, TypeError, cv2.error):
+            self.axis_tracker = None
+            self.axis_detections = []
+        if not getattr(self, 'auto_tracking', False):
+            self.stop_tracking()
+            self.clear_tracking()
         self.axis_pending = None
         self.axis_busy = True
         self.axis_capture_button.config(state="disabled")
@@ -428,7 +471,7 @@ class CalibrationTab:
         for button in self.axis_buttons:
             button.config(state="disabled")
         target = AXIS_TARGETS_M[name]
-        self.axis_status.config(text=f"Sending {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1. No timed delay; capture manually once the robot has settled. Any uncaptured previous move is replaced.")
+        self.axis_status.config(text=f"Sending {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1. Pins/ROI/camera are not required for moving. Capture requires valid live calibration; any previous pending move is replaced.")
 
         def worker():
             try:
@@ -453,7 +496,7 @@ class CalibrationTab:
                     button.config(state="normal")
                 if error:
                     self.axis_status.config(text=f"Movement failed: {error}")
-                    messagebox.showerror("Robot axes", error)
+                    show_view_dialog(self, messagebox.showerror, "Robot axes", error)
                 else:
                     self.axis_pending = name
                     self.axis_ready_at = time.monotonic()
@@ -470,7 +513,7 @@ class CalibrationTab:
             self.record_axis_from_roi()
         except (ValueError, TypeError) as error:
             self.axis_status.config(text=f"Capture not saved: {error}")
-            messagebox.showerror("Robot axes — capture not saved", str(error))
+            show_view_dialog(self, messagebox.showerror, "Robot axes — capture not saved", str(error))
 
     def record_axis_from_roi(self):
         if self.axis_busy or not self.axis_pending:
@@ -533,6 +576,9 @@ class CalibrationTab:
         if (not np.isfinite(self.axis_tracker.minimum_area) or self.axis_tracker.minimum_area <= 0
                 or not np.isfinite(self.axis_tracker.radius) or self.axis_tracker.radius <= 0):
             raise ValueError("Minimum area and ROI radius must be positive finite numbers.")
+        settings = (self.axis_tracker.minimum_area, self.axis_tracker.radius, self.axis_tracker.contrast_threshold)
+        if self.tracker is self.axis_tracker and getattr(self, 'axis_processed_at', None) == self.frame_received_at and getattr(self, 'axis_processed_settings', None) == settings:
+            return
         self.axis_detections, center, _ = self.axis_tracker.process(self.frame)
         self.axis_processed_at = self.frame_received_at
         self.axis_processed_settings = (self.axis_tracker.minimum_area, self.axis_tracker.radius,
@@ -558,6 +604,13 @@ class CalibrationTab:
             self.status.config(text="Frame size changed. Select four points and place the ROI again.")
         self.frame = frame
         self.frame_received_at = time.monotonic()
+        if getattr(self, 'auto_tracking', False):
+            try:
+                self.ensure_roi_tracking()
+            except (ValueError, TypeError) as error:
+                self.tracker = self.axis_tracker = None
+                self.detections = []
+                self.status.config(text=f'Tracking waiting: {error}')
         popup = getattr(self, 'camera_popout', None)
         axis_needed = (getattr(self, 'axis_busy', False) or getattr(self, 'axis_pending', None) or getattr(self, 'visible', lambda: True)()
                        or (popup is not None and popup.is_open))
@@ -572,6 +625,12 @@ class CalibrationTab:
             try:
                 self.tracker.contrast_threshold = self.read_contrast_threshold()
                 self.detections, center, xy = self.tracker.process(frame)
+                if getattr(self, 'auto_tracking', False):
+                    self.axis_detections = self.detections
+                    self.axis_processed_at = self.frame_received_at
+                    self.axis_processed_settings = (self.tracker.minimum_area, self.tracker.radius, self.tracker.contrast_threshold)
+                    if center is not None:
+                        self.circle = (*self.tracker.center, self.tracker.radius)
                 elapsed = time.monotonic() - self.live_started
                 valid = center is not None
                 for item in self.detections or [None]:
@@ -580,14 +639,16 @@ class CalibrationTab:
                         "" if item is None else item["robot_id"],
                         "" if item is None else item["center"][0],
                         "" if item is None else item["center"][1],
-                        "" if item is None else item["xy_cm"][0],
-                        "" if item is None else item["xy_cm"][1],
+                        "" if item is None or item['xy_cm'] is None else item["xy_cm"][0],
+                        "" if item is None or item['xy_cm'] is None else item["xy_cm"][1],
                         "" if xy is None else xy[0], "" if xy is None else xy[1],
                         *self.tracker.center,
                     ])
                 detail = "Group missing: ROI held at last valid center."
-                if valid:
+                if valid and xy is not None:
                     detail = f"Group XY = ({xy[0]:.3f}, {xy[1]:.3f}) cm"
+                elif valid:
+                    detail = f'Robot pixel position {center}; physical XY unavailable until pins are calibrated.'
                 self.status.config(text=f"Frame {self.frame_number}: {len(self.detections)}/{self.tracker.count} robots. {detail}")
             except Exception as error:
                 self.stop_tracking()
@@ -608,8 +669,7 @@ class CalibrationTab:
                      ('Capture', self.capture_axis, self.axis_capture_button),
                      ('Reset axes', self.reset_axes, None),
                      ('Clear pins', self.clear_points, None),
-                     ('Track', self.start_tracking, None),
-                     ('Stop track', self.stop_tracking, None)),
+                     ('Clear ROI', self.clear_roi, None)),
             toolbar_builder=self.build_popout_tools, mirror_action_text=False,
             controls_enabled=lambda: not self.command_running,
             status_builder=self.build_step_status, status_refresh=self.refresh_step_status,
@@ -656,11 +716,11 @@ class CalibrationTab:
             count = int(self.count_var.get())
         except (ValueError, TypeError):
             count = 0
-        robot = pins and self.circle is not None and count > 0 and len(self.detections) == count
+        robot = self.circle is not None and len(self.detections) == 1
         axes = len(self.axis_samples) == 3
         return (
             ('1. 4 pins', 'Done' if pins else f'{len(self.corners)}/4 — select pins', pins, not pins),
-            ('2. ROI and robot', 'Detected' if robot else 'Place ROI / detect robot', robot, pins and not robot),
+            ('2. ROI and robot', 'Detected' if robot else 'Place ROI / detect robot', robot, self.circle is not None and not robot),
             ('3. Axis', 'Done' if axes else f'{len(self.axis_samples)}/3 captures', axes, pins and self.circle is not None and not axes),
         )
 
@@ -698,9 +758,6 @@ class CalibrationTab:
         transform = self.transform if transform is None else transform
         if self.frame is None or transform is None:
             return
-        if self.tracker is not None:
-            self.status.config(text="Stop tracking before changing the calibration or ROI.")
-            return
         ox, oy, scale = transform
         point = (round((event.x - ox) / scale), round((event.y - oy) / scale))
         h, w = self.frame.shape[:2]
@@ -723,16 +780,18 @@ class CalibrationTab:
                 if not np.isfinite(radius) or radius <= 0:
                     raise ValueError("ROI radius must be positive.")
                 self.circle = (*point, radius)
+                self.tracker = None
+                self.auto_tracker_signature = None
                 self.axis_tracker = None
                 self.axis_detections = []
                 self.axis_processed_at = None
-                self.status.config(text="ROI placed. Start tracking to detect robots and follow their center.")
+                self.status.config(text='ROI placed. One-robot tracking starts automatically; pins are not required for detection.')
             self.detections = []
             self.render()
         except ValueError as error:
             self.status.config(text=f"Not saved: {error}")
             self.render()
-            messagebox.showerror("Calibration", str(error))
+            show_view_dialog(self, messagebox.showerror, "Calibration", str(error))
 
     def move_pin_roi(self, event, *, transform=None):
         popup = getattr(self, 'camera_popout', None)
@@ -742,7 +801,7 @@ class CalibrationTab:
             return
         transform = self.transform if transform is None else transform
         if (self.frame is None or transform is None or self.mode.get() != "Corners"
-                or self.tracker is not None or self.axis_busy or self.axis_pending
+                or self.axis_busy or self.axis_pending
                 or (hasattr(self, "manual_pin_var") and self.manual_pin_var.get())):
             return
         ox, oy, scale = transform
@@ -820,40 +879,6 @@ class CalibrationTab:
         self.pin_search_circle = None
         self.render()
         self.status.config(text="Select the four green corner dots.")
-
-    def start_tracking(self):
-        if self.frame is None:
-            messagebox.showerror("Calibration", "Connect the live camera first.")
-            return
-        try:
-            if self.axis_busy or self.axis_pending or 0 < len(self.axis_samples) < 3:
-                raise ValueError("Complete the robot-axis measurements or Reset axes before tracking.")
-            if self.circle is None:
-                raise ValueError("Place the ROI around the robots first.")
-            circle = (*self.circle[:2], float(self.radius_var.get()))
-            tracker = MovingROICalibration(
-                self.corners, float(self.width_var.get()), float(self.height_var.get()),
-                circle, int(self.count_var.get()), float(self.area_var.get()),
-                getattr(self, "axis_samples", None) if len(getattr(self, "axis_samples", {})) == 3 else None,
-                contrast_threshold=self.read_contrast_threshold(),
-            )
-            detections, center, _ = tracker.process(self.frame)
-            if center is None:
-                raise ValueError(
-                    f"Found {len(detections)}/{tracker.count} robots. Enable Show detection mask: "
-                    "the robot must appear white inside the ROI and four-point region. "
-                    "Lower the dark contrast threshold (try 5), keep Min area at 1, and check Robots count."
-                )
-        except (ValueError, TypeError) as error:
-            messagebox.showerror("Calibration", str(error))
-            return
-        self.clear_tracking()
-        self.tracker = tracker
-        self.axis_tracker = None
-        self.axis_detections = []
-        self.axis_processed_at = None
-        self.live_started = time.monotonic()
-        self.accept_frame(self.frame)
 
     def stop_tracking(self):
         if self.tracker is not None:
@@ -1001,7 +1026,7 @@ class CalibrationTab:
                 *(self.circle[:2] if self.tracker is None else self.tracker.center),
                 float(self.radius_var.get()) if self.tracker is None else self.tracker.radius,
             ],
-            "robot_count": int(self.count_var.get()), "minimum_area": float(self.area_var.get()),
+            "robot_count": 1, "minimum_area": float(self.area_var.get()),
             "dark_contrast_threshold": self.read_contrast_threshold(),
             "axis_samples_px": getattr(self, "axis_samples", {}),
             "axis_targets_m": AXIS_TARGETS_M,
@@ -1020,7 +1045,7 @@ class CalibrationTab:
         try:
             data = self.setup_data()
             SETUP_DIR.mkdir(parents=True, exist_ok=True)
-            path = filedialog.asksaveasfilename(
+            path = show_view_dialog(self, filedialog.asksaveasfilename,
                 title="Save GUI005 calibration", initialdir=str(SETUP_DIR),
                 initialfile=default_setup_name(), defaultextension=".json",
                 filetypes=[("Calibration setup", "*.json")],
@@ -1030,14 +1055,14 @@ class CalibrationTab:
                     json.dump(data, stream, indent=2)
                 self.status.config(text="Complete setup saved: four points, physical dimensions, ROI, detection settings, hardware case and XY calibration.")
         except (ValueError, OSError) as error:
-            messagebox.showerror("Calibration", str(error))
+            show_view_dialog(self, messagebox.showerror, "Calibration", str(error))
 
     def load_setup(self):
         if self.frame is None:
-            messagebox.showerror("Calibration", "Wait for a live camera frame first.")
+            show_view_dialog(self, messagebox.showerror, "Calibration", "Wait for a live camera frame first.")
             return
         SETUP_DIR.mkdir(parents=True, exist_ok=True)
-        path = filedialog.askopenfilename(
+        path = show_view_dialog(self, filedialog.askopenfilename,
             title="Load GUI005 calibration", initialdir=str(SETUP_DIR),
             filetypes=[("JSON", "*.json")],
         )
@@ -1053,7 +1078,7 @@ class CalibrationTab:
                 raise ValueError("Saved robot axis references are incomplete.")
             tracker = MovingROICalibration(
                 data["corners_px"], data["rectangle_width_cm"], data["rectangle_height_cm"],
-                data["roi_circle_px"], data["robot_count"], data["minimum_area"],
+                data["roi_circle_px"], 1, data["minimum_area"],
                 samples,
                 contrast_threshold=data.get("dark_contrast_threshold", 10),
             )
@@ -1062,7 +1087,7 @@ class CalibrationTab:
             if np.any(points < 0) or np.any(points >= [w, h]):
                 raise ValueError("Calibration points or ROI center are outside the frame.")
         except (ValueError, TypeError, KeyError, OSError) as error:
-            messagebox.showerror("Calibration", str(error))
+            show_view_dialog(self, messagebox.showerror, "Calibration", str(error))
             return
         self.reset_axes()
         self.clear_tracking()
@@ -1078,13 +1103,13 @@ class CalibrationTab:
         self.axis_samples = samples
         self.axis_status.config(text="Saved robot origin and XY axes restored." if samples else "Setup has image-aligned XY. Calibrate robot axes if needed.")
         self.render()
-        self.status.config(text="Setup loaded. Check four points and ROI, then Start tracking.")
+        self.status.config(text='Setup loaded. One-robot tracking resumes automatically from the ROI.')
 
     def export_csv(self):
         if not self.rows:
-            messagebox.showerror("Coordinates", "Start tracking to collect coordinates first.")
+            show_view_dialog(self, messagebox.showerror, "Coordinates", "Place an ROI and wait for live frames to collect measurements first.")
             return
-        path = filedialog.asksaveasfilename(title="Export robot XY", defaultextension=".csv")
+        path = show_view_dialog(self, filedialog.asksaveasfilename, title="Export robot XY", defaultextension=".csv")
         if path:
             try:
                 with open(path, "w", newline="", encoding="utf-8") as stream:
@@ -1094,7 +1119,7 @@ class CalibrationTab:
                     writer.writerows(self.rows)
                 self.status.config(text="Robot and group XY coordinates exported.")
             except OSError as error:
-                messagebox.showerror("Coordinates", str(error))
+                show_view_dialog(self, messagebox.showerror, "Coordinates", str(error))
 
     def close(self):
         if getattr(self, 'prepare_after', None) is not None:

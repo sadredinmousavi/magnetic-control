@@ -15,6 +15,31 @@ from gui004 import circle_detection_mask, workspace_detection_mask
 
 
 class MovingROICalibrationTests(unittest.TestCase):
+    def test_roi_only_auto_tracking_uses_one_shared_robot_tracker_and_blank_physical_xy(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.frame, app.tracker, app.axis_tracker = None, None, None
+        app.circle, app.corners, app.axis_samples = (80, 100, 40), [], {}
+        app.auto_tracking, app.auto_tracker_signature = True, None
+        app.live_started, app.frame_number, app.rows = None, 0, []
+        app.axis_busy, app.axis_pending = False, None
+        app.status, app.render = Mock(), Mock()
+        for name, value in [('width_var','10'),('height_var','10'),('area_var','1'),('radius_var','40')]:
+            setattr(app, name, Mock(get=Mock(return_value=value)))
+        for x in (80, 88, 96):
+            app.accept_live_frame(self.frame([(x, 100)]))
+            self.assertEqual(app.detections[0]['center'], (x, 100))
+            self.assertIs(app.tracker, app.axis_tracker)
+            self.assertEqual(app.tracker.count, 1)
+            self.assertIsNone(app.detections[0]['xy_cm'])
+            self.assertEqual(app.rows[-1][6:10], ['', '', '', ''])
+        with patch.object(app.tracker, 'process', wraps=app.tracker.process) as detect:
+            app.update_axis_tracking()
+            detect.assert_not_called()
+        app.clear_roi()
+        app.accept_live_frame(self.frame([(110, 100)]))
+        self.assertIsNone(app.tracker)
+        self.assertEqual(app.detections, [])
+
     def test_unannotated_detector_does_not_copy_or_modify_source(self):
         frame = self.frame([(80, 100)])
         original = frame.copy()
