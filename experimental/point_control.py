@@ -38,6 +38,35 @@ class PointCommander:
         self.zero_angle_deg = zero_angle_deg
         self.lock = threading.Lock()
         self.prepared_axes = {}
+        self.prepared_points = {}
+
+    @staticmethod
+    def point_key(target, ratio, angle):
+        return (tuple(target), float(ratio), None if angle is None else float(angle))
+
+    def prepare_points(self, case_name, steps, *, active=lambda: True, report=lambda index, result: None):
+        """Prepare a complete sequence atomically; no motor IO, partial results unused."""
+        name = hardware_case_name(case_name)
+        with self.lock:
+            params = load_hardware_case(name)
+            signature = self.hardware_signature(params)
+            results, rows = {}, []
+            for index, step in enumerate(steps):
+                if not active():
+                    return None
+                key = self.point_key(step.target_xy_m, step.ratio, step.angle_deg)
+                if key not in results:
+                    result = calculate_point_control(params, step.target_xy_m, ratio=step.ratio, angle_deg=step.angle_deg)
+                    angles = np.asarray(result['angles_deg'], dtype=float)
+                    if angles.ndim != 1 or not angles.size or not np.isfinite(angles).all():
+                        raise ValueError('Precalculation produced invalid motor angles.')
+                    results[key] = dict(result, angles_deg=angles.copy())
+                rows.append(results[key])
+                report(index, results[key])
+            if not active():
+                return None
+            self.prepared_points[name] = (signature, results)
+            return rows
 
     @staticmethod
     def hardware_signature(params):
@@ -74,7 +103,8 @@ class PointCommander:
                                        ratio=ratio, angle_deg=angle_deg)
 
     def move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
-             settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False):
+             settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False, prepared_point=False,
+             on_calculated=None):
         """Calculate fresh motor angles, send them, then wait interruptibly.
 
         Cancellation skips unsent commands; it cannot undo an already sent pose.
@@ -94,7 +124,15 @@ class PointCommander:
             port = self.port_provider()
             if port is None or not getattr(port, "is_open", False):
                 raise RuntimeError("Connect the serial controller in Connections first.")
-            if prepared_axis:
+            if prepared_point:
+                name = hardware_case_name(case_name)
+                cached = self.prepared_points.get(name)
+                signature = self.hardware_signature(load_hardware_case(name))
+                key = self.point_key(target_xy_m, ratio, angle_deg)
+                if cached is None or cached[0] != signature or key not in cached[1]:
+                    raise ValueError('Precalculation no longer matches this point/hardware. Precalculate all again.')
+                result = cached[1][key]
+            elif prepared_axis:
                 name = hardware_case_name(case_name)
                 signature = self.hardware_signature(load_hardware_case(name))
                 cached = self.prepared_axes.get(name)
@@ -103,6 +141,8 @@ class PointCommander:
                 result = cached[1][tuple(target_xy_m)]
             else:
                 result = self.calculate(case_name, target_xy_m, ratio=ratio, angle_deg=angle_deg)
+            if on_calculated is not None:
+                on_calculated(result)
             if not active():
                 return None
             if self.port_provider() is not port or not getattr(port, "is_open", False):

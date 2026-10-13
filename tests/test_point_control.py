@@ -8,9 +8,40 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
 from point_control import PointCommander, hardware_case_name, load_hardware_case
 from control_workflow import calculate_point_control
+from command_sequences import XYStep
 
 
 class PointControlTests(unittest.TestCase):
+    def test_sequence_precalculation_reuses_settings_and_has_no_motor_io(self):
+        port = Mock(is_open=True)
+        commander = PointCommander(lambda: port)
+        steps = [XYStep((.01, 0), 0, 180, 2, 45), XYStep((0, .01), 0, 90), XYStep((.01, 0), 0, 180, 2, 45)]
+        params = {'RADIUS': .18}
+        with patch('point_control.load_hardware_case', return_value=params), \
+             patch('point_control.calculate_point_control', return_value={'angles_deg':[60]*8}) as calculate, \
+             patch('helpers.moveArray') as move:
+            result = commander.prepare_points('case_100', steps)
+            self.assertEqual(len(result), 3)
+            self.assertEqual(calculate.call_count, 2)
+            move.assert_not_called()
+            commander.move('case_100', (.01,0), ratio=2, angle_deg=45, prepared_point=True)
+            self.assertEqual(calculate.call_count, 2)
+            move.assert_called_once()
+            with self.assertRaisesRegex(ValueError, 'Precalculation'):
+                commander.move('case_100', (.01,0), ratio=3, angle_deg=45, prepared_point=True)
+            params['RADIUS'] = .2
+            with self.assertRaisesRegex(ValueError, 'Precalculation'):
+                commander.move('case_100', (.01,0), ratio=2, angle_deg=45, prepared_point=True)
+            self.assertEqual(move.call_count, 1)
+
+    def test_cancelled_sequence_preparation_never_commits_partial_cache(self):
+        commander = PointCommander(lambda: None)
+        steps = [XYStep((0,0),0,180), XYStep((.01,0),0,180)]
+        with patch('point_control.load_hardware_case', return_value={}), \
+             patch('point_control.calculate_point_control', return_value={'angles_deg':[60]*8}):
+            result = commander.prepare_points('case_100', steps, active=Mock(side_effect=[True,False]))
+        self.assertIsNone(result)
+        self.assertEqual(commander.prepared_points, {})
     def test_prepare_axes_computes_once_without_motor_io_and_reuses_results(self):
         port = Mock(is_open=True)
         commander = PointCommander(lambda: port)

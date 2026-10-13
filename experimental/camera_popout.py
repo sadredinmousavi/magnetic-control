@@ -24,7 +24,8 @@ def show_view_dialog(owner, dialog, *args, **kwargs):
 class CameraPopout:
     def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
                  toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True,
-                 status_builder=None, status_refresh=None, render_version=None, on_close=None):
+                 status_builder=None, status_refresh=None, render_version=None, on_close=None,
+                 status_lines=0, action_captions=None, disabled_actions=()):
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry('1100x780')
@@ -32,6 +33,8 @@ class CameraPopout:
         self.window.attributes('-topmost', True)
         self.render, self.status = render, status
         self.mirror_action_text, self.controls_enabled = mirror_action_text, controls_enabled
+        self.action_captions = action_captions or {}
+        self.disabled_actions = set(disabled_actions)
         self.status_refresh = status_refresh
         self.render_version = render_version
         self.on_close = on_close
@@ -52,7 +55,8 @@ class CameraPopout:
         tk.Button(bar, text='Maximize', command=self.maximize).pack(side='right', padx=3)
         tk.Button(bar, text='Full screen', command=self.fullscreen).pack(side='right', padx=3)
         self.status_widgets = status_builder(self.window) if status_builder is not None else None
-        self.status_label = tk.Label(self.window, anchor='w', text='', wraplength=1000,
+        self.status_label = tk.Label(self.window, anchor='nw', justify='left', text='', wraplength=1000,
+                                     height=status_lines, width=1,
                                      background='#edf4ff', foreground='#173c68', padx=6, pady=3)
         self.status_label.pack(fill='x', padx=8)
         self.canvas = tk.Canvas(self.window, background='black', highlightthickness=0)
@@ -95,9 +99,12 @@ class CameraPopout:
         self.status_label.config(text=self.status(), wraplength=max(400, self.window.winfo_width() - 16))
         for button, source in self.actions:
             state = source.cget('state') if source is not None else 'normal'
+            if button.cget('text') in self.disabled_actions:
+                state = 'disabled'
             button.config(state=state if self.controls_enabled() else 'disabled')
             if source is not None and self.mirror_action_text:
-                button.config(text=source.cget('text'))
+                caption = source.cget('text')
+                button.config(text=self.action_captions.get(caption, caption))
         for widget in self.extra_controls.winfo_children():
             if widget.winfo_class() in ('Entry', 'Spinbox', 'Checkbutton', 'Radiobutton', 'Button'):
                 widget.config(state='normal' if self.controls_enabled() else 'disabled')

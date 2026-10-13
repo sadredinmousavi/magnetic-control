@@ -25,6 +25,7 @@ from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay
 from camera_popout import CameraPopout, show_view_dialog
+from position_control import PositionPID, PositionFeedback
 
 
 class CommandTab:
@@ -36,6 +37,15 @@ class CommandTab:
         self.sequence_path, self.input_units = None, None
         self.frame, self.frame_received_at = None, None
         self.running = False
+        self.feedback = None
+        self.control_requested = False
+        self.pid_vars = {key: tk.StringVar(value=value) for key, value in
+                         [('Kp', '.2'), ('Ki', '0'), ('Kd', '0'), ('Limit mm', '2'), ('Slew mm/s', '1'), ('Period s', '1')]}
+        self.precalculating = False
+        self.precalculated_signature = None
+        self.preparation_stop = threading.Event()
+        self.preparation_events = queue.Queue()
+        self.preparation_after = None
         self.stop_event = threading.Event()
         self.events = queue.Queue()
         self.job = 0
@@ -93,8 +103,12 @@ class CommandTab:
         self.run_selected_button.pack(side="left", padx=3)
         self.run_button = tk.Button(actions, text="Run all", command=self.run)
         self.run_button.pack(side="left", padx=3)
+        self.precalculate_button = tk.Button(actions, text='Precalculate all', command=self.precalculate_all)
+        self.precalculate_button.pack(side='left', padx=3)
         self.stop_button = tk.Button(actions, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="left", padx=3)
+        self.control_button = tk.Button(actions, text='Control off', command=self.toggle_control)
+        self.control_button.pack(side='left', padx=3)
         self.next_button = tk.Button(actions, text="Next point", command=self.next_point, state="disabled")
         self.next_button.pack(side="left", padx=3)
         self.allow_extrapolation_var = tk.BooleanVar(value=False)
@@ -113,7 +127,8 @@ class CommandTab:
             "Calibration sizes: cm. Sequence: select mm, cm or m. Auto reads the unit header; without a header it uses mm. "
             "Table shows mm. Double-click Ratio, Angle, Wait or Zero to edit each point (Enter applies). "
             "Ratio defaults to 1; Angle Auto is unconstrained and is ignored for ratio 1. "
-            "Each point is calculated fresh and sent. After the row's minimum wait, all robots must reach the target and stay within tolerance. "
+            "Precalculate all prepares motor angles without moving; otherwise each point is calculated on demand. "
+            "After the row's minimum wait, all robots must reach the target and stay within tolerance. "
             "Press Next point to advance (Finish for the last point). There is no automatic progression. "
             "Stop prevents further commands; it does not undo the last motor pose."
         )).pack(fill="x", padx=10, pady=3)
@@ -171,6 +186,15 @@ class CommandTab:
         self.arrival_hold_entry.pack(side="left")
         self.tracking_status = tk.Label(parent, text="Tracking starts automatically when calibration is applied.", anchor="w", wraplength=1000)
         self.tracking_status.pack(fill="x", padx=10)
+        pid_bar = tk.LabelFrame(parent, text='Position control — opt-in; orientation feedback unavailable')
+        pid_bar.pack(fill='x', padx=8, pady=3)
+        self.pid_entries = []
+        for key, variable in self.pid_vars.items():
+            tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
+            entry = tk.Entry(pid_bar, textvariable=variable, width=5)
+            entry.pack(side='left')
+            self.pid_entries.append(entry)
+        self.control_details = self.build_control_details(parent)
         recording_bar = tk.Frame(parent)
         recording_bar.pack(fill='x', padx=8, pady=3)
         tk.Button(recording_bar, text='Start recording', command=self.start_recording).pack(side='left', padx=3)
@@ -188,7 +212,7 @@ class CommandTab:
         self.canvas.bind("<Button-1>", self.click_target)
 
     def load_sequence(self):
-        if self.running:
+        if self.running or self.precalculating:
             return
         path = show_view_dialog(self, filedialog.askopenfilename, title="Load desired XY sequence", initialdir=str(XY_SEQUENCE_DIR),
                                           filetypes=[("XY sequences", "*.txt"), ("All files", "*.*")])
@@ -201,7 +225,7 @@ class CommandTab:
             return
 
     def change_units(self, event=None):
-        if self.running or self.sequence_path is None:
+        if self.running or self.precalculating or self.sequence_path is None:
             return
         try:
             self.load_path(self.sequence_path)
@@ -228,7 +252,7 @@ class CommandTab:
         self.refresh_calibration()
 
     def edit_point_cell(self, event):
-        if self.running:
+        if self.running or self.precalculating:
             return
         row = self.table.identify_row(event.y)
         column = self.table.identify_column(event.x)
@@ -291,7 +315,7 @@ class CommandTab:
                 show_view_dialog(self, messagebox.showerror, 'Sequence export', str(error))
 
     def apply_point_settings(self):
-        if self.running:
+        if self.running or getattr(self, 'precalculating', False):
             return
         selection = self.table.selection()
         if not selection:
@@ -463,6 +487,8 @@ class CommandTab:
         try:
             tracker = self.tracking_tracker
             if tracker.count != int(self.tracking_count_var.get()):
+                if self.running:
+                    raise ValueError('Robot count cannot change during a run. Stop first or restore the previous count.')
                 tracker = self.new_tracking_engine(self.setup, center=tracker.center)
                 self.tracking_tracker = tracker
                 self.robot_trails = {}
@@ -496,6 +522,8 @@ class CommandTab:
             self.robot_trails.setdefault(item["robot_id"], deque(maxlen=300)).append(item["center"])
         elapsed = time.monotonic() - self.tracking_started_at
         gate = getattr(self, "arrival_gate", None)
+        feedback = getattr(self, 'feedback', None)
+        control_data = {} if feedback is None else feedback.snapshot()
         for item in self.tracking_detections or [None]:
             self.tracking_rows.append({
                 "frame": self.tracking_frame_number, "time_s": elapsed,
@@ -518,6 +546,17 @@ class CommandTab:
                 "arrival_max_error_mm": "" if gate is None or gate.error_mm is None else gate.error_mm,
                 "desired_ratio": "" if self.active_index is None else self.steps[self.active_index].ratio,
                 "desired_angle_deg": "" if self.active_index is None or self.steps[self.active_index].angle_deg is None else self.steps[self.active_index].angle_deg,
+                'control_enabled': int(feedback.enabled.is_set()) if feedback is not None else 0,
+                'control_state': control_data.get('state', 'Off'),
+                'correction_x_mm': (control_data.get('correction_mm') or ['', ''])[0],
+                'correction_y_mm': (control_data.get('correction_mm') or ['', ''])[1],
+                'commanded_x_mm': (control_data.get('commanded_xy_mm') or ['', ''])[0],
+                'commanded_y_mm': (control_data.get('commanded_xy_mm') or ['', ''])[1],
+                'proposed_xy_mm': json.dumps(control_data.get('proposed_xy_mm')),
+                'calculated_motor_angles_deg': json.dumps(control_data.get('calculated_angles', [])),
+                'sent_motor_angles_deg': json.dumps(control_data.get('sent_angles', [])),
+                'motor_sent_time_s': control_data.get('sent_time_s', ''),
+                'orientation_measured_deg': '',
             })
         self.tracking_frame_number += 1
         detail = "Group missing; ROI held at last complete detection."
@@ -528,6 +567,8 @@ class CommandTab:
         if gate is not None and gate.error_mm is not None:
             detail += f" Arrival maximum robot error {gate.error_mm:.2f} mm (limit {gate.tolerance_mm:g} mm)."
         self.tracking_status.config(text=f"Tracking {len(self.tracking_detections)}/{tracker.count} robots. {detail}")
+        if hasattr(self, 'control_details'):
+            self.refresh_control_details(self.control_details)
 
     def check_camera_health(self):
         if self.tracking_tracker is None:
@@ -613,9 +654,14 @@ class CommandTab:
             return
         self.camera_popout = CameraPopout(
             self.parent, 'GUI005 — Phase 3 camera', self.render,
-            actions=(('Show all points', self.show_points, None),
-                     ('Next point', self.next_point, self.next_button),
+            status_lines=2,
+            actions=(('Points', self.show_points, None),
+                     ('First', self.run, self.run_button),
+                     ('Next', self.next_point, self.next_button),
+                     ('Control off', self.toggle_control, self.control_button),
                      ('Stop', self.stop, self.stop_button)),
+            action_captions={'Run all': 'First', 'Next point': 'Next'},
+            status_builder=self.build_control_details, status_refresh=self.refresh_control_details,
             render_version=lambda: (self.render_revision, self.frame_received_at),
             on_close=self.render,
             status=lambda: f"{self.status.cget('text')}  {self.tracking_status.cget('text')}",
@@ -638,11 +684,131 @@ class CommandTab:
     def run_selected(self):
         self.run(selected_only=True)
 
+    def toggle_control(self):
+        enabled = not self.control_requested
+        if enabled and not show_view_dialog(self, messagebox.askyesno, 'Enable position control',
+                'Enable bounded XY feedback? It will send additional motor poses while running. '
+                'Verify PID limits and physical hardware first. Orientation is not measured; ratio/angle stay fixed.'):
+            return
+        self.control_requested = enabled
+        self.control_button.config(text='Control on' if enabled else 'Control off')
+        if self.feedback is not None:
+            (self.feedback.enabled.set if enabled else self.feedback.enabled.clear)()
+
+    def build_control_details(self, parent):
+        panel = tk.LabelFrame(parent, text='Control details (mm)')
+        panel.pack(fill='x', padx=8, pady=3)
+        label = tk.Label(panel, text='Desired — | Measured — | u — | Commanded —\nRatio — | Angle — | Orientation: unavailable',
+                         height=4, anchor='nw', justify='left', foreground='#173c68')
+        label.pack(fill='x', padx=6)
+        return label
+
+    def refresh_control_details(self, label):
+        data = {} if getattr(self, 'feedback', None) is None else self.feedback.snapshot()
+        def xy(key):
+            value = data.get(key)
+            return '—' if value is None else ', '.join(f'{v:.2f}' for v in value)
+        angles = data.get('sent_angles', '')
+        sent = '—' if not angles else ', '.join(f'{angle:.1f}' for angle in angles)
+        calculated = data.get('calculated_angles', '')
+        calculated = '—' if not calculated else ', '.join(f'{angle:.1f}' for angle in calculated)
+        label.config(text=f"Desired ({xy('desired_xy_mm')}) | Measured ({xy('measured_xy_mm')}) | u ({xy('correction_mm')}) | Commanded ({xy('commanded_xy_mm')})\n"
+                          f"Ratio {data.get('ratio', '—')} | Angle {data.get('angle_deg', 'Auto')} | Orientation: unavailable | {data.get('state', 'Control off')}\n"
+                          f"Proposed ({xy('proposed_xy_mm')}) | Calculated motors: {calculated}\nLast sent motors: {sent}")
+
+    def point_signature(self):
+        return (hardware_case_name(self.calibration.control_case_var.get()), tuple(self.steps))
+
+    def precalculate_all(self):
+        if self.running or self.precalculating:
+            return
+        try:
+            if not self.steps:
+                raise ValueError('Load an XY sequence first.')
+            signature = self.point_signature()
+            load_hardware_case(signature[0])
+        except (ValueError, ImportError) as error:
+            show_view_dialog(self, messagebox.showerror, 'Precalculate all', str(error))
+            return
+        self.precalculating = True
+        self.set_running(True)
+        self.precalculated_signature = None
+        self.preparation_stop.clear()
+        self.precalculate_button.config(state='disabled')
+        self.run_button.config(state='disabled')
+        self.run_selected_button.config(state='disabled')
+        self.stop_button.config(state='normal')
+        self.status.config(text='Precalculating all points in the background. No motors are moved; Stop cancels after the current calculation.')
+
+        def worker():
+            try:
+                results = self.commander.prepare_points(signature[0], signature[1], active=lambda: not self.preparation_stop.is_set(),
+                    report=lambda index, result: self.preparation_events.put(('point', index, result)))
+                self.preparation_events.put(('done', signature, results))
+            except Exception as error:
+                self.preparation_events.put(('error', None, str(error)))
+        threading.Thread(target=worker, daemon=True).start()
+        self.preparation_after = self.parent.after(50, self.poll_precalculation)
+
+    def poll_precalculation(self):
+        self.preparation_after = None
+        try:
+            while True:
+                kind, index, result = self.preparation_events.get_nowait()
+                if kind == 'point':
+                    if str(index) in self.table.get_children():
+                        self.table.set(str(index), 'angles', ', '.join(f'{angle:.2f}' for angle in result['angles_deg']))
+                        self.table.set(str(index), 'state', 'Precalculated')
+                    self.status.config(text=f'Precalculated {index + 1} points. No motors moved.')
+                else:
+                    self.precalculating = False
+                    self.set_running(False)
+                    self.precalculate_button.config(state='normal')
+                    self.run_button.config(state='normal')
+                    self.run_selected_button.config(state='normal')
+                    self.stop_button.config(state='disabled')
+                    if kind == 'error':
+                        self.status.config(text=f'Precalculation failed: {result}. Partial results will not be used.')
+                    elif result is not None and not self.preparation_stop.is_set() and index == self.point_signature():
+                        self.precalculated_signature = index
+                        self.status.config(text='All points precalculated. Run selected / Run all will reuse these angles; arrival and Next checks still apply.')
+                    else:
+                        self.status.config(text='Precalculation cancelled or settings changed. Precalculate all again.')
+                    if self.precalculated_signature is None:
+                        for row in self.table.get_children():
+                            if self.table.set(row, 'state') == 'Precalculated':
+                                self.table.set(row, 'state', 'Not ready')
+        except queue.Empty:
+            pass
+        if self.precalculating:
+            self.preparation_after = self.parent.after(50, self.poll_precalculation)
+
     def run(self, *, selected_only=False):
         if self.running:
             return
+        if getattr(self, 'precalculating', False):
+            self.status.config(text='Wait for precalculation to finish, or press Stop.')
+            return
+        prepared = False
+        if getattr(self, 'precalculated_signature', None) is not None:
+            if self.precalculated_signature != self.point_signature():
+                show_view_dialog(self, messagebox.showerror, 'Precalculation changed', 'Sequence or case changed. Precalculate all again before running.')
+                return
+            prepared = True
         try:
             arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()))
+            feedback = None
+            if hasattr(self, 'pid_vars'):
+                pid = PositionPID(*[float(variable.get()) for variable in self.pid_vars.values()])
+                def validate_correction(target):
+                    from dataclasses import replace
+                    corrected = [replace(self.steps[0], target_xy_m=tuple(target))]
+                    project_sequence(corrected, setup, validate=True)  # Always inside pins + camera.
+                    if not np.isfinite(target).all():
+                        raise ValueError('Corrected XY must be finite.')
+                feedback = PositionFeedback(pid, validate=validate_correction)
+                if self.control_requested:
+                    feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)
             if selected_only:
                 selection = self.table.selection()
@@ -681,6 +847,11 @@ class CommandTab:
         steps = tuple(self.steps[index] for index in indices)
         self.run_indices = indices
         self.arrival_gate = arrival_gate
+        self.feedback = feedback
+        for entry in getattr(self, 'pid_entries', []):
+            entry.config(state='disabled')
+        if hasattr(self, 'precalculate_button'):
+            self.precalculate_button.config(state='disabled')
         self.set_running(True)
         for button in (self.load_button, self.calibration_button, self.run_button, self.run_selected_button):
             button.config(state="disabled")
@@ -706,7 +877,7 @@ class CommandTab:
                 outcome = execute_xy_sequence(steps, self.commander, hardware_case_name(setup["control_case"]),
                                               active=active, report=lambda kind, index, result:
                                               self.events.put((job, kind, indices[index], result)),
-                                              arrival_gate=arrival_gate)
+                                              arrival_gate=arrival_gate, prepared=prepared, feedback=feedback)
                 self.events.put((job, outcome, None, None))
             except Exception as error:
                 self.events.put((job, "error", None, str(error)))
@@ -715,6 +886,10 @@ class CommandTab:
         self.after_id = self.parent.after(50, self.poll)
 
     def stop(self):
+        if getattr(self, 'precalculating', False):
+            self.preparation_stop.set()
+            self.status.config(text='Precalculation cancellation requested; waiting for the current solver to return. No motors moved.')
+            return
         if self.running:
             self.stop_event.set()
             self.stop_button.config(state="disabled")
@@ -748,6 +923,9 @@ class CommandTab:
                 job, kind, index, result = self.events.get_nowait()
                 if job != self.job:
                     continue
+                if kind == 'corrected':
+                    self.table.set(str(index), 'angles', ', '.join(f'{angle:.2f}' for angle in result['angles_deg']))
+                    continue
                 if kind in ("calculating", "sent", "completed", "waiting_arrival", "arrived"):
                     self.active_index = index
                     state = {"calculating": "Calculating", "sent": "Moving", "completed": "Completed",
@@ -762,6 +940,12 @@ class CommandTab:
                     self.refresh_next_button()
                 else:
                     self.running = False
+                    for entry in getattr(self, 'pid_entries', []):
+                        entry.config(state='normal')
+                    if getattr(self, 'feedback', None) is not None:
+                        self.feedback.enabled.clear()
+                    if hasattr(self, 'precalculate_button'):
+                        self.precalculate_button.config(state='normal')
                     self.set_running(False)
                     for button in (self.load_button, self.calibration_button, self.run_button, self.run_selected_button):
                         button.config(state="normal")
@@ -862,6 +1046,11 @@ class CommandTab:
             canvas.create_text(x + 4, y + 4, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 7), anchor="nw")
 
     def close(self):
+        if hasattr(self, 'preparation_stop'):
+            self.preparation_stop.set()
+        if getattr(self, 'preparation_after', None) is not None:
+            self.parent.after_cancel(self.preparation_after)
+            self.preparation_after = None
         if getattr(self, 'camera_popout', None) is not None:
             self.camera_popout.close()
         if getattr(self, 'recording', None) is not None:

@@ -71,6 +71,22 @@ move/capture or open Calibration pop-out. Explicitly started tracking and CSV
 logging are retained, including when changing tabs.
 Complete Center/+X/+Y calibration (or load a matching setup from `experimental/setups`)
 and select the hardware case in Calibration.
+Commands includes Precalculate all only on the main page. It
+computes every row's XY/ratio/equilibrium-angle pose in the background without
+motor IO, then Run selected / Run all reuse the finished bundle. Duplicate
+identical targets/settings are solved once. Sequence/case changes require a new
+precalculation, and the hardware model is checked again before every send.
+Partial or cancelled results are not used. Stop cancels after the current solver
+returns; calibration controls are locked while preparing. Without precalculation,
+commands retain fresh per-point synthesis. Arrival, manual Next, waits and motor
+zero settings apply in either mode.
+The Commands pop-out uses short captions: Points, First, Next/Finish, Control,
+Stop. First starts the sequence at point 1, then waits for arrival and your Next
+press at each step; it is disabled during execution/precalculation. Control is
+an opt-in bounded XY PID mode, disabled by default. It retains row ratio/angle;
+orientation feedback is not yet measurable. Main/pop-out Control details and
+CSV include desired, measured, proposed and commanded XY plus calculated/sent
+motor angles. See [POSITION_CONTROL.md](POSITION_CONTROL.md) for limits and behavior.
 In Commands, load a file from `experimental/xy_sequences`:
 
 `[x, y] | wait_seconds | motor_zero_degrees`

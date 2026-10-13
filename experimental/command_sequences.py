@@ -122,30 +122,45 @@ def validate_projected_points(steps, setup, pixels, *, indices=None, allow_outsi
                              + sequence_diagnostics(steps, setup, pixels))
 
 
-def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_gate=None):
+def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_gate=None, prepared=False, feedback=None):
     """Fresh synthesis; optionally require visual arrival and manual progression."""
     for index, step in enumerate(steps):
         if not active():
             return "stopped"
         report("calculating", index, None)
+        if feedback is not None:
+            feedback.publish(desired_xy_mm=(np.asarray(step.target_xy_m) * 1000).tolist(),
+                             ratio=step.ratio, angle_deg=step.angle_deg, state='Calculating initial pose')
         def sent(result):
             if arrival_gate is not None:
                 arrival_gate.arm(step.target_xy_m)
             report("sent", index, result)
+            if feedback is not None:
+                feedback.publish(commanded_xy_mm=(np.asarray(step.target_xy_m) * 1000).tolist(), correction_mm=[0.,0.],
+                                 sent_angles=[float(v) for v in result['angles_deg']], sent_time_s=feedback.clock(), state='Sent')
 
         result = commander.move(
             case_name, step.target_xy_m, ratio=step.ratio, angle_deg=step.angle_deg,
             settle_seconds=step.wait_seconds, zero_angle_deg=step.zero_angle_deg,
             active=active, on_sent=sent,
+            **({'prepared_point': True} if prepared else {}),
+            **({'on_calculated': lambda result: feedback.publish(calculated_angles=[float(v) for v in result['angles_deg']])}
+               if feedback is not None else {}),
         )
         if result is None or not active():
             return "stopped"
         if arrival_gate is not None:
             report("waiting_arrival", index, None)
-            if not arrival_gate.wait_for_arrival(active):
-                return "stopped"
-            report("arrived", index, None)
-            if not arrival_gate.wait_for_next(active):
-                return "stopped"
+            if feedback is not None:
+                if not feedback.wait_at_target(step, commander, case_name, arrival_gate, active,
+                                              lambda result: report('corrected', index, result), initial_result=result):
+                    return 'stopped'
+                result = dict(result, angles_deg=feedback.snapshot()['sent_angles'])
+            else:
+                if not arrival_gate.wait_for_arrival(active):
+                    return "stopped"
+                report("arrived", index, None)
+                if not arrival_gate.wait_for_next(active):
+                    return "stopped"
         report("completed", index, result)
     return "finished"
