@@ -26,6 +26,7 @@ from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay
 from camera_popout import CameraPopout, show_view_dialog
 from position_control import PositionPID, PositionFeedback
+from hover_hint import HoverHint
 
 
 class CommandTab:
@@ -38,6 +39,10 @@ class CommandTab:
         self.frame, self.frame_received_at = None, None
         self.running = False
         self.feedback = None
+        self.command_roi = None
+        self.roi_override = False
+        self.calibration_revision = None
+        self.roi_placement_var = tk.BooleanVar(value=False)
         self.control_requested = False
         self.pid_vars = {key: tk.StringVar(value=value) for key, value in
                          [('Kp', '.2'), ('Ki', '0'), ('Kd', '0'), ('Limit mm', '2'), ('Slew mm/s', '1'), ('Period s', '1')]}
@@ -93,8 +98,6 @@ class CommandTab:
         self.load_button = tk.Button(bar, text="Load XY sequence", command=self.load_sequence)
         self.load_button.pack(side="left", padx=3)
         tk.Button(bar, text="Export XY sequence", command=self.export_sequence).pack(side="left", padx=3)
-        self.calibration_button = tk.Button(bar, text="Use current calibration", command=lambda: self.refresh_calibration(reset_tracking=True))
-        self.calibration_button.pack(side="left", padx=3)
         actions = tk.Frame(parent)
         actions.pack(fill="x", padx=8, pady=3)
         self.show_button = tk.Button(actions, text="Show all points", command=self.show_points)
@@ -123,7 +126,12 @@ class CommandTab:
         self.units_combo.bind("<<ComboboxSelected>>", self.change_units)
         self.file_label = tk.Label(parent, text="No XY sequence loaded.", anchor="w")
         self.file_label.pack(fill="x", padx=10)
-        tk.Label(parent, anchor="w", justify="left", wraplength=1000, text=(
+        self.help_button = tk.Button(bar, text='Help ?')
+        self.help_button.pack(side='left', padx=6)
+        self.help_hint = HoverHint(self.help_button, (
+            "The loaded calibration supplies the default ROI and detection settings. Check Phase 3 robots; "
+            "use Place ROI to reposition it if needed. Without calibration, Place ROI still starts pixel detection. "
+            "Physical XY and running require a complete Phase 2 calibration. "
             "Calibration sizes: cm. Sequence: select mm, cm or m. Auto reads the unit header; without a header it uses mm. "
             "Table shows mm. Double-click Ratio, Angle, Wait or Zero to edit each point (Enter applies). "
             "Ratio defaults to 1; Angle Auto is unconstrained and is ignored for ratio 1. "
@@ -131,7 +139,7 @@ class CommandTab:
             "After the row's minimum wait, all robots must reach the target and stay within tolerance. "
             "Press Next point to advance (Finish for the last point). There is no automatic progression. "
             "Stop prevents further commands; it does not undo the last motor pose."
-        )).pack(fill="x", padx=10, pady=3)
+        ))
         table_frame = tk.Frame(parent)
         table_frame.pack(fill="x", padx=8)
         self.table = ttk.Treeview(table_frame, columns=("x", "y", "wait", "zero", "ratio", "angle", "state", "angles"),
@@ -166,8 +174,10 @@ class CommandTab:
         self.limits_label.pack(fill="x", padx=10)
         tracking_bar = tk.Frame(parent)
         tracking_bar.pack(fill="x", padx=8, pady=3)
-        tk.Button(tracking_bar, text="Start tracking", command=self.start_tracking).pack(side="left", padx=2)
-        tk.Button(tracking_bar, text="Stop tracking", command=self.stop_tracking).pack(side="left", padx=2)
+        self.place_roi_button = tk.Button(tracking_bar, text='Place ROI', command=self.begin_roi_placement)
+        self.place_roi_button.pack(side='left', padx=2)
+        tk.Button(tracking_bar, text='Clear ROI', command=self.clear_command_roi).pack(side='left', padx=2)
+        HoverHint(self.place_roi_button, 'Set Phase 3 robots and ROI radius, then click the camera to place/reposition the moving ROI. No motors move.')
         tk.Button(tracking_bar, text="Export tracking CSV", command=self.export_tracking).pack(side="left", padx=2)
         for label, variable in (("Phase 3 robots", self.tracking_count_var), ("Min area", self.tracking_area_var),
                                 ("Contrast", self.tracking_contrast_var), ("ROI radius (px)", self.tracking_radius_var)):
@@ -184,7 +194,7 @@ class CommandTab:
         tk.Label(options, text="In-range hold (s)").pack(side="left", padx=(8, 2))
         self.arrival_hold_entry = tk.Entry(options, textvariable=self.arrival_hold_var, width=4)
         self.arrival_hold_entry.pack(side="left")
-        self.tracking_status = tk.Label(parent, text="Tracking starts automatically when calibration is applied.", anchor="w", wraplength=1000)
+        self.tracking_status = tk.Label(parent, text="Set Phase 3 robots, then Place ROI and click the camera.", anchor="w", wraplength=1000)
         self.tracking_status.pack(fill="x", padx=10)
         pid_bar = tk.LabelFrame(parent, text='Position control — opt-in; orientation feedback unavailable')
         pid_bar.pack(fill='x', padx=8, pady=3)
@@ -209,7 +219,7 @@ class CommandTab:
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(3, 8))
         self.canvas.bind("<Configure>", lambda event: self.render())
-        self.canvas.bind("<Button-1>", self.click_target)
+        self.canvas.bind("<Button-1>", lambda event: self.camera_click(event, self.canvas))
 
     def load_sequence(self):
         if self.running or self.precalculating:
@@ -352,15 +362,15 @@ class CommandTab:
         pixels = project_sequence(self.steps, setup, validate=validate)
         return setup, pixels
 
-    def refresh_calibration(self, *, reset_tracking=False):
+    def refresh_calibration(self):
         if self.running:
             return
         try:
             setup = self.current_setup()
-            self.configure_tracking(setup, reset=reset_tracking)
+            self.configure_tracking(setup)
             if not self.steps:
                 self.setup, self.pixels = setup, None
-                self.status.config(text="Calibration applied; live tracking enabled. Load an XY sequence to show desired points.")
+                self.status.config(text='Calibration ROI/settings applied. Check Phase 3 robots; reposition ROI if needed, then load a sequence.')
                 self.render()
                 return
             self.setup, self.pixels = self.prepare(validate=False)
@@ -379,6 +389,8 @@ class CommandTab:
             self.tracking_group_xy = None
             self.status.config(text=f"Not ready: {error}")
             self.limits_label.config(text="")
+            if getattr(self, 'command_roi', None) is not None:
+                self.start_tracking()  # Pixel-only detection remains available.
         self.render()
 
     def accept_live_frame(self, frame):
@@ -386,6 +398,8 @@ class CommandTab:
         self.frame_received_at = time.monotonic()
         if self.setup is not None and list(frame.shape[1::-1]) != self.setup["video_size_px"]:
             self.stop_event.set()
+            if hasattr(self, 'command_roi'):
+                self.command_roi = None
             self.pixels = None
             self.tracking_tracker = None
             self.tracking_detections = []
@@ -419,32 +433,44 @@ class CommandTab:
         if setup.get("coordinate_system") != "robot_axes":
             raise ValueError("Capture Center, +X and +Y, or load a complete robot-axis calibration first.")
         signature = json.dumps({key: setup.get(key) for key in (
-            "corners_px", "rectangle_width_cm", "rectangle_height_cm", "axis_samples_px", "video_size_px")}, sort_keys=True)
-        if not reset and signature == self.tracking_signature:
-            if self.tracking_enabled and self.tracking_tracker is None:
+            "corners_px", "rectangle_width_cm", "rectangle_height_cm", "axis_samples_px", "video_size_px",
+            "roi_circle_px", "minimum_area", "dark_contrast_threshold")}, sort_keys=True)
+        revision = getattr(self.calibration, 'setup_revision', 0)
+        revision = revision if isinstance(revision, int) else 0
+        loaded_changed = getattr(self, 'calibration_revision', None) != revision
+        if loaded_changed or reset:
+            self.roi_override = False
+        self.calibration_revision = revision
+        if not reset and not loaded_changed and signature == self.tracking_signature:
+            if self.tracking_enabled and self.tracking_tracker is None and (not hasattr(self, 'command_roi') or self.command_roi is not None):
                 self.start_tracking(setup=setup)
             return
         self.tracking_signature = signature
         self.setup = setup
+        if hasattr(self, 'command_roi') and not self.roi_override:
+            self.command_roi = tuple(setup['roi_circle_px'])
+            self.tracking_enabled = True
+            self.show_roi_var.set(True)
         self.tracking_area_var.set(str(setup["minimum_area"]))
         self.tracking_contrast_var.set(str(setup.get("dark_contrast_threshold", 10)))
-        self.tracking_radius_var.set(str(setup["roi_circle_px"][2]))
+        if not hasattr(self, 'command_roi') or not getattr(self, 'roi_override', False):
+            self.tracking_radius_var.set(str(setup["roi_circle_px"][2]))
         self.tracking_tracker = None
         self.tracking_detections = []
         self.tracking_group_xy = None
-        if self.tracking_enabled:
+        if self.tracking_enabled and (not hasattr(self, 'command_roi') or self.command_roi is not None):
             self.start_tracking(setup=setup)
 
     def new_tracking_engine(self, setup, center=None):
         count = int(self.tracking_count_var.get())
         area, contrast = float(self.tracking_area_var.get()), float(self.tracking_contrast_var.get())
         radius = float(self.tracking_radius_var.get())
-        circle = setup["roi_circle_px"]
+        circle = getattr(self, 'command_roi', None) or setup['roi_circle_px']
         center = circle[:2] if center is None else center
         return MovingROICalibration(
             setup["corners_px"], setup["rectangle_width_cm"], setup["rectangle_height_cm"],
-            (*center, radius), count, area, setup["axis_samples_px"],
-            contrast_threshold=contrast, limit_to_pins=False,
+            (*center, radius), count, area, setup.get('axis_samples_px') or None,
+            contrast_threshold=contrast, limit_to_pins=False, allow_uncalibrated=True,
         )
 
     def start_tracking(self, *, setup=None):
@@ -452,9 +478,17 @@ class CommandTab:
             self.arrival_gate.observe(None)
             self.refresh_next_button()
         try:
-            setup = self.current_setup() if setup is None else setup
-            if setup.get("coordinate_system") != "robot_axes":
-                raise ValueError("Complete robot XY axes before tracking in Commands.")
+            if hasattr(self, 'command_roi') and self.command_roi is None:
+                raise ValueError('Place the Phase 3 ROI around the robots first.')
+            if setup is None:
+                try:
+                    setup = self.current_setup()
+                except ValueError:
+                    if self.frame is None:
+                        raise ValueError('Connect the camera and wait for a frame first.')
+                    setup = {'coordinate_system':'pixels', 'corners_px':[], 'rectangle_width_cm':10,
+                             'rectangle_height_cm':10, 'video_size_px':list(self.frame.shape[1::-1]),
+                             'axis_samples_px':{}, 'roi_circle_px':self.command_roi}
             tracker = self.new_tracking_engine(setup)
         except (ValueError, TypeError, KeyError) as error:
             self.tracking_status.config(text=f"Cannot start tracking: {error}")
@@ -499,6 +533,8 @@ class CommandTab:
                     or tracker.minimum_area <= 0 or tracker.radius <= 0 or not 1 <= tracker.contrast_threshold <= 255):
                 raise ValueError("Min area and ROI radius must be positive; contrast must be 1–255.")
             self.tracking_detections, center, self.tracking_group_xy = tracker.process(self.frame)
+            if getattr(self, 'command_roi', None) is not None and center is not None:
+                self.command_roi = (*tracker.center, tracker.radius)
         except (ValueError, TypeError) as error:
             self.tracking_detections, self.tracking_group_xy = [], None
             if getattr(self, "arrival_gate", None) is not None:
@@ -530,8 +566,8 @@ class CommandTab:
                 "robot_id": "" if item is None else item["robot_id"],
                 "robot_x_px": "" if item is None else item["center"][0],
                 "robot_y_px": "" if item is None else item["center"][1],
-                "robot_x_mm": "" if item is None else item["xy_cm"][0] * 10,
-                "robot_y_mm": "" if item is None else item["xy_cm"][1] * 10,
+                "robot_x_mm": "" if item is None or item['xy_cm'] is None else item["xy_cm"][0] * 10,
+                "robot_y_mm": "" if item is None or item['xy_cm'] is None else item["xy_cm"][1] * 10,
                 "group_x_mm": "" if group_mm is None else group_mm[0],
                 "group_y_mm": "" if group_mm is None else group_mm[1],
                 "expected_robots": tracker.count, "detected_robots": len(self.tracking_detections),
@@ -560,6 +596,8 @@ class CommandTab:
             })
         self.tracking_frame_number += 1
         detail = "Group missing; ROI held at last complete detection."
+        if center is not None and group_mm is None:
+            detail = f'Robots detected; pixel center {center}. Physical XY requires complete calibration.'
         if group_mm is not None:
             detail = f"Group XY ({group_mm[0]:.2f}, {group_mm[1]:.2f}) mm."
         if error_mm is not None:
@@ -648,6 +686,55 @@ class CommandTab:
         else:
             self.refresh_calibration()
 
+    def begin_roi_placement(self):
+        if self.running or self.precalculating:
+            self.tracking_status.config(text='Stop the run/precalculation before changing the ROI.')
+            return
+        self.roi_placement_var.set(True)
+        self.place_roi_button.config(text='Click camera')
+        self.tracking_status.config(text='Click the ROI center around all Phase 3 robots; detection starts automatically.')
+
+    def camera_click(self, event, canvas):
+        if not self.roi_placement_var.get():
+            self.click_target(event, screen_points=getattr(canvas, 'screen_points', None))
+            return
+        if self.running or self.precalculating:
+            return
+        try:
+            if self.frame is None or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
+                raise ValueError('Wait for a fresh camera frame before placing the ROI.')
+            transform = getattr(canvas, 'camera_transform', None)
+            if transform is None:
+                return
+            ox, oy, scale = transform
+            x, y = (event.x - ox) / scale, (event.y - oy) / scale
+            h, w = self.frame.shape[:2]
+            if not (0 <= x < w and 0 <= y < h):
+                return
+            radius = float(self.tracking_radius_var.get())
+            if not np.isfinite(radius) or radius <= 0 or int(self.tracking_count_var.get()) < 1:
+                raise ValueError('Set a positive ROI radius and Phase 3 robot count.')
+            self.command_roi = (x, y, radius)
+            self.roi_override = True
+            self.show_roi_var.set(True)
+            self.roi_placement_var.set(False)
+            self.place_roi_button.config(text='Place ROI')
+            self.start_tracking()
+        except (ValueError, TypeError) as error:
+            self.tracking_status.config(text=f'ROI not placed: {error}')
+
+    def clear_command_roi(self):
+        if self.running or self.precalculating:
+            self.tracking_status.config(text='Stop the run/precalculation before clearing the ROI.')
+            return
+        self.stop_tracking()
+        self.command_roi = None
+        self.roi_override = True
+        self.roi_placement_var.set(False)
+        self.place_roi_button.config(text='Place ROI')
+        self.show_roi_var.set(False)
+        self.tracking_status.config(text='ROI cleared. Set robot count and Place ROI to restart detection.')
+
     def open_camera_popout(self):
         if self.camera_popout is not None and self.camera_popout.is_open:
             self.camera_popout.show()
@@ -655,7 +742,11 @@ class CommandTab:
         self.camera_popout = CameraPopout(
             self.parent, 'GUI005 — Phase 3 camera', self.render,
             status_lines=2,
+            toolbar_builder=self.build_popout_roi_controls,
+            extra_controls_enabled=lambda: not self.running and not self.precalculating,
             actions=(('Points', self.show_points, None),
+                     ('Place ROI', self.begin_roi_placement, self.place_roi_button),
+                     ('Clear ROI', self.clear_command_roi, None),
                      ('First', self.run, self.run_button),
                      ('Next', self.next_point, self.next_button),
                      ('Control off', self.toggle_control, self.control_button),
@@ -667,8 +758,22 @@ class CommandTab:
             status=lambda: f"{self.status.cget('text')}  {self.tracking_status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
-        canvas.bind('<Button-1>', lambda event: self.click_target(event, screen_points=getattr(canvas, 'screen_points', None)))
+        canvas.bind('<Button-1>', lambda event: self.camera_click(event, canvas))
         self.render()
+
+    def build_popout_roi_controls(self, bar):
+        self.popout_roi_entries = {}
+        for label, variable, hint in (
+                ('Robots', self.tracking_count_var, 'Expected number of robots in Phase 3. A complete group is required for arrival and feedback.'),
+                ('ROI px', self.tracking_radius_var, 'Moving circular ROI radius in native camera pixels.'),
+                ('Area', self.tracking_area_var, 'Minimum detected robot area in native pixels squared.'),
+                ('Contrast', self.tracking_contrast_var, 'Dark contrast threshold (1–255). Lower values detect fainter robots.')):
+            tk.Label(bar, text=label).pack(side='left', padx=(4, 1))
+            entry = tk.Entry(bar, textvariable=variable, width=4)
+            entry.pack(side='left')
+            self.popout_roi_entries[label] = entry
+            HoverHint(entry, hint)
+        tk.Checkbutton(bar, text='ROI', variable=self.show_roi_var, command=self.render).pack(side='left', padx=3)
 
     def click_target(self, event, *, screen_points=None):
         screen_points = getattr(self, 'screen_points', None) if screen_points is None else screen_points
@@ -828,7 +933,10 @@ class CommandTab:
             load_hardware_case(setup["control_case"])
             self.configure_tracking(setup)
             if self.tracking_tracker is None or not self.tracking_enabled:
-                raise ValueError("Start robot tracking before running an arrival-controlled sequence.")
+                raise ValueError('Place the Phase 3 ROI and detect the robots before running.')
+            if hasattr(self, 'command_roi') and (self.command_roi is None or self.tracking_group_xy is None
+                    or len(self.tracking_detections) != int(self.tracking_count_var.get())):
+                raise ValueError('Wait for a fresh, complete robot group inside the Phase 3 ROI before running.')
         except (ValueError, TypeError, KeyError, ImportError) as error:
             show_view_dialog(self, messagebox.showerror, "Cannot run sequence", str(error))
             return
@@ -853,7 +961,7 @@ class CommandTab:
         if hasattr(self, 'precalculate_button'):
             self.precalculate_button.config(state='disabled')
         self.set_running(True)
-        for button in (self.load_button, self.calibration_button, self.run_button, self.run_selected_button):
+        for button in (self.load_button, self.run_button, self.run_selected_button):
             button.config(state="disabled")
         self.stop_button.config(state="normal")
         self.units_combo.config(state="disabled")
@@ -947,7 +1055,7 @@ class CommandTab:
                     if hasattr(self, 'precalculate_button'):
                         self.precalculate_button.config(state='normal')
                     self.set_running(False)
-                    for button in (self.load_button, self.calibration_button, self.run_button, self.run_selected_button):
+                    for button in (self.load_button, self.run_button, self.run_selected_button):
                         button.config(state="normal")
                     self.stop_button.config(state="disabled")
                     self.units_combo.config(state="readonly")
@@ -998,10 +1106,12 @@ class CommandTab:
         if main_view:
             self.photo = canvas.camera_photo
         canvas.create_image(ox + dw / 2, oy + dh / 2, image=canvas.camera_photo, anchor="center")
+        canvas.camera_transform = (ox, oy, scale)
         if self.setup is None:
             return
-        corners = np.asarray(self.setup["corners_px"]) * scale + [ox, oy]
-        canvas.create_polygon(*corners.ravel(), fill="", outline="#995599", width=1, dash=(2, 10))
+        if len(self.setup['corners_px']) == 4:
+            corners = np.asarray(self.setup["corners_px"]) * scale + [ox, oy]
+            canvas.create_polygon(*corners.ravel(), fill="", outline="#995599", width=1, dash=(2, 10))
 
         def enabled(name):
             variable = getattr(self, name, None)
@@ -1046,6 +1156,8 @@ class CommandTab:
             canvas.create_text(x + 4, y + 4, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 7), anchor="nw")
 
     def close(self):
+        if hasattr(self, 'help_hint'):
+            self.help_hint.hide()
         if hasattr(self, 'preparation_stop'):
             self.preparation_stop.set()
         if getattr(self, 'preparation_after', None) is not None:

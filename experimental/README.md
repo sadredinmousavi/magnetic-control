@@ -89,6 +89,21 @@ CSV include desired, measured, proposed and commanded XY plus calculated/sent
 motor angles. See [POSITION_CONTROL.md](POSITION_CONTROL.md) for limits and behavior.
 In Commands, load a file from `experimental/xy_sequences`:
 
+Commands uses the loaded/applied calibration ROI, area and contrast by default;
+tracking starts automatically. Set Phase 3 robots independently. Reposition it
+with Place ROI if needed; loading another setup restores its defaults automatically
+when entering Commands. There is no Use current calibration button. Without calibration, choose Place ROI and click the
+camera around the group. This is a separate moving ROI from Phase 2 and
+works without a sequence or completed calibration. Pixel-only observations leave
+physical XY blank. Apply a complete Phase 2 calibration before commanding points.
+Place ROI / Clear ROI also work in the camera pop-out. Its synchronized Robots,
+ROI px (radius), Area
+and Contrast inputs, plus the ROI visibility toggle. These inputs are locked
+during execution/precalculation; Next/Stop remain available.
+Clearing or replacing the
+ROI is blocked during execution/precalculation. Camera resolution changes require
+placing it again. The large instruction paragraph is now hover help on Help ?.
+
 `[x, y] | wait_seconds | motor_zero_degrees`
 
 New exports also preserve equilibrium settings:

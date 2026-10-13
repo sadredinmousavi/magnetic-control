@@ -25,7 +25,7 @@ class CameraPopout:
     def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
                  toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True,
                  status_builder=None, status_refresh=None, render_version=None, on_close=None,
-                 status_lines=0, action_captions=None, disabled_actions=()):
+                 status_lines=0, action_captions=None, disabled_actions=(), extra_controls_enabled=lambda: True):
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry('1100x780')
@@ -35,6 +35,7 @@ class CameraPopout:
         self.mirror_action_text, self.controls_enabled = mirror_action_text, controls_enabled
         self.action_captions = action_captions or {}
         self.disabled_actions = set(disabled_actions)
+        self.extra_controls_enabled = extra_controls_enabled
         self.status_refresh = status_refresh
         self.render_version = render_version
         self.on_close = on_close
@@ -107,7 +108,7 @@ class CameraPopout:
                 button.config(text=self.action_captions.get(caption, caption))
         for widget in self.extra_controls.winfo_children():
             if widget.winfo_class() in ('Entry', 'Spinbox', 'Checkbutton', 'Radiobutton', 'Button'):
-                widget.config(state='normal' if self.controls_enabled() else 'disabled')
+                widget.config(state='normal' if self.controls_enabled() and self.extra_controls_enabled() else 'disabled')
 
     def tick(self):
         self.after_id = None

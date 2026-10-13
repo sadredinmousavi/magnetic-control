@@ -163,6 +163,7 @@ class CalibrationTab:
         self.tracker = None
         self.auto_tracking = True
         self.auto_tracker_signature = None
+        self.setup_revision = 0
         self.detections = []
         self.frame_number = 0
         self.render_revision = 0
@@ -1102,6 +1103,7 @@ class CalibrationTab:
             self.contrast_var.set(str(tracker.contrast_threshold))
         self.axis_samples = samples
         self.axis_status.config(text="Saved robot origin and XY axes restored." if samples else "Setup has image-aligned XY. Calibrate robot axes if needed.")
+        self.setup_revision = getattr(self, 'setup_revision', 0) + 1
         self.render()
         self.status.config(text='Setup loaded. One-robot tracking resumes automatically from the ROI.')
 

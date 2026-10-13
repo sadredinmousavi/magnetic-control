@@ -167,7 +167,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.steps = [XYStep((0, 0), 3, 180)]
         app.active_index = None
         app.arrival_gate, app.run_indices, app.stop_event = None, (0,), threading.Event()
-        for name in ("table", "status", "render", "set_running", "load_button", "calibration_button", "run_button", "run_selected_button", "extrapolation_check", "stop_button", "units_combo", "next_button", "arrival_tolerance_entry", "arrival_hold_entry"):
+        for name in ("table", "status", "render", "set_running", "load_button", "run_button", "run_selected_button", "extrapolation_check", "stop_button", "units_combo", "next_button", "arrival_tolerance_entry", "arrival_hold_entry"):
             setattr(app, name, Mock())
         app.events.put((1, "sent", 0, {"angles_deg": [60, 70]}))
         app.events.put((1, "completed", 0, {"angles_deg": [60, 70]}))
@@ -240,7 +240,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.arrival_tolerance_var = Mock(get=Mock(return_value="1"))
         app.arrival_hold_var = Mock(get=Mock(return_value="0.5"))
         app.tracking_tracker, app.tracking_enabled = Mock(), True
-        for name in ("parent", "table", "status", "render", "set_running", "load_button", "calibration_button",
+        for name in ("parent", "table", "status", "render", "set_running", "load_button",
                      "run_button", "run_selected_button", "stop_button", "units_combo", "extrapolation_check", "next_button", "arrival_tolerance_entry", "arrival_hold_entry"):
             setattr(app, name, Mock())
         app.table.selection.return_value = ("1",)
@@ -342,6 +342,32 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertEqual(row["group_valid"], 1)
         self.assertFalse(app.tracking_tracker.limit_to_pins)
 
+    def test_command_roi_detects_multiple_robots_without_calibration_and_preserves_pixel_tracking_on_load(self):
+        app = self.tracking_app()
+        app.command_roi = (110,110,90)
+        app.tracking_count_var.get.return_value = '2'
+        app.current_setup = Mock(side_effect=ValueError('No calibration'))
+        app.start_tracking()
+        app.accept_live_frame(self.robot_frame([(100,110),(120,110)]))
+        self.assertEqual(len(app.tracking_detections), 2)
+        self.assertIsNone(app.tracking_group_xy)
+        self.assertEqual(app.tracking_rows[-1]['robot_x_mm'], '')
+        self.assertEqual(app.setup['coordinate_system'], 'pixels')
+        self.assertIsNotNone(app.command_roi)
+
+    def test_commands_roi_placement_maps_popout_click_to_native_coordinates(self):
+        app = self.tracking_app()
+        app.command_roi = None
+        app.precalculating = False
+        app.roi_placement_var = Mock(get=Mock(return_value=True))
+        app.place_roi_button, app.show_roi_var, app.start_tracking = Mock(), Mock(), Mock()
+        app.frame_received_at = time.monotonic()
+        surface = Mock(camera_transform=(20,30,.5))
+        app.camera_click(Mock(x=120,y=130), surface)
+        self.assertEqual(app.command_roi, (200,200,90))
+        app.start_tracking.assert_called_once()
+        app.roi_placement_var.set.assert_called_with(False)
+
     def test_applying_phase2_calibration_does_not_overwrite_phase3_robot_count(self):
         app = self.tracking_app()
         app.tracking_count_var.get.return_value = '3'
@@ -352,6 +378,27 @@ class CommandSequenceTests(unittest.TestCase):
         app.configure_tracking(data)
         app.tracking_count_var.set.assert_not_called()
         self.assertEqual(app.tracking_count_var.get(), '3')
+
+    def test_loaded_calibration_supplies_default_roi_and_reloading_resets_manual_override(self):
+        app = self.tracking_app()
+        app.command_roi, app.roi_override, app.calibration_revision = None, False, None
+        app.calibration.setup_revision = 1
+        app.tracking_signature = None
+        app.show_roi_var = Mock()
+        app.tracking_count_var.get.return_value = '3'
+        data = setup()
+        data.update(robot_count=1, minimum_area=1, dark_contrast_threshold=10, roi_circle_px=[110,110,90])
+        app.configure_tracking(data)
+        self.assertEqual(app.command_roi, (110,110,90))
+        self.assertEqual(app.tracking_tracker.count, 3)
+        app.command_roi, app.roi_override = (180,180,90), True
+        app.configure_tracking(data)
+        self.assertEqual(app.command_roi, (180,180,90))
+        app.calibration.setup_revision = 2
+        app.configure_tracking(data)
+        self.assertEqual(app.command_roi, (110,110,90))
+        self.assertFalse(app.roi_override)
+        app.tracking_count_var.set.assert_not_called()
 
     def test_missing_robot_leaves_gap_and_holds_roi_until_reacquisition(self):
         app = self.tracking_app()

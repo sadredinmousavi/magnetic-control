@@ -20,7 +20,7 @@ TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot
 def draw_command_overlay(image, setup, pixels, active_index, detections, tracker=None,
                          *, show_path=False, show_roi=False, trails=None):
     """Draw in source-image pixels, independently of GUI zoom or visibility."""
-    if setup is not None:
+    if setup is not None and len(setup['corners_px']) == 4:
         cv2.polylines(image, [np.asarray(setup['corners_px'], np.int32)], True, (153, 85, 153), 1)
     if pixels is not None:
         points = np.rint(pixels).astype(np.int32)
