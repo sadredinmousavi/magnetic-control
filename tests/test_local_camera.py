@@ -11,6 +11,59 @@ from gui005 import ClosedLoopGUI
 
 
 class LocalCameraTests(unittest.TestCase):
+    def test_auto_keeps_original_driver_mode_without_resolution_setters(self):
+        import cv2
+        capture = Mock(isOpened=Mock(return_value=True))
+        capture.read.side_effect = [(True, np.ones((480,640,3),np.uint8)), (False,None)]
+        client = LocalCameraClient(queue.Queue(maxsize=1), queue.Queue(), capture_factory=Mock(return_value=capture))
+        client.start(2)
+        client.thread.join(2)
+        self.assertEqual(capture.set.call_args_list, [unittest.mock.call(cv2.CAP_PROP_BUFFERSIZE, 1)])
+
+    def test_black_requested_frames_warn_without_claiming_image_is_accepted(self):
+        capture = Mock(isOpened=Mock(return_value=True))
+        capture.read.side_effect = [(True,np.zeros((48,64,3),np.uint8))] * 10 + [(False,None)]
+        events = queue.Queue()
+        client = LocalCameraClient(queue.Queue(maxsize=1), events, capture_factory=Mock(return_value=capture))
+        client.start(2, width=64, height=48)
+        client.thread.join(2)
+        kind, text = events.get_nowait()
+        self.assertEqual(kind, 'connected')
+        self.assertNotIn('accepted', text)
+        kind, text = events.get_nowait()
+        self.assertEqual(kind, 'warning')
+        self.assertIn('select Auto', text)
+
+    def test_command_resolution_change_discards_old_overlay_geometry(self):
+        from command_tab import CommandTab
+        app = CommandTab.__new__(CommandTab)
+        app.setup = {'video_size_px': [640,480], 'corners_px': [(1,1)] * 4}
+        app.stop_event, app.preparation_stop = Mock(), Mock()
+        app.tracking_status, app.status = Mock(), Mock()
+        app.tracking_rows, app.command_roi = [], (100,100,30)
+        app.visible = lambda: False
+        app.accept_live_frame(np.ones((1440,2560,3),np.uint8))
+        self.assertIsNone(app.setup)
+        self.assertIsNone(app.pixels)
+        self.assertIsNone(app.command_roi)
+        app.stop_event.set.assert_called_once()
+        app.preparation_stop.set.assert_called_once()
+
+    def test_calibration_resolution_change_discards_old_click_mapping(self):
+        from closed_loop_calibration import CalibrationTab
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.frame = np.ones((480,640,3),np.uint8)
+        app.canvas, app.status, app.render = Mock(), Mock(), Mock()
+        app.camera_popout = Mock(is_open=True)
+        app.reset_axes, app.clear_tracking = Mock(), Mock()
+        app.tracker, app.frame_number = None, 0
+        app.accept_frame(np.ones((1440,2560,3),np.uint8))
+        self.assertEqual(app.corners, [])
+        self.assertIsNone(app.transform)
+        self.assertIsNone(app.canvas.camera_transform)
+        self.assertIsNone(app.camera_popout.canvas.camera_transform)
+        app.clear_tracking.assert_called_once()
+
     def test_resolution_requests_driver_properties_and_reports_actual_mismatch(self):
         import cv2
         frames, events = queue.Queue(maxsize=1), queue.Queue()

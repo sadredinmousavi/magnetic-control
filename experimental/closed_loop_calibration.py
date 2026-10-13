@@ -601,6 +601,12 @@ class CalibrationTab:
         if self.frame is not None and self.frame.shape[:2] != frame.shape[:2]:
             self.corners, self.circle = [], None
             self.pin_search_circle = None
+            self.transform = None
+            self.canvas.camera_transform = None
+            popup = getattr(self, 'camera_popout', None)
+            if popup is not None and popup.is_open:
+                popup.canvas.camera_transform = None
+            self.frame = frame
             self.reset_axes()
             self.clear_tracking()
             self.status.config(text="Frame size changed. Select four points and place the ROI again.")

@@ -40,6 +40,8 @@ class LocalCameraClient:
                 capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             first = True
             last_size = None
+            black_frames = 0
+            black_warning = False
             while not self.stop_event.is_set():
                 ok, frame = capture.read()
                 if not ok or frame is None:
@@ -53,9 +55,19 @@ class LocalCameraClient:
                     message = f'Webcam {index}: {actual[0]} × {actual[1]}'
                     if width is not None:
                         message += f' (requested {width} × {height}'
-                        message += '; driver returned a different size)' if actual != (width, height) else '; accepted)'
+                        message += '; driver returned a different size)' if actual != (width, height) else '; received size matches)'
                     self.events.put(('connected', message))
                     first = False
+                # Some virtual-camera modes report the requested dimensions but
+                # deliver only black pixels. Size negotiation is not image health.
+                black_frames = black_frames + 1 if not frame.any() else 0
+                if black_frames >= 10 and not black_warning:
+                    self.events.put(('warning', f'Webcam {index}: {last_size[0]} × {last_size[1]}; only black frames received. '
+                                     'Disconnect, select Auto, and reconnect; check the Iriun apps too.'))
+                    black_warning = True
+                elif black_warning and black_frames == 0:
+                    self.events.put(('connected', message))
+                    black_warning = False
                 try:
                     self.frames.get_nowait()
                 except queue.Empty:

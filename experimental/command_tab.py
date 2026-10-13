@@ -398,6 +398,9 @@ class CommandTab:
         self.frame_received_at = time.monotonic()
         if self.setup is not None and list(frame.shape[1::-1]) != self.setup["video_size_px"]:
             self.stop_event.set()
+            self.preparation_stop.set()
+            self.setup = None  # Do not draw old pins/targets on a new frame geometry.
+            self.tracking_signature = None
             if hasattr(self, 'command_roi'):
                 self.command_roi = None
             self.pixels = None

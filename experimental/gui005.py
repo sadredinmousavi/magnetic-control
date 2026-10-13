@@ -221,6 +221,7 @@ class ClosedLoopGUI(BaseServoGUI):
         self.commands.stop_recording()
         self.calibration.frame = self.calibration.frame_received_at = None
         self.calibration.corners, self.calibration.circle = [], None
+        self.calibration.transform = None
         self.calibration.reset_axes()
         self.calibration.clear_tracking()
         self.calibration.camera_source_key = source_key
@@ -233,9 +234,11 @@ class ClosedLoopGUI(BaseServoGUI):
         self.commands.tracking_signature = None
         self.commands.render_revision += 1
         for tab in (self.calibration, self.commands):
+            tab.canvas.camera_transform = None
             tab.canvas.delete('all')
             popup = tab.camera_popout
             if popup is not None and popup.is_open:
+                popup.canvas.camera_transform = None
                 popup.canvas.delete('all')
         self.remote_camera_canvas.delete('all')
         self.camera_source_key = source_key
@@ -487,7 +490,7 @@ class ClosedLoopGUI(BaseServoGUI):
                 while True:
                     kind, message = self.local_event_queue.get_nowait()
                     if self.selected_camera_source == 'Iriun / Local webcam':
-                        color = 'darkorange' if kind == 'connected' and 'different size' in message else 'green' if kind == 'connected' else 'red'
+                        color = 'darkorange' if kind == 'warning' or (kind == 'connected' and 'different size' in message) else 'green' if kind == 'connected' else 'red'
                         self.local_state_label.config(text=message, fg=color)
             except queue.Empty:
                 pass
