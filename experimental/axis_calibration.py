@@ -7,7 +7,14 @@ from gui004 import calibrated_dwell_coordinates
 
 
 AXIS_TARGETS_M = {"Origin": (0.0, 0.0), "+X": (0.01, 0.0), "+Y": (0.0, 0.01)}
-AXIS_DISPLAY_NAMES = {"Origin": "Center", "+X": "+X", "+Y": "+Y"}
+AXIS_MOVE_TARGETS_M = {
+    'Origin': (0., 0.),
+    '+X': (.01, 0.), '+2X': (.02, 0.), '+3X': (.03, 0.),
+    '+Y': (0., .01), '+2Y': (0., .02), '+3Y': (0., .03),
+}
+AXIS_REFERENCE_NAMES = {name: 'Origin' if name == 'Origin' else '+' + name[-1]
+                        for name in AXIS_MOVE_TARGETS_M}
+AXIS_DISPLAY_NAMES = {name: 'Center' if name == 'Origin' else name for name in AXIS_MOVE_TARGETS_M}
 
 
 class RobotAxes:

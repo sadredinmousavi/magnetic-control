@@ -79,13 +79,14 @@ class PointCommander:
         return hashlib.sha256(json.dumps(params, sort_keys=True, default=encode).encode()).hexdigest()
 
     def prepare_axes(self, case_name):
-        """Compute all three fixed ratio-1 poses without connecting or moving motors."""
+        """Compute Center and 10/20/30 mm axis poses without moving motors."""
+        from axis_calibration import AXIS_MOVE_TARGETS_M
         name = hardware_case_name(case_name)
         with self.lock:
             params = load_hardware_case(name)
             signature = self.hardware_signature(params)
             results = {}
-            for target in ((0., 0.), (.01, 0.), (0., .01)):
+            for target in AXIS_MOVE_TARGETS_M.values():
                 result = calculate_point_control(params, target, ratio=1., angle_deg=None)
                 angles = np.asarray(result['angles_deg'], dtype=float)
                 if angles.ndim != 1 or not angles.size or not np.isfinite(angles).all():

@@ -45,7 +45,8 @@ moving ROI with a 32-pixel blur halo; detections are translated back to full-fra
 coordinates. Pin clipping, identity checks and physical XY mapping are unchanged.
 Closing GUI005 closes all camera windows and finalizes any recording.
 Press Prepare axis moves beside Hardware case (or Prepare in the pop-out) once.
-It computes Center/+X/+Y poses in the background without connecting or moving
+It computes seven poses: Center, +X/+2X/+3X and +Y/+2Y/+3Y (10/20/30 mm from
+Center along the selected axis), in the background without connecting or moving
 motors. Afterwards these moves reuse the prepared ratio-1 poses; Phase 3 continues
 to synthesize its own per-point settings freshly. Changing the selected case or
 its hardware model requires preparation again. Calibration has no settle-time
@@ -59,7 +60,16 @@ image coordinates. Capture still requires fresh live frames, four pins, a valid
 ROI and exactly one unambiguously tracked robot.
 Each new move
 replaces an uncaptured pending position without silently saving it. For axes,
-capture Center first, then +X/+Y. Capturing a new Center resets dependent X/Y
+capture Center first, then any X distance and any Y distance. Only the latest
+successful capture for each axis is kept: +3X replaces the earlier +X/+2X
+reference, and likewise for Y. A move alone never replaces a saved capture.
+Setup files retain both the chosen move/distance and the captured pixel position;
+older setups using 10 mm moves remain loadable. Four-pin dimensions determine
+physical scale; the captures determine origin and axis directions, so a command
+position error is not imposed as a new pixel-to-mm scale. Main and pop-out views
+have the same compact buttons, with blue X and green Y groups and hover hints.
+Prepare again after updating to build all seven poses.
+Capturing a new Center resets dependent X/Y
 samples, but merely testing a Center move does not erase saved axes.
 Calibration is fixed to one robot. Placing an ROI automatically starts detection
 and following, without requiring pins. Without four pins, physical XY fields are

@@ -15,6 +15,44 @@ from gui004 import circle_detection_mask, workspace_detection_mask
 
 
 class MovingROICalibrationTests(unittest.TestCase):
+    def test_clear_roi_cancels_pending_capture_but_preserves_saved_calibration(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.axis_busy, app.axis_pending = False, '+X'
+        app.circle = (80,100,40)
+        app.tracker = app.axis_tracker = Mock()
+        app.detections = app.axis_detections = [{'center': (80,100)}]
+        app.corners, app.axis_samples = [(1,1)] * 4, {'Origin': [80,100]}
+        app.axis_capture_button, app.status, app.axis_status, app.render = Mock(), Mock(), Mock(), Mock()
+        app.clear_roi()
+        self.assertIsNone(app.circle)
+        self.assertIsNone(app.tracker)
+        self.assertIsNone(app.axis_tracker)
+        self.assertIsNone(app.axis_pending)
+        self.assertEqual(app.detections, [])
+        self.assertEqual(app.axis_samples, {'Origin': [80,100]})
+        self.assertEqual(len(app.corners), 4)
+        app.axis_capture_button.config.assert_called_with(state='disabled')
+        app.ensure_roi_tracking()
+        self.assertIsNone(app.tracker)
+
+    def test_clear_roi_during_axis_move_does_not_reenable_capture_when_move_finishes(self):
+        import queue
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.axis_busy, app.axis_pending, app.axis_job = True, None, 7
+        app.circle = (80,100,40)
+        app.axis_buttons = [Mock()]
+        app.axis_capture_button, app.status, app.axis_status, app.render = Mock(), Mock(), Mock(), Mock()
+        app.clear_roi()
+        self.assertTrue(app.axis_busy)  # Do not pretend to cancel a motor command.
+        app.axis_events = queue.Queue()
+        app.axis_events.put((7, '+X', None))
+        app.poll_axis_move()
+        self.assertFalse(app.axis_busy)
+        self.assertIsNone(app.axis_pending)
+        self.assertIsNone(app.circle)
+        self.assertIsNone(app.tracker)
+        app.axis_capture_button.config.assert_called_with(state='disabled')
+
     def test_roi_only_auto_tracking_uses_one_shared_robot_tracker_and_blank_physical_xy(self):
         app = CalibrationTab.__new__(CalibrationTab)
         app.frame, app.tracker, app.axis_tracker = None, None, None

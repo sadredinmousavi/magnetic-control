@@ -21,9 +21,10 @@ from gui004 import (
     robot_center_for, workspace_detection_mask,
 )
 from robot_vision import RobotDetector
-from axis_calibration import AXIS_TARGETS_M, AXIS_DISPLAY_NAMES, RobotAxes
+from axis_calibration import AXIS_TARGETS_M, AXIS_MOVE_TARGETS_M, AXIS_REFERENCE_NAMES, AXIS_DISPLAY_NAMES, RobotAxes
 from point_control import hardware_case_name
 from camera_popout import CameraPopout, show_view_dialog
+from hover_hint import HoverHint
 
 
 SETUP_DIR = Path(__file__).resolve().parent / "setups"
@@ -179,6 +180,7 @@ class CalibrationTab:
         self.prepare_events = queue.Queue()
         self.prepare_after = None
         self.axis_samples = {}
+        self.axis_capture_moves = {}
         self.axis_pending = None
         self.axis_busy = False
         self.axis_events = queue.Queue()
@@ -274,11 +276,13 @@ class CalibrationTab:
         actions = tk.Frame(axes_bar)
         actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.axis_buttons = []
-        for name in AXIS_TARGETS_M:
-            button = tk.Button(actions, text=f"Move to {AXIS_DISPLAY_NAMES[name]}", command=lambda n=name: self.move_axis(n))
-            button.pack(side="left", padx=3)
+        for name in AXIS_MOVE_TARGETS_M:
+            button = tk.Button(actions, text=AXIS_DISPLAY_NAMES[name], width=6 if name == 'Origin' else 4,
+                               command=lambda n=name: self.move_axis(n))
+            button.pack(side="left", padx=(6 if name in ('+X', '+Y') else 1, 1))
+            self.style_axis_move_button(button, name)
             self.axis_buttons.append(button)
-        self.axis_capture_button = tk.Button(actions, text="Capture settled robot", command=self.capture_axis, state="disabled")
+        self.axis_capture_button = tk.Button(actions, text="Capture", command=self.capture_axis, state="disabled")
         self.axis_capture_button.pack(side="left", padx=3)
         tk.Button(actions, text="Reset axes", command=self.reset_axes).pack(side="left", padx=3)
         tk.Label(axes_bar, anchor="w", justify="left", text=(
@@ -286,9 +290,9 @@ class CalibrationTab:
             "Only the case.py hardware model is used; no condition or sequence file is needed."
         ), wraplength=1000).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.axis_status = tk.Label(axes_bar, anchor="w", background='#edf4ff', foreground='#173c68', padx=6, pady=4, text=(
-            "Ratio = 1. Place the ROI around one robot; it follows the robot during moves. Move to Center, +X (10 mm), then +Y (10 mm). "
+            "Ratio = 1. X/Y = 10 mm, 2X/2Y = 20 mm, 3X/3Y = 30 mm from Center. The ROI follows one robot. "
             "Prepare axis moves once. Moves can be repeated in any order; Capture saves only the latest completed move. "
-            "For calibration, capture Center first, then +X and +Y."
+            "Capture Center first, then any X and Y distance. The latest capture replaces that axis reference."
         ), wraplength=1000)
         self.axis_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.capture_hint = tk.Label(axes_bar, anchor='w', foreground='#855300', background='#fff4d6', padx=6, pady=3)
@@ -346,14 +350,30 @@ class CalibrationTab:
             raise ValueError('Minimum area and ROI radius must be positive and finite.')
 
     def clear_roi(self):
-        if self.axis_busy or self.axis_pending:
-            self.axis_status.config(text='Finish capture or Reset axes before clearing the ROI.')
-            return
         self.circle = None
         self.tracker = self.axis_tracker = None
         self.detections, self.axis_detections = [], []
         self.auto_tracker_signature = None
+        self.axis_pending = self.axis_ready_at = None
+        self.axis_processed_at = self.axis_processed_settings = None
+        self.mask_preview_key = self.mask_preview = None
+        if hasattr(self, 'axis_capture_button'):
+            self.axis_capture_button.config(state='disabled')
+        self.status.config(text='ROI cleared. Tracking stopped; place a new ROI to restart.')
+        if hasattr(self, 'axis_status'):
+            self.axis_status.config(text='ROI cleared; pending capture cancelled. Saved axis samples are unchanged. '
+                                    'Any motor move already sent is not undone.')
         self.render()
+
+    def style_axis_move_button(self, button, name):
+        reference = AXIS_REFERENCE_NAMES[name]
+        background, foreground = (('#edf4ff', '#174f91') if reference == '+X' else
+                                  ('#e4f5e9', '#176637') if reference == '+Y' else ('#f0f1f3', '#30343a'))
+        button.config(background=background, foreground=foreground, padx=3, pady=2,
+                      width=6 if name == 'Origin' else 4)
+        target = AXIS_MOVE_TARGETS_M[name]
+        HoverHint(button, f'Move to ({target[0]*1000:g}, {target[1]*1000:g}) mm from Center, ratio 1. '
+                  'Capture saves the latest completed move for this axis; previous distances are replaced.')
 
     def read_contrast_threshold(self):
         variable = getattr(self, "contrast_var", None)
@@ -369,6 +389,7 @@ class CalibrationTab:
         self.axis_pending = None
         self.axis_ready_at = None
         self.axis_samples = {}
+        self.axis_capture_moves = {}
         self.axis_tracker = None
         self.axis_detections = []
         self.axis_processed_at = None
@@ -394,7 +415,7 @@ class CalibrationTab:
         self.prepare_button.config(state='disabled')
         for button in self.axis_buttons:
             button.config(state='disabled')
-        self.axis_status.config(text='Preparing Center, +X and +Y motor poses in the background. No motors are moved.')
+        self.axis_status.config(text='Preparing Center and X/Y at 10, 20 and 30 mm in the background. No motors are moved.')
 
         def worker():
             try:
@@ -472,7 +493,7 @@ class CalibrationTab:
         case = self.control_case_var.get()
         for button in self.axis_buttons:
             button.config(state="disabled")
-        target = AXIS_TARGETS_M[name]
+        target = AXIS_MOVE_TARGETS_M[name]
         self.axis_status.config(text=f"Sending {AXIS_DISPLAY_NAMES[name]} {target} m with ratio 1. Pins/ROI/camera are not required for moving. Capture requires valid live calibration; any previous pending move is replaced.")
 
         def worker():
@@ -499,11 +520,16 @@ class CalibrationTab:
                 if error:
                     self.axis_status.config(text=f"Movement failed: {error}")
                     show_view_dialog(self, messagebox.showerror, "Robot axes", error)
-                else:
+                elif self.circle is not None:
                     self.axis_pending = name
                     self.axis_ready_at = time.monotonic()
                     self.axis_capture_button.config(state="normal")
                     self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[name]} command sent. Confirm visually that the robot has settled, then Capture to save this position. There is no automatic settle check or delay; moving again replaces the pending capture.")
+                else:
+                    self.axis_pending = self.axis_ready_at = None
+                    self.axis_capture_button.config(state='disabled')
+                    self.axis_status.config(text='Motor command finished without an ROI. Tracking remains stopped. '
+                                                 'Place a new ROI, then move and capture to calibrate.')
         except queue.Empty:
             pass
         if self.axis_busy:
@@ -550,17 +576,21 @@ class CalibrationTab:
         if self.axis_pending != "Origin" and np.linalg.norm(np.asarray(center) - self.axis_samples["Origin"]) < 2:
             raise ValueError("Robot has not moved enough from Center (less than 2 pixels). Check the movement and wait for it to settle; nothing was saved.")
         # Only an explicit successful Center capture resets dependent X/Y samples.
+        reference = AXIS_REFERENCE_NAMES[self.axis_pending]
         samples = dict({} if self.axis_pending == 'Origin' else self.axis_samples,
-                       **{self.axis_pending: list(center)})
+                       **{reference: list(center)})
+        capture_moves = {key: getattr(self, 'axis_capture_moves', {}).get(key, key) for key in samples}
+        capture_moves[reference] = self.axis_pending
         if len(samples) == 3:
             axes = RobotAxes(self.corners, float(self.width_var.get()), float(self.height_var.get()), samples)
             self.axis_status.config(text=(
                 f"Robot axes calibrated. Observed X move: {axes.lengths_cm[0] * 10:.2f} mm; "
-                f"Y move: {axes.lengths_cm[1] * 10:.2f} mm. Save setup to retain this calibration."
+                f"Y move: {axes.lengths_cm[1] * 10:.2f} mm. References: {capture_moves['+X']}, {capture_moves['+Y']}. Save setup to retain this calibration."
             ))
         else:
             self.axis_status.config(text=f"{AXIS_DISPLAY_NAMES[self.axis_pending]} captured at ({center[0]:.1f}, {center[1]:.1f}) px. {len(samples)}/3 references recorded. Move to the next position.")
         self.axis_samples = samples
+        self.axis_capture_moves = capture_moves
         self.axis_pending = None
         self.axis_ready_at = None
         if hasattr(self, "axis_capture_button"):
@@ -671,9 +701,8 @@ class CalibrationTab:
         self.camera_popout = CameraPopout(
             self.parent, 'GUI005 — Calibration camera', self.render,
             actions=(('Prepare', self.prepare_axis_moves, self.prepare_button),
-                     ('Center', lambda: self.move_axis('Origin'), self.axis_buttons[0]),
-                     ('+X', lambda: self.move_axis('+X'), self.axis_buttons[1]),
-                     ('+Y', lambda: self.move_axis('+Y'), self.axis_buttons[2]),
+                     *((AXIS_DISPLAY_NAMES[name], lambda n=name: self.move_axis(n), button)
+                       for name, button in zip(AXIS_MOVE_TARGETS_M, self.axis_buttons)),
                      ('Capture', self.capture_axis, self.axis_capture_button),
                      ('Reset axes', self.reset_axes, None),
                      ('Clear pins', self.clear_points, None),
@@ -686,6 +715,8 @@ class CalibrationTab:
             status=lambda: f"{self.capture_explanation()}  |  {self.axis_status.cget('text')}  |  {self.status.cget('text')}",
         )
         canvas = self.camera_popout.canvas
+        for (button, _), name in zip(self.camera_popout.actions[1:], AXIS_MOVE_TARGETS_M):
+            self.style_axis_move_button(button, name)
         canvas.bind('<Button-1>', lambda event: self.click(event, transform=getattr(canvas, 'camera_transform', None)))
         canvas.bind('<Motion>', lambda event: self.move_pin_roi(event, transform=getattr(canvas, 'camera_transform', None)))
         canvas.bind('<Leave>', self.clear_pin_roi)
@@ -954,7 +985,7 @@ class CalibrationTab:
                    fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=.32 / scale)
 
         mask_var = getattr(self, "show_mask_var", None)
-        if mask_var is not None and mask_var.get():
+        if mask_var is not None and mask_var.get() and (self.circle is not None or self.tracker is not None):
             circle = self.circle if self.tracker is None else (*self.tracker.center, self.tracker.radius)
             mask = circle_detection_mask(self.frame.shape[:2], circle)
             if len(self.corners) == 4:
@@ -1038,7 +1069,10 @@ class CalibrationTab:
             'camera_source': getattr(self, 'camera_source_key', 'Pi SSH'),
             "dark_contrast_threshold": self.read_contrast_threshold(),
             "axis_samples_px": getattr(self, "axis_samples", {}),
-            "axis_targets_m": AXIS_TARGETS_M,
+            "axis_capture_moves": {key: getattr(self, 'axis_capture_moves', {}).get(key, key)
+                                   for key in getattr(self, 'axis_samples', {})},
+            "axis_targets_m": {key: AXIS_MOVE_TARGETS_M[getattr(self, 'axis_capture_moves', {}).get(key, key)]
+                               for key in AXIS_TARGETS_M},
             "control_case": hardware_case_name(self.control_case_var.get()) if hasattr(self, "control_case_var") else "",
             "coordinate_system": "robot_axes" if len(getattr(self, "axis_samples", {})) == 3 else "rectangle_center",
         }
@@ -1089,6 +1123,11 @@ class CalibrationTab:
             samples = data.get("axis_samples_px", {})
             if samples and set(samples) != set(AXIS_TARGETS_M):
                 raise ValueError("Saved robot axis references are incomplete.")
+            capture_moves = data.get('axis_capture_moves', {key: key for key in samples})
+            if (not isinstance(capture_moves, dict) or (samples and set(capture_moves) != set(samples))
+                    or any(not isinstance(move, str) or AXIS_REFERENCE_NAMES.get(move) != key
+                           for key, move in capture_moves.items())):
+                raise ValueError('Saved axis move references are invalid.')
             tracker = MovingROICalibration(
                 data["corners_px"], data["rectangle_width_cm"], data["rectangle_height_cm"],
                 data["roi_circle_px"], 1, data["minimum_area"],
@@ -1114,6 +1153,7 @@ class CalibrationTab:
         if hasattr(self, "contrast_var"):
             self.contrast_var.set(str(tracker.contrast_threshold))
         self.axis_samples = samples
+        self.axis_capture_moves = capture_moves if samples else {}
         self.axis_status.config(text="Saved robot origin and XY axes restored." if samples else "Setup has image-aligned XY. Calibrate robot axes if needed.")
         self.setup_revision = getattr(self, 'setup_revision', 0) + 1
         self.render()

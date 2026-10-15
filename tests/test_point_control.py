@@ -50,11 +50,13 @@ class PointControlTests(unittest.TestCase):
              patch('point_control.calculate_point_control', return_value={'angles_deg': [60] * 8}) as calculate, \
              patch('helpers.moveArray') as move:
             commander.prepare_axes('case_100')
-            self.assertEqual(calculate.call_count, 3)
+            self.assertEqual(calculate.call_count, 7)
+            self.assertEqual({tuple(call.args[1]) for call in calculate.call_args_list},
+                             {(0.,0.), (.01,0.), (.02,0.), (.03,0.), (0.,.01), (0.,.02), (0.,.03)})
             move.assert_not_called()
-            for target in ((0, .01), (0, 0), (.01, 0), (0, .01)):
+            for target in ((0, .03), (0, 0), (.02, 0), (.03, 0)):
                 commander.move_prepared_axis('case_100', target)
-            self.assertEqual(calculate.call_count, 3)
+            self.assertEqual(calculate.call_count, 7)
             self.assertEqual(move.call_count, 4)
             params['RADIUS'] = .2
             with self.assertRaisesRegex(ValueError, 'Prepare axis moves'):

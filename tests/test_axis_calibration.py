@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
-from axis_calibration import AXIS_TARGETS_M, RobotAxes
+from axis_calibration import AXIS_TARGETS_M, AXIS_MOVE_TARGETS_M, RobotAxes
 from control_workflow import calculate_point_control
 from closed_loop_calibration import (
     CalibrationTab, MovingROICalibration, DEFAULT_ROBOT_ROI_RADIUS, DEFAULT_PIN_ROI_RADIUS,
@@ -101,6 +101,37 @@ class RobotAxisTests(unittest.TestCase):
         self.assertEqual(app.circle, circle)
         app.axis_capture_button.config.assert_called_with(state="disabled")
 
+    def test_longer_moves_replace_only_the_last_reference_of_each_axis(self):
+        app = self.app()
+        app.axis_samples = {'Origin': [100,100], '+X': [120,100], '+Y': [100,80]}
+        app.update_axis_tracking = Mock()
+        for name, center, reference in (('+3X', [160,100], '+X'), ('+2X', [140,100], '+X'),
+                                         ('+3Y', [100,40], '+Y')):
+            previous = dict(app.axis_samples)
+            app.axis_pending = name
+            app.axis_ready_at = app.frame_received_at - .1
+            app.axis_tracker = Mock(center=np.asarray(center, dtype=float), radius=30)
+            app.axis_detections = [{'center': center}]
+            app.record_axis_from_roi()
+            self.assertEqual(set(app.axis_samples), {'Origin', '+X', '+Y'})
+            self.assertEqual(app.axis_samples[reference], center)
+            for key in set(previous) - {reference}:
+                self.assertEqual(app.axis_samples[key], previous[key])
+            self.assertEqual(app.axis_capture_moves[reference], name)
+        data = app.setup_data()
+        self.assertEqual(data['axis_targets_m']['+X'], (.02,0.))
+        self.assertEqual(data['axis_targets_m']['+Y'], (0.,.03))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'long_axes.json'
+            path.write_text(json.dumps(data), encoding='utf-8')
+            with patch('closed_loop_calibration.filedialog.askopenfilename', return_value=str(path)):
+                app.load_setup()
+            self.assertEqual(app.axis_capture_moves['+X'], '+2X')
+            self.assertEqual(app.axis_capture_moves['+Y'], '+3Y')
+        # Pin dimensions, rather than commanded travel, remain the metric scale.
+        axes = RobotAxes(CORNERS, 10, 10, app.axis_samples)
+        np.testing.assert_allclose(axes.coordinates([[140,40]]), [[2,3]], atol=1e-6)
+
     def test_roi_capture_rejects_missing_or_multiple_candidates_without_saving(self):
         app = self.app()
         app.axis_samples = {}
@@ -143,7 +174,7 @@ class RobotAxisTests(unittest.TestCase):
         app.axis_move.assert_not_called()
 
     def test_prepared_axis_moves_without_any_vision_setup(self):
-        for target in ('Origin', '+X', '+Y'):
+        for target in AXIS_MOVE_TARGETS_M:
             app = self.app()
             app.frame, app.circle, app.corners = None, None, []
             app.axis_samples = {}
