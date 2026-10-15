@@ -23,10 +23,11 @@ from command_sequences import (
 from point_control import hardware_case_name, load_hardware_case
 from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
-from command_recording import CommandRecording, draw_command_overlay
+from command_recording import CommandRecording, draw_command_overlay, video_crop_circle
 from camera_popout import CameraPopout, show_view_dialog
 from position_control import PositionPID, PositionFeedback
 from hover_hint import HoverHint
+from learned_corrections import LearnedCorrections, correction_context
 
 
 class CommandTab:
@@ -44,13 +45,15 @@ class CommandTab:
         self.calibration_revision = None
         self.roi_placement_var = tk.BooleanVar(value=False)
         self.control_requested = False
+        self.learned = LearnedCorrections()
+        self.use_learned_var = tk.BooleanVar(value=True)
         self.adaptive_kp_var = tk.BooleanVar(value=True)
         self.kp_max_var = tk.StringVar(value='1')
         self.adaptive_limit_var = tk.BooleanVar(value=True)
         self.limit_max_var = tk.StringVar(value='20')
         self.adapt_percent_var = tk.StringVar(value='50')
         self.pid_vars = {key: tk.StringVar(value=value) for key, value in
-                         [('Kp', '.2'), ('Ki', '0'), ('Kd', '0'), ('Limit mm', '2'), ('Slew mm/s', '5'), ('Period s', '.25')]}
+                         [('Alpha', '.2'), ('Limit mm', '2'), ('Slew mm/s', '5'), ('Period s', '.25')]}
         self.precalculating = False
         self.precalculated_signature = None
         self.preparation_stop = threading.Event()
@@ -68,6 +71,11 @@ class CommandTab:
         self.camera_popout = None
         self.recording = None
         self.recording_fps_var = tk.StringVar(value='5')
+        self.crop_enabled_var = tk.BooleanVar(value=False)
+        self.crop_fit_var = tk.BooleanVar(value=True)
+        self.crop_radius_var = tk.StringVar(value='300')
+        self.crop_center = None
+        self.crop_placing = False
         self.arrival_tolerance_var = tk.StringVar(value="1")
         self.arrival_hold_var = tk.StringVar(value="0.5")
         self.tracking_tracker = None
@@ -201,17 +209,29 @@ class CommandTab:
         self.arrival_hold_entry.pack(side="left")
         self.tracking_status = tk.Label(parent, text="Set Phase 3 robots, then Place ROI and click the camera.", anchor="w", wraplength=1000)
         self.tracking_status.pack(fill="x", padx=10)
-        pid_bar = tk.LabelFrame(parent, text='Position control — opt-in; orientation feedback unavailable')
+        learned_bar = tk.Frame(parent)
+        learned_bar.pack(fill='x', padx=8, pady=2)
+        self.learned_controls = []
+        for label, action in [('Save u', self.save_learned), ('Load u', self.load_learned), ('Clear u', self.clear_learned)]:
+            button = tk.Button(learned_bar, text=label, command=action)
+            button.pack(side='left', padx=2)
+            self.learned_controls.append(button)
+        learned_check = tk.Checkbutton(learned_bar, text='Use learned u', variable=self.use_learned_var)
+        learned_check.pack(side='left')
+        self.learned_controls.append(learned_check)
+        HoverHint(learned_check, 'Replay each point at desired + its last SENT correction. Control may refine it. '
+                  'Memory is matched to the full sequence, calibration, hardware and robot count. Save u for later sessions.')
+        pid_bar = tk.LabelFrame(parent, text='Incremental XY control — u = last sent u + Alpha × error')
         pid_bar.pack(fill='x', padx=8, pady=3)
         self.pid_entries = []
-        self.adaptive_kp_check = tk.Checkbutton(pid_bar, text='Adaptive Kp', variable=self.adaptive_kp_var)
+        self.adaptive_kp_check = tk.Checkbutton(pid_bar, text='Adaptive Alpha', variable=self.adaptive_kp_var)
         self.adaptive_kp_check.pack(side='left')
-        HoverHint(self.adaptive_kp_check, 'Adjusts Kp after each applied response toward Arrival tolerance (default 1 mm). '
+        HoverHint(self.adaptive_kp_check, 'Adjusts Alpha after each applied response toward Arrival tolerance (default 1 mm). '
                   'Reduces gain on overshoot/error growth. Bounded; accuracy is not guaranteed. Uncheck for fixed PID.')
-        tk.Label(pid_bar, text='Kp max').pack(side='left')
+        tk.Label(pid_bar, text='Alpha max').pack(side='left')
         max_entry = tk.Entry(pid_bar, textvariable=self.kp_max_var, width=4)
         max_entry.pack(side='left')
-        HoverHint(max_entry, 'Upper adaptive Kp bound; default 1. Starting Kp must be between 0.05 and this value. Locked during a run.')
+        HoverHint(max_entry, 'Upper adaptive Alpha bound; default 1. Starting Alpha must be between 0.05 and this value. Locked during a run.')
         self.pid_entries.extend([self.adaptive_kp_check, max_entry])
         limit_bar = tk.Frame(parent)
         limit_bar.pack(fill='x', padx=8, pady=2)
@@ -228,7 +248,7 @@ class CommandTab:
         tk.Label(limit_bar, text='Adapt %').pack(side='left', padx=(8,2))
         adapt_entry = tk.Entry(limit_bar, textvariable=self.adapt_percent_var, width=4)
         adapt_entry.pack(side='left')
-        HoverHint(adapt_entry, 'Maximum Kp increase per valid response (default 50%, range >0 to 100%). '
+        HoverHint(adapt_entry, 'Maximum Alpha increase per valid response (default 50%, range >0 to 100%). '
                   'Tapers near tolerance. Limit expansion uses half this rate. No four-cycle wait.')
         self.pid_entries.append(adapt_entry)
         for key, variable in self.pid_vars.items():
@@ -246,6 +266,22 @@ class CommandTab:
         tk.Entry(recording_bar, textvariable=self.recording_fps_var, width=4).pack(side='left')
         self.recording_status = tk.Label(recording_bar, text='Camera + annotated + blue-screen overlays + tracking CSV', anchor='w')
         self.recording_status.pack(side='left', padx=8)
+        crop_bar = tk.Frame(parent)
+        crop_bar.pack(fill='x', padx=8, pady=2)
+        self.crop_controls = []
+        for label, variable in [('Circle crop', self.crop_enabled_var), ('Fit workspace (4 pins)', self.crop_fit_var)]:
+            check = tk.Checkbutton(crop_bar, text=label, variable=variable, command=self.render)
+            check.pack(side='left')
+            self.crop_controls.append(check)
+        tk.Label(crop_bar, text='Radius px').pack(side='left')
+        crop_radius = tk.Entry(crop_bar, textvariable=self.crop_radius_var, width=5)
+        crop_radius.pack(side='left')
+        crop_radius.bind('<Return>', lambda event: self.render())
+        crop_place = tk.Button(crop_bar, text='Place crop', command=self.begin_crop_placement)
+        crop_place.pack(side='left', padx=4)
+        self.crop_controls.extend([crop_radius, crop_place])
+        HoverHint(crop_place, 'Unchecks Fit workspace. Click the main/pop-out camera to position the export circle. '
+                  'Crop is frozen during recording; tracking and CSV stay in native camera coordinates.')
         tk.Label(parent, text="Green: tracked robots    Cyan: desired points    Orange: active target    Red: beyond pins. Select a row or click a target.",
                  anchor="w").pack(fill="x", padx=10)
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
@@ -457,7 +493,7 @@ class CommandTab:
                 if not rows:
                     rows = [{'frame': '', 'group_valid': 0, 'detected_robots': 0}]
                 self.recording.write(frame, annotated, overlay, rows)
-                self.recording_status.config(text=f'Recording {self.recording.frame_count} frames; source-resolution videos + CSV.')
+                self.recording_status.config(text=f'Recording {self.recording.frame_count} frames; {self.recording.output_size[0]} × {self.recording.output_size[1]} videos + native-coordinate CSV.')
             except (ValueError, OSError, cv2.error) as error:
                 self.stop_recording()
                 self.recording_status.config(text=f'Recording stopped: {error}. Partial files kept.')
@@ -620,6 +656,8 @@ class CommandTab:
                 'control_enabled': int(feedback.enabled.is_set()) if feedback is not None else 0,
                 'control_state': control_data.get('state', 'Off'),
                 'control_kp': control_data.get('kp', ''),
+                'control_mode': control_data.get('mode', ''),
+                'control_alpha': control_data.get('kp', ''),
                 'adaptive_kp': int(control_data.get('adaptive', False)),
                 'kp_adaptation': control_data.get('adaptation', ''),
                 'control_limit_mm': control_data.get('limit_mm', ''),
@@ -698,7 +736,11 @@ class CommandTab:
         if not path:
             return
         try:
-            self.recording = CommandRecording(path, self.frame.shape[1::-1], float(self.recording_fps_var.get()))
+            circle = self.recording_circle()
+            self.recording = CommandRecording(path, self.frame.shape[1::-1], float(self.recording_fps_var.get()), crop_circle=circle)
+            self.crop_placing = False
+            for widget in self.crop_controls:
+                widget.config(state='disabled')
             self.recording_stop_button.config(state='normal')
             self.recording_status.config(text='Recording started. Stop / save finalizes all four files.')
         except (ValueError, OSError, cv2.error) as error:
@@ -708,6 +750,8 @@ class CommandTab:
         if self.recording is not None:
             recording, self.recording = self.recording, None
             recording.close()
+            for widget in getattr(self, 'crop_controls', []):
+                widget.config(state='normal')
             self.recording_stop_button.config(state='disabled')
             self.recording_status.config(text=f'Saved {recording.frame_count} frames: {recording.paths[0].parent / recording.paths[0].stem} (+ annotated, overlay, CSV).')
 
@@ -736,6 +780,16 @@ class CommandTab:
         self.tracking_status.config(text='Click the ROI center around all Phase 3 robots; detection starts automatically.')
 
     def camera_click(self, event, canvas):
+        if getattr(self, 'crop_placing', False):
+            transform = getattr(canvas, 'camera_transform', None)
+            if transform is not None and self.frame is not None and self.recording is None:
+                ox, oy, scale = transform
+                point = ((event.x-ox)/scale, (event.y-oy)/scale)
+                h,w = self.frame.shape[:2]
+                if 0 <= point[0] < w and 0 <= point[1] < h:
+                    self.crop_center, self.crop_placing = point, False
+                    self.render()
+            return
         if not self.roi_placement_var.get():
             self.click_target(event, screen_points=getattr(canvas, 'screen_points', None))
             return
@@ -786,6 +840,7 @@ class CommandTab:
             toolbar_builder=self.build_popout_roi_controls,
             extra_controls_enabled=lambda: not self.running and not self.precalculating,
             actions=(('Points', self.show_points, None),
+                     ('Crop', self.begin_crop_placement, None),
                      ('Place ROI', self.begin_roi_placement, self.place_roi_button),
                      ('Clear ROI', self.clear_command_roi, None),
                      ('First', self.run, self.run_button),
@@ -859,14 +914,88 @@ class CommandTab:
         calculated = data.get('calculated_angles', '')
         calculated = '—' if not calculated else ', '.join(f'{angle:.1f}' for angle in calculated)
         kp = '—' if data.get('kp') is None else f"{data['kp']:.3f}"
+        adaptation = data.get('adaptation', '').replace('Kp', 'Alpha')
         limit = '—' if data.get('limit_mm') is None else f"{data['limit_mm']:.2f}"
         label.config(text=f"Desired ({xy('desired_xy_mm')}) | Measured ({xy('measured_xy_mm')}) | u ({xy('correction_mm')}) | Commanded ({xy('commanded_xy_mm')})\n"
                           f"Ratio {data.get('ratio', '—')} | Angle {data.get('angle_deg', 'Auto')} | Orientation: unavailable | {data.get('state', 'Control off')}\n"
-                          f"Proposed ({xy('proposed_xy_mm')}) | Kp {kp}: {data.get('adaptation', '')} | Limit {limit} mm: {data.get('limit_adaptation', '')}\n"
+                          f"Proposed ({xy('proposed_xy_mm')}) | Alpha {kp}: {adaptation} | Limit {limit} mm: {data.get('limit_adaptation', '')}\n"
                           f"Calculated motors: {calculated} | Last sent motors: {sent}")
 
     def point_signature(self):
-        return (hardware_case_name(self.calibration.control_case_var.get()), tuple(self.steps))
+        if not hasattr(self, 'learned'):
+            return (hardware_case_name(self.calibration.control_case_var.get()), tuple(self.steps))
+        setup = self.current_setup()
+        _, corrections = self.learned_snapshot(setup)
+        return (hardware_case_name(setup['control_case']), tuple(
+            replace(step, target_xy_m=tuple(np.asarray(step.target_xy_m) + np.asarray(u)/1000))
+            for step,u in zip(self.steps, corrections)))
+
+    def learned_snapshot(self, setup):
+        if not self.steps:
+            raise ValueError('Load an XY sequence first.')
+        signature = self.commander.hardware_signature(load_hardware_case(setup['control_case']))
+        context = correction_context(setup, self.steps, signature, self.tracking_count_var.get())
+        corrections = self.learned.snapshot(context, len(self.steps))
+        if not self.use_learned_var.get():
+            corrections = [[0.,0.] for step in self.steps]
+        return context, corrections
+
+    def save_learned(self):
+        self.learned_file_action(False)
+
+    def load_learned(self):
+        self.learned_file_action(True)
+
+    def learned_file_action(self, load):
+        if self.running or self.precalculating:
+            return
+        try:
+            context, _ = self.learned_snapshot(self.current_setup())
+            folder = XY_SEQUENCE_DIR.parent / 'setups'
+            folder.mkdir(parents=True, exist_ok=True)
+            options = dict(initialdir=str(folder), filetypes=[('Learned corrections', '*.json')])
+            if load:
+                path = show_view_dialog(self, filedialog.askopenfilename, title='Load learned u', **options)
+            else:
+                path = show_view_dialog(self, filedialog.asksaveasfilename, title='Save learned u',
+                                       initialfile=default_setup_name().replace('.json', '_u.json'),
+                                       defaultextension='.json', **options)
+            if path:
+                if load:
+                    self.learned.load(path, context, len(self.steps))
+                else:
+                    self.learned.save(path, context, len(self.steps), steps=self.steps)
+                self.status.config(text=f'Learned u {"loaded" if load else "saved"}: {path}')
+        except (ValueError, TypeError, OSError, ImportError) as error:
+            show_view_dialog(self, messagebox.showerror, 'Learned u', str(error))
+
+    def clear_learned(self):
+        if self.running or self.precalculating:
+            return
+        try:
+            context, _ = self.learned_snapshot(self.current_setup())
+            if show_view_dialog(self, messagebox.askyesno, 'Clear learned u', 'Clear learned corrections for this path/setup? Saved files are unchanged.'):
+                self.learned.clear(context)
+                self.precalculated_signature = None
+                self.status.config(text='Learned u cleared for this path/setup.')
+        except (ValueError, ImportError) as error:
+            show_view_dialog(self, messagebox.showerror, 'Learned u', str(error))
+
+    def begin_crop_placement(self):
+        if self.recording is not None:
+            self.recording_status.config(text='Stop recording before changing the crop.')
+            return
+        self.crop_enabled_var.set(True)
+        self.crop_fit_var.set(False)
+        self.crop_placing = True
+        self.recording_status.config(text='Click the camera for the export circle center; radius uses native pixels.')
+
+    def recording_circle(self):
+        if not self.crop_enabled_var.get() or self.frame is None:
+            return None
+        return video_crop_circle(self.frame.shape[1::-1], center=self.crop_center,
+                                 radius=float(self.crop_radius_var.get()), fit=self.crop_fit_var.get(),
+                                 corners=None if self.setup is None else self.setup['corners_px'])
 
     def precalculate_all(self):
         if self.running or self.precalculating:
@@ -939,16 +1068,18 @@ class CommandTab:
             self.status.config(text='Wait for precalculation to finish, or press Stop.')
             return
         prepared = False
-        if getattr(self, 'precalculated_signature', None) is not None:
-            if self.precalculated_signature != self.point_signature():
-                show_view_dialog(self, messagebox.showerror, 'Precalculation changed', 'Sequence or case changed. Precalculate all again before running.')
-                return
-            prepared = True
         try:
+            if getattr(self, 'precalculated_signature', None) is not None:
+                if self.precalculated_signature != self.point_signature():
+                    self.precalculated_signature = None  # Changed learned u must not reuse old motor angles.
+                else:
+                    prepared = True
             arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
             feedback = None
             if hasattr(self, 'pid_vars'):
-                pid = PositionPID(*[float(variable.get()) for variable in self.pid_vars.values()],
+                pid = PositionPID(kp=float(self.pid_vars['Alpha'].get()), incremental=True,
+                                  limit_mm=float(self.pid_vars['Limit mm'].get()),
+                                  slew_mm_s=float(self.pid_vars['Slew mm/s'].get()), period_s=float(self.pid_vars['Period s'].get()),
                                   adaptive=self.adaptive_kp_var.get(), tolerance_mm=arrival_gate.tolerance_mm,
                                   kp_max=float(self.kp_max_var.get()), adaptive_limit=self.adaptive_limit_var.get(),
                                   limit_max_mm=float(self.limit_max_var.get()),
@@ -963,6 +1094,8 @@ class CommandTab:
                 if self.control_requested:
                     feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)
+            learned_context, corrections = (self.learned_snapshot(setup) if hasattr(self, 'learned') else
+                                            (None, [[0.,0.] for step in self.steps]))
             if selected_only:
                 selection = self.table.selection()
                 if not selection:
@@ -973,6 +1106,13 @@ class CommandTab:
             allow_extrapolation = self.allow_extrapolation_var.get()
             validate_projected_points(self.steps, setup, pixels, indices=indices,
                                       allow_outside_pins=allow_extrapolation)
+            for index in indices:
+                if np.linalg.norm(corrections[index]) > 0:
+                    corrected = replace(self.steps[index], target_xy_m=tuple(
+                        np.asarray(self.steps[index].target_xy_m) + np.asarray(corrections[index])/1000))
+                    project_sequence([corrected], setup, validate=True)
+                    if feedback is not None:
+                        feedback.pid.seed_output(corrections[index])
             if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
                 raise ValueError("Connect the live camera and wait for a fresh frame before running.")
             port = self.commander.port_provider()
@@ -1004,6 +1144,8 @@ class CommandTab:
         self.run_indices = indices
         self.arrival_gate = arrival_gate
         self.feedback = feedback
+        for widget in getattr(self, 'learned_controls', []):
+            widget.config(state='disabled')
         for entry in getattr(self, 'pid_entries', []):
             entry.config(state='disabled')
         if hasattr(self, 'precalculate_button'):
@@ -1033,7 +1175,10 @@ class CommandTab:
                 outcome = execute_xy_sequence(steps, self.commander, hardware_case_name(setup["control_case"]),
                                               active=active, report=lambda kind, index, result:
                                               self.events.put((job, kind, indices[index], result)),
-                                              arrival_gate=arrival_gate, prepared=prepared, feedback=feedback)
+                                              arrival_gate=arrival_gate, prepared=prepared, feedback=feedback,
+                                              initial_corrections=[corrections[index] for index in indices],
+                                              on_correction=lambda index,u: self.learned.remember(learned_context, indices[index], u)
+                                              if learned_context is not None else None)
                 self.events.put((job, outcome, None, None))
             except Exception as error:
                 self.events.put((job, "error", None, str(error)))
@@ -1096,6 +1241,8 @@ class CommandTab:
                     self.refresh_next_button()
                 else:
                     self.running = False
+                    for widget in getattr(self, 'learned_controls', []):
+                        widget.config(state='normal')
                     for entry in getattr(self, 'pid_entries', []):
                         entry.config(state='normal')
                     if getattr(self, 'feedback', None) is not None:
@@ -1155,6 +1302,16 @@ class CommandTab:
             self.photo = canvas.camera_photo
         canvas.create_image(ox + dw / 2, oy + dh / 2, image=canvas.camera_photo, anchor="center")
         canvas.camera_transform = (ox, oy, scale)
+        if hasattr(self, 'crop_enabled_var'):
+            try:
+                circle = (self.recording.crop if self.recording is not None else None)
+                circle = (circle.x,circle.y,circle.radius) if circle is not None else self.recording_circle()
+                if circle is not None:
+                    x,y = np.asarray(circle[:2])*scale + [ox,oy]
+                    radius = circle[2]*scale
+                    canvas.create_oval(x-radius,y-radius,x+radius,y+radius, outline='#66ccff', width=1, dash=(3,6))
+            except (ValueError, TypeError):
+                pass  # Export validates inputs; invalid edits must not stop the live view.
         if self.setup is None:
             return
         if len(self.setup['corners_px']) == 4:

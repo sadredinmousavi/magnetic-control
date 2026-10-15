@@ -122,13 +122,18 @@ def validate_projected_points(steps, setup, pixels, *, indices=None, allow_outsi
                              + sequence_diagnostics(steps, setup, pixels))
 
 
-def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_gate=None, prepared=False, feedback=None):
+def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_gate=None, prepared=False, feedback=None,
+                        initial_corrections=None, on_correction=lambda index, correction: None):
     """Fresh synthesis; optionally require visual arrival and manual progression."""
     for index, step in enumerate(steps):
         if not active():
             return "stopped"
         report("calculating", index, None)
+        correction = np.zeros(2) if initial_corrections is None else np.asarray(initial_corrections[index], float)
+        command = step.target_xy_m
         if feedback is not None:
+            command = feedback.begin_point(step, correction,
+                                           lambda value, point=index: on_correction(point, value))
             feedback.publish(desired_xy_mm=(np.asarray(step.target_xy_m) * 1000).tolist(),
                              ratio=step.ratio, angle_deg=step.angle_deg, state='Calculating initial pose')
         def sent(result):
@@ -136,11 +141,12 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
                 arrival_gate.arm(step.target_xy_m)
             report("sent", index, result)
             if feedback is not None:
-                feedback.publish(commanded_xy_mm=(np.asarray(step.target_xy_m) * 1000).tolist(), correction_mm=[0.,0.],
+                feedback.initial_sent()
+                feedback.publish(commanded_xy_mm=(np.asarray(command) * 1000).tolist(), correction_mm=correction.tolist(),
                                  sent_angles=[float(v) for v in result['angles_deg']], sent_time_s=feedback.clock(), state='Sent')
 
         result = commander.move(
-            case_name, step.target_xy_m, ratio=step.ratio, angle_deg=step.angle_deg,
+            case_name, command, ratio=step.ratio, angle_deg=step.angle_deg,
             settle_seconds=step.wait_seconds, zero_angle_deg=step.zero_angle_deg,
             active=active, on_sent=sent,
             **({'prepared_point': True} if prepared else {}),

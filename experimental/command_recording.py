@@ -8,12 +8,54 @@ import cv2
 import numpy as np
 
 
+def video_crop_circle(size, *, corners=None, center=None, radius=300, fit=False):
+    width, height = size
+    if fit:
+        points = np.asarray(corners, np.float32)
+        if points.shape != (4, 2) or not np.isfinite(points).all():
+            raise ValueError('Fit workspace needs four calibrated pins.')
+        center, radius = cv2.minEnclosingCircle(points)
+        center = tuple(np.rint(center).astype(int))
+        radius = np.ceil(np.linalg.norm(points - center, axis=1).max())
+    if center is None:
+        center = (width / 2, height / 2)
+    values = np.asarray([*center, radius], float)
+    if not np.isfinite(values).all() or not 1 <= radius <= max(size):
+        raise ValueError('Crop radius must be between 1 px and the largest camera dimension.')
+    if not (0 <= center[0] < width and 0 <= center[1] < height):
+        raise ValueError('Crop center must be inside the camera frame.')
+    return (int(round(center[0])), int(round(center[1])), int(np.ceil(radius)))
+
+
+class CircularVideoCrop:
+    """Cached source-pixel circular crop; pad missing image area, never stretch it."""
+    def __init__(self, size, circle):
+        self.x, self.y, self.radius = circle
+        r = self.radius
+        self.size = (2 * r, 2 * r)
+        yy, xx = np.ogrid[:2*r, :2*r]
+        self.inside = (xx-r)**2 + (yy-r)**2 <= r*r
+        width, height = size
+        self.left, self.top = self.x-r, self.y-r
+        self.bounds = max(0,self.left), max(0,self.top), min(width,self.x+r), min(height,self.y+r)
+
+    def apply(self, image, background=(0,0,0)):
+        result = np.empty((*self.size[::-1],3), dtype=image.dtype)
+        result[:] = background
+        x0,y0,x1,y1 = self.bounds
+        if x1 > x0 and y1 > y0:
+            result[y0-self.top:y1-self.top,x0-self.left:x1-self.left] = image[y0:y1,x0:x1]
+        result[~self.inside] = background
+        return result
+
+
 TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot_y_mm '
                    'group_x_mm group_y_mm expected_robots detected_robots group_valid '
                    'active_point desired_x_mm desired_y_mm error_mm roi_x_px roi_y_px '
                    'roi_radius_px sequence_running arrival_ready arrival_max_error_mm '
                    'desired_ratio desired_angle_deg recording_frame recording_time_s '
-                   'control_enabled control_state control_kp adaptive_kp kp_adaptation control_limit_mm adaptive_limit limit_adaptation '
+                   'crop_center_x_px crop_center_y_px crop_radius_px '
+                   'control_enabled control_state control_mode control_alpha control_kp adaptive_kp kp_adaptation control_limit_mm adaptive_limit limit_adaptation '
                    'correction_x_mm correction_y_mm commanded_x_mm commanded_y_mm '
                    'proposed_xy_mm calculated_motor_angles_deg sent_motor_angles_deg motor_sent_time_s orientation_measured_deg').split()
 
@@ -53,11 +95,14 @@ def draw_command_overlay(image, setup, pixels, active_index, detections, tracker
 
 
 class CommandRecording:
-    def __init__(self, base_path, size, fps=15, *, clock=time.monotonic):
+    def __init__(self, base_path, size, fps=15, *, clock=time.monotonic, crop_circle=None):
         if not np.isfinite(fps) or fps <= 0:
             raise ValueError('Recording FPS must be positive and finite.')
         self.size = tuple(size)
-        self.encoded_size = tuple(value + value % 2 for value in self.size)
+        self.crop = None if crop_circle is None else CircularVideoCrop(self.size, video_crop_circle(
+            self.size, center=crop_circle[:2], radius=crop_circle[2]))
+        self.output_size = self.size if self.crop is None else self.crop.size
+        self.encoded_size = tuple(value + value % 2 for value in self.output_size)
         self.clock, self.started_at = clock, clock()
         self.frame_count = 0
         self.writers = []
@@ -82,13 +127,18 @@ class CommandRecording:
     def write(self, frame, annotated, overlay, rows):
         if tuple(frame.shape[1::-1]) != self.size:
             raise ValueError('Camera size changed; recording stopped to protect video dimensions.')
-        for writer, image in zip(self.writers, (frame, annotated, overlay)):
-            padded = cv2.copyMakeBorder(image, 0, self.encoded_size[1] - self.size[1],
-                                        0, self.encoded_size[0] - self.size[0], cv2.BORDER_CONSTANT)
+        for index, (writer, image) in enumerate(zip(self.writers, (frame, annotated, overlay))):
+            if self.crop is not None:
+                image = self.crop.apply(image, (255,0,0) if index == 2 else (0,0,0))
+            padded = cv2.copyMakeBorder(image, 0, self.encoded_size[1] - self.output_size[1],
+                                        0, self.encoded_size[0] - self.output_size[0], cv2.BORDER_CONSTANT)
             writer.write(padded)
         timestamp = self.clock() - self.started_at
         for row in rows or [{}]:
             measurement = dict(row, recording_frame=self.frame_count, recording_time_s=timestamp)
+            measurement.update(crop_center_x_px='' if self.crop is None else self.crop.x,
+                               crop_center_y_px='' if self.crop is None else self.crop.y,
+                               crop_radius_px='' if self.crop is None else self.crop.radius)
             if self.csv_writer is None:
                 self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=TRACKING_FIELDS)
                 self.csv_writer.writeheader()

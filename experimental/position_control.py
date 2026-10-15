@@ -8,7 +8,7 @@ import numpy as np
 class PositionPID:
     def __init__(self, kp=.2, ki=0., kd=0., limit_mm=2., slew_mm_s=1., period_s=1., *,
                  adaptive=False, tolerance_mm=1., kp_min=.05, kp_max=1.,
-                 adaptive_limit=False, limit_max_mm=20., adapt_percent=50.):
+                 adaptive_limit=False, limit_max_mm=20., adapt_percent=50., incremental=False):
         values = np.asarray([kp, ki, kd, limit_mm, slew_mm_s, period_s], float)
         if not np.isfinite(values).all() or np.any(values[:3] < 0) or np.any(values[3:] <= 0):
             raise ValueError('PID gains must be finite/nonnegative; limits and period positive.')
@@ -28,6 +28,7 @@ class PositionPID:
         if not np.isfinite(adapt_percent) or not 0 < adapt_percent <= 100:
             raise ValueError('Adapt % must be finite and between 0 and 100 (exclusive of zero).')
         self.adapt_rate = float(adapt_percent) / 100
+        self.incremental = bool(incremental)
         self.reset()
 
     def reset(self):
@@ -44,10 +45,20 @@ class PositionPID:
         self.previous_error = None
         self.previous_time = None
         self.output = np.zeros(2)
+        self.applied_output = np.zeros(2)
         self.output_limited = self.output_at_cap = False
+
+    def seed_output(self, correction):
+        vector = np.asarray(correction, float)
+        ceiling = self.limit_max if self.adaptive_limit else self.limit
+        if vector.shape != (2,) or not np.isfinite(vector).all() or np.linalg.norm(vector) > ceiling + 1e-9:
+            raise ValueError('Learned u exceeds correction limit/max; increase the limit or clear learned u.')
+        self.output = self.applied_output = vector.copy()
+        self.limit = max(self.limit, float(np.linalg.norm(vector)))
 
     def mark_sent(self, error_mm, timestamp):
         """Only successfully sent corrections may inform the next gain update."""
+        self.applied_output = self.output.copy()
         if self.sent_error is not None:
             return  # Keep the response anchor; a newer send must not postpone it forever.
         self.sent_error = np.asarray(error_mm, float).copy()
@@ -108,11 +119,13 @@ class PositionPID:
         derivative = np.zeros(2) if self.previous_error is None else (error - self.previous_error) / dt
         self.derivative += dt / (.5 + dt) * (derivative - self.derivative)
         proposed_integral = self.integral + error * dt
-        raw = self.kp * error + self.ki * proposed_integral + self.kd * self.derivative
+        raw = (self.applied_output + self.kp * error if self.incremental else
+               self.kp * error + self.ki * proposed_integral + self.kd * self.derivative)
         norm = np.linalg.norm(raw)
         bounded = raw * min(1., self.limit / max(norm, 1e-12))
-        delta = bounded - self.output
-        bounded = self.output + delta * min(1., self.slew * dt / max(np.linalg.norm(delta), 1e-12))
+        base = self.applied_output if self.incremental else self.output
+        delta = bounded - base
+        bounded = base + delta * min(1., self.slew * dt / max(np.linalg.norm(delta), 1e-12))
         self.output_limited = norm >= self.limit or np.linalg.norm(delta) > self.slew * dt
         self.output_at_cap = norm >= self.limit and np.linalg.norm(bounded) >= self.limit - 1e-9
         if np.linalg.norm(raw - bounded) < 1e-9:
@@ -128,6 +141,27 @@ class PositionFeedback:
         self.enabled = threading.Event()  # Opt-in, never enabled automatically.
         self.lock = threading.Lock()
         self.telemetry = {}
+        self.last_sent_u = np.zeros(2)
+        self.last_sent_at = None
+        self.on_applied = lambda correction: None
+
+    def begin_point(self, step, correction, on_applied=lambda correction: None):
+        self.pid.reset()
+        self.pid.seed_output(correction)
+        command = np.asarray(step.target_xy_m) + np.asarray(correction) / 1000
+        if np.linalg.norm(correction) > 0:
+            self.validate(command)
+        self.last_sent_u = np.asarray(correction, float).copy()
+        self.last_sent_at = None
+        self.on_applied = on_applied
+        return command
+
+    def initial_sent(self):
+        self.last_sent_at = self.clock()
+
+    def reset_history(self):
+        self.pid.reset()
+        self.pid.seed_output(self.last_sent_u)
 
     def publish(self, **values):
         with self.lock:
@@ -138,9 +172,11 @@ class PositionFeedback:
             return dict(self.telemetry)
 
     def wait_at_target(self, step, commander, case_name, gate, active, report, initial_result=None):
-        self.pid.reset()
+        self.reset_history()
         target_mm = np.asarray(step.target_xy_m) * 1000
-        self.publish(desired_xy_mm=target_mm.tolist(), commanded_xy_mm=target_mm.tolist(), correction_mm=[0., 0.],
+        self.publish(desired_xy_mm=target_mm.tolist(), commanded_xy_mm=(target_mm + self.last_sent_u).tolist(),
+                     correction_mm=self.last_sent_u.tolist(),
+                     mode='incremental' if self.pid.incremental else 'pid',
                      kp=float(self.pid.kp), adaptive=self.pid.adaptive, adaptation=self.pid.adaptation,
                      limit_mm=float(self.pid.limit), adaptive_limit=self.pid.adaptive_limit, limit_adaptation=self.pid.limit_adaptation,
                      ratio=step.ratio, angle_deg=step.angle_deg, state='Waiting', calculated_angles='',
@@ -166,11 +202,11 @@ class PositionFeedback:
             enabled = self.enabled.is_set()
             now = self.clock()
             if enabled != was_enabled:
-                self.pid.reset()
+                self.reset_history()
                 was_enabled = enabled
             fresh = positions is not None and sample is not None and now - sample <= 1.
             if not fresh:
-                self.pid.reset()
+                self.reset_history()
                 self.publish(state='Tracking lost — corrections paused', measured_xy_mm=None)
             else:
                 measured = positions.mean(axis=0) * 1000
@@ -181,7 +217,9 @@ class PositionFeedback:
                     self.publish(state='Control off — tracking only')
                 elif np.linalg.norm(target_mm - measured) <= gate.tolerance_mm:
                     self.publish(state='Within XY tolerance — waiting for complete-group arrival')
-                elif sample != last_sample and (last_update is None or now - last_update >= self.pid.period):
+                elif (sample != last_sample and (last_update is None or now - last_update >= self.pid.period)
+                      and (not self.pid.incremental or self.last_sent_at is None
+                           or sample - self.last_sent_at >= self.pid.period)):
                     last_sample, last_update = sample, now
                     correction = self.pid.update(target_mm - measured, sample)
                     self.publish(kp=float(self.pid.kp), adaptation=self.pid.adaptation,
@@ -191,7 +229,7 @@ class PositionFeedback:
                     try:
                         self.validate(command)
                     except ValueError as error:
-                        self.pid.reset()
+                        self.reset_history()
                         self.publish(state=f'Correction blocked: {error}')
                         with gate.condition:
                             gate.condition.wait(.1)
@@ -207,6 +245,9 @@ class PositionFeedback:
 
                     def sent(result):
                         self.pid.mark_sent(target_mm - measured, self.clock())
+                        self.last_sent_u = correction.copy()
+                        self.last_sent_at = self.clock()
+                        self.on_applied(correction.tolist())
                         self.publish(commanded_xy_mm=(command * 1000).tolist(), correction_mm=correction.tolist(),
                                      sent_angles=[float(v) for v in result['angles_deg']],
                                      sent_time_s=self.clock(), state='Sent')
