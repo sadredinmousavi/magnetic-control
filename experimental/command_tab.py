@@ -839,14 +839,17 @@ class CommandTab:
 
     def clear_command_roi(self):
         if self.running or self.precalculating:
-            self.tracking_status.config(text='Stop the run/precalculation before clearing the ROI.')
-            return
-        self.stop_tracking()
+            self.stop()
+        if getattr(self, 'feedback', None) is not None:
+            self.feedback.enabled.clear()
         self.command_roi = None
         self.roi_override = True
         self.roi_placement_var.set(False)
         self.place_roi_button.config(text='Place ROI')
         self.show_roi_var.set(False)
+        self.robot_trails = {}
+        # Clear all visible state before stop_tracking redraws either camera view.
+        self.stop_tracking()
         self.tracking_status.config(text='ROI cleared. Set robot count and Place ROI to restart detection.')
 
     def open_camera_popout(self):

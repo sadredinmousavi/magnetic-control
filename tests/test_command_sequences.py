@@ -368,6 +368,42 @@ class CommandSequenceTests(unittest.TestCase):
         app.start_tracking.assert_called_once()
         app.roi_placement_var.set.assert_called_with(False)
 
+    def test_clear_command_roi_stops_tracking_even_during_execution(self):
+        for running, preparing in ((False, False), (True, False), (False, True)):
+            with self.subTest(running=running, preparing=preparing):
+                app = self.tracking_app()
+                app.running, app.precalculating = running, preparing
+                app.stop_event, app.preparation_stop = threading.Event(), threading.Event()
+                app.stop_button, app.next_button = Mock(), Mock()
+                app.feedback = Mock()
+                app.arrival_gate = Mock()
+                app.refresh_next_button = Mock()
+                app.command_roi = (110, 110, 90)
+                app.roi_placement_var, app.place_roi_button, app.show_roi_var = Mock(), Mock(), Mock()
+                app.tracking_tracker = Mock()
+                app.tracking_detections = [dict(center=(110, 110))]
+                app.robot_trails = {1: [(110, 110)]}
+                app.tracking_rows = [{'frame': 1}]
+                app.clear_command_roi()
+                self.assertIsNone(app.command_roi)
+                self.assertTrue(app.roi_override)
+                self.assertFalse(app.tracking_enabled)
+                self.assertIsNone(app.tracking_tracker)
+                self.assertEqual(app.tracking_detections, [])
+                self.assertEqual(app.robot_trails, {})
+                self.assertEqual(app.tracking_rows, [{'frame': 1}])
+                app.feedback.enabled.clear.assert_called_once()
+                app.arrival_gate.observe.assert_called_with(None)
+                app.show_roi_var.set.assert_called_with(False)
+                app.render.assert_called()
+                self.assertEqual(app.stop_event.is_set(), running)
+                self.assertEqual(app.preparation_stop.is_set(), preparing)
+                # A routine calibration refresh must not resurrect the cleared ROI.
+                app.calibration_revision = 0
+                app.configure_tracking(app.setup)
+                self.assertIsNone(app.command_roi)
+                self.assertIsNone(app.tracking_tracker)
+
     def test_applying_phase2_calibration_does_not_overwrite_phase3_robot_count(self):
         app = self.tracking_app()
         app.tracking_count_var.get.return_value = '3'
