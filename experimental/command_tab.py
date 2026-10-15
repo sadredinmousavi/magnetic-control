@@ -441,6 +441,14 @@ class CommandTab:
         pixels = project_sequence(self.steps, setup, validate=validate)
         return setup, pixels
 
+    def validate_corrected_target(self, target, setup, *, allow_outside_pins):
+        target = np.asarray(target, dtype=float)
+        if target.shape != (2,) or not np.isfinite(target).all():
+            raise ValueError('Corrected XY must be a finite X,Y pair.')
+        corrected = [replace(self.steps[0], target_xy_m=tuple(target))]
+        pixels = project_sequence(corrected, setup, validate=False)
+        validate_projected_points(corrected, setup, pixels, allow_outside_pins=allow_outside_pins)
+
     def refresh_calibration(self):
         if self.running:
             return
@@ -1135,6 +1143,7 @@ class CommandTab:
             return
         prepared = False
         try:
+            allow_extrapolation = self.allow_extrapolation_var.get()
             if getattr(self, 'precalculated_signature', None) is not None:
                 if self.precalculated_signature != self.point_signature():
                     self.precalculated_signature = None  # Changed learned u must not reuse old motor angles.
@@ -1151,11 +1160,7 @@ class CommandTab:
                                   limit_max_mm=float(self.limit_max_var.get()),
                                   adapt_percent=float(self.adapt_percent_var.get()))
                 def validate_correction(target):
-                    from dataclasses import replace
-                    corrected = [replace(self.steps[0], target_xy_m=tuple(target))]
-                    project_sequence(corrected, setup, validate=True)  # Always inside pins + camera.
-                    if not np.isfinite(target).all():
-                        raise ValueError('Corrected XY must be finite.')
+                    self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
                 settling = SettlingMonitor(*[float(variable.get()) for variable in self.settling_vars.values()])
                 arrival_gate.settling = settling
                 feedback = PositionFeedback(pid, validate=validate_correction, settling=settling)
@@ -1171,14 +1176,12 @@ class CommandTab:
                 indices = (int(selection[0]),)
             else:
                 indices = tuple(range(len(self.steps)))
-            allow_extrapolation = self.allow_extrapolation_var.get()
             validate_projected_points(self.steps, setup, pixels, indices=indices,
                                       allow_outside_pins=allow_extrapolation)
             for index in indices:
                 if np.linalg.norm(corrections[index]) > 0:
-                    corrected = replace(self.steps[index], target_xy_m=tuple(
-                        np.asarray(self.steps[index].target_xy_m) + np.asarray(corrections[index])/1000))
-                    project_sequence([corrected], setup, validate=True)
+                    target = np.asarray(self.steps[index].target_xy_m) + np.asarray(corrections[index])/1000
+                    self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
                     if feedback is not None:
                         feedback.pid.seed_output(corrections[index])
             if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:

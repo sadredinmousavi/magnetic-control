@@ -211,6 +211,19 @@ class CommandSequenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside the camera frame"):
             validate_projected_points(steps, data, pixels, allow_outside_pins=True)
 
+    def test_corrected_targets_respect_extrapolation_and_camera_boundaries(self):
+        app = self.run_app()
+        data = app.calibration.setup_data()
+        # x=70 mm projects beyond the pins, but still inside this camera.
+        app.validate_corrected_target((.07, 0), data, allow_outside_pins=True)
+        with self.assertRaisesRegex(ValueError, 'four-pin rectangle'):
+            app.validate_corrected_target((.07, 0), data, allow_outside_pins=False)
+        for allowed in (False, True):
+            with self.assertRaisesRegex(ValueError, 'outside the camera frame'):
+                app.validate_corrected_target((.2, 0), data, allow_outside_pins=allowed)
+            with self.assertRaisesRegex(ValueError, 'finite X,Y pair'):
+                app.validate_corrected_target((np.nan, 0), data, allow_outside_pins=allowed)
+
     def test_shifted_origin_shifts_limits_not_units(self):
         data = setup({"Origin": [120, 110], "+X": [140, 110], "+Y": [120, 90]})
         steps = [XYStep((.05, 0), 0, 180)]

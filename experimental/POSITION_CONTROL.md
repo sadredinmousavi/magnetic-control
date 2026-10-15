@@ -78,7 +78,7 @@ postpone adaptation. Reset conditions also restore the starting radius.
 
 Alpha remains held while capped; once the radius opens enough, gain adaptation can
 resume. The existing slew limit remains unchanged and every corrected target
-must still be inside the pins and camera. Blocked commands cannot drive limit
+must still be inside the camera and, unless extrapolation is enabled, the pins. Blocked commands cannot drive limit
 growth. Current radius and its adjustment reason appear in both detail views
 and CSVs. Incremental compensation is bounded by this radius and does not
 guarantee 1 mm accuracy.
@@ -150,7 +150,7 @@ resolution, four pins and physical dimensions, captured axes, hardware model,
 and Phase 3 robot count. Changed contexts never silently reuse old corrections;
 loading a mismatched file is rejected. Moving the detection ROI does not
 invalidate physical calibration or learned u. Saved corrections are validated
-against current limits, pins and camera before moving, not blindly trusted.
+against current limits, the camera and the selected pin-extrapolation setting before moving.
 Matching context does not prove that experimental conditions are unchanged.
 
 Precalculate all uses the current `p_d + u_last` snapshot. If learning changes
@@ -167,8 +167,10 @@ still applies. Then feedback uses the centroid of a complete detected group.
 Each correction is solved freshly in a worker with the row's ratio, equilibrium
 angle and motor zero; corrections do not reuse the original cached pose.
 Only one solve/send is in flight. Camera and serial work stay under the existing
-motor-command lock. Correction targets must remain inside the pins and camera,
-even if the original sequence allowed extrapolation.
+motor-command lock. **Allow beyond pins (extrapolated)** applies to sequence targets,
+feedback corrections and replayed learned corrections alike. When checked, these
+targets may extend beyond the four pins; when unchecked, the pin boundary is enforced.
+All targets must remain inside the camera frame. The setting is captured when a run starts.
 
 Observations must be no older than one second. Before sending, the observation
 must still be valid, the group must not have moved by more than the arrival
