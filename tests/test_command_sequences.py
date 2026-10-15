@@ -348,6 +348,57 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertIn('No command has been sent', error.call_args.args[1])
         self.assertEqual(app.learned.snapshot('context', 2), [[0., 0.], [0., 0.]])
 
+    def test_manual_camera_click_uses_calibrated_xy_without_sending_or_saving(self):
+        app = self.run_app()
+        app.precalculating, app.active_index = False, 1
+        app.manual_mode_var = Mock(get=Mock(return_value=True))
+        app.manual_targets, app.learned = LearnedCorrections(), LearnedCorrections()
+        app.use_learned_var = Mock(get=Mock(return_value=True))
+        app.tracking_count_var = Mock(get=Mock(return_value='1'))
+        app.show_commanded_var, app.roi_placement_var = Mock(), Mock(get=Mock(return_value=False))
+        # Screen (85, 85) maps to native (130, 110), or robot XY (10, 0) mm.
+        surface = Mock(camera_transform=(20, 30, .5))
+        with patch('command_tab.load_hardware_case', return_value={}), \
+             patch.object(app.commander, 'hardware_signature', return_value='hardware'), \
+             patch.object(app.commander, 'move') as move:
+            app.camera_click(Mock(x=85, y=85), surface)
+            context, values = app.learned_snapshot(app.current_setup())
+            np.testing.assert_allclose(values[1], [0, 0], atol=1e-5)
+            app.camera_click(Mock(x=95, y=85), surface)
+            context, values = app.learned_snapshot(app.current_setup())
+            np.testing.assert_allclose(values[1], [10, 0], atol=1e-5)
+            self.assertEqual(app.learned.snapshot(context, 2), [[0., 0.], [0., 0.]])
+            app.setup = app.current_setup()
+            np.testing.assert_allclose(app.commanded_pixel(), [150, 110], atol=1e-5)
+            app.table.set.assert_any_call('1', 'cx', '20.00')
+            move.assert_not_called()
+            previous = app.manual_targets.point(context, 1)
+            app.running = True
+            app.camera_click(Mock(x=105, y=85), surface)
+            self.assertEqual(app.manual_targets.point(context, 1), previous)
+
+    def test_manual_run_uses_draft_and_disables_automatic_control(self):
+        app = self.run_app()
+        app.manual_mode_var = Mock(get=Mock(return_value=True))
+        app.manual_targets, app.learned = LearnedCorrections(), LearnedCorrections()
+        app.use_learned_var = Mock(get=Mock(return_value=True))
+        app.tracking_count_var = Mock(get=Mock(return_value='1'))
+        app.pid_vars, app.control_requested = {}, True
+        app.settling_vars = {key: Mock(get=Mock(return_value='.5')) for key in ('speed', 'window', 'hold', 'wait')}
+        with patch('command_tab.load_hardware_case', return_value={}), \
+             patch.object(app.commander, 'hardware_signature', return_value='hardware'), \
+             patch('command_tab.messagebox.askyesno', return_value=True), \
+             patch('command_tab.threading.Thread') as thread, \
+             patch('command_tab.execute_xy_sequence', return_value='finished') as execute:
+            context, _ = app.learned_snapshot(app.current_setup())
+            app.manual_targets.remember(context, 1, [25, 0])
+            app.run_selected()
+            self.assertTrue(app.feedback.manual)
+            self.assertFalse(app.feedback.enabled.is_set())
+            np.testing.assert_allclose(app.feedback.begin_point(app.steps[1], [25, 0]), [.035, 0])
+            thread.call_args.kwargs['target']()
+            self.assertEqual(execute.call_args.kwargs['initial_corrections'], [[25., 0.]])
+
     def test_run_all_can_extrapolate_only_with_explicit_permission_and_warning(self):
         app = self.run_app()
         app.allow_extrapolation_var.get.return_value = True

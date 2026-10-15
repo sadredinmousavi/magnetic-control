@@ -25,7 +25,8 @@ class CameraPopout:
     def __init__(self, parent, title, render, *, actions=(), status=lambda: '',
                  toolbar_builder=None, mirror_action_text=True, controls_enabled=lambda: True,
                  status_builder=None, status_refresh=None, render_version=None, on_close=None,
-                 status_lines=0, action_captions=None, disabled_actions=(), extra_controls_enabled=lambda: True):
+                 status_lines=0, action_captions=None, disabled_actions=(), extra_controls_enabled=lambda: True,
+                 toolbar_title=None, action_groups=None, group_builders=None):
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry('1100x780')
@@ -44,17 +45,30 @@ class CameraPopout:
         self.closed = False
         bar = tk.Frame(self.window)
         bar.pack(fill='x', padx=5, pady=3)
-        self.extra_controls = tk.Frame(bar)
+        self.extra_controls = (tk.LabelFrame(bar, text=toolbar_title) if toolbar_title else tk.Frame(bar))
         self.extra_controls.pack(side='left')
         if toolbar_builder is not None:
             toolbar_builder(self.extra_controls)
         self.actions = []
+        groups = {}
+        def action_parent(name):
+            if name not in groups:
+                group = tk.LabelFrame(bar, text=name)
+                group.pack(side='left', padx=(4, 0))
+                groups[name] = group
+                builder = (group_builders or {}).get(name)
+                if builder is not None:
+                    builder(group)
+            return groups[name]
         for label, command, source in actions:
-            button = tk.Button(bar, text=label, command=lambda callback=command: callback() if self.controls_enabled() else None)
+            group = (action_groups or {}).get(label)
+            target = action_parent(group) if group else bar
+            button = tk.Button(target, text=label, command=lambda callback=command: callback() if self.controls_enabled() else None)
             button.pack(side='left', padx=2)
             self.actions.append((button, source))
-        tk.Button(bar, text='Maximize', command=self.maximize).pack(side='right', padx=3)
-        tk.Button(bar, text='Full screen', command=self.fullscreen).pack(side='right', padx=3)
+        view_controls = action_parent('View') if action_groups else bar
+        tk.Button(view_controls, text='Maximize', command=self.maximize).pack(side='right', padx=3)
+        tk.Button(view_controls, text='Full screen', command=self.fullscreen).pack(side='right', padx=3)
         self.status_widgets = status_builder(self.window) if status_builder is not None else None
         self.status_label = tk.Label(self.window, anchor='nw', justify='left', text='', wraplength=1000,
                                      height=status_lines, width=1,

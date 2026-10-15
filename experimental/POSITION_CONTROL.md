@@ -171,6 +171,32 @@ later corrections remain separate until Save u is pressed again. Export does not
 accept unsaved corrections. Neither action sends a motor command.
 The control details show speed as `measured (limit)` in mm/s within one fixed cell.
 
+## Manual commanded points
+
+Enable **Manual mode**, select a desired point in the table, then click the
+camera to place its commanded position. Native pixels are converted through the
+loaded four-pin/robot-axis calibration; `u = commanded - desired`, in mm.
+The table previews that point's manual u and commanded XY. Clicking does not
+send motors or accept u for export. **Run selected point** tests the draft;
+press **Finish** or **Stop** before changing it for another trial. **Save u**
+accepts the latest actually sent correction. **Export points + u** exports
+accepted values, never untested drafts. Manual drafts are scoped to the same
+sequence/calibration context; switching out of Manual returns to accepted u.
+Load/Clear u also clears manual drafts for that context.
+
+Manual mode disables automatic corrections; its commands use the same magnet
+calculation, ratio, angle and motor zero as normal sequence execution. The
+PID correction magnitude cap is not applied to mouse-selected commands. The
+camera boundary and **Allow beyond pins** selection still apply. Mode changes
+and manual point edits are locked during runs and precalculation.
+
+**Show commanded point** draws a thin magenta diamond marked C for the active
+point, alongside its orange desired target. While stopped it shows the current
+draft/replay value; during a run it shows the latest sent command when available.
+Both controls and mouse placement work in the main and pop-out views. The C
+marker is also included in annotated/overlay recordings when enabled. ROI and
+export-circle placement take priority over manual-target clicking.
+
 Precalculate all uses the current `p_d + u_last` snapshot. If Save u changes
 u, old angles cannot be reused: run falls back to fresh calculation until
 precalculated again. For recording, train the path, restart it with Use learned

@@ -62,7 +62,7 @@ TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot
 
 
 def draw_command_overlay(image, setup, pixels, active_index, detections, tracker=None,
-                         *, show_path=False, show_roi=False, trails=None):
+                         *, show_path=False, show_roi=False, trails=None, commanded_pixel=None):
     """Draw in source-image pixels, independently of GUI zoom or visibility."""
     if setup is not None and len(setup['corners_px']) == 4:
         cv2.polylines(image, [np.asarray(setup['corners_px'], np.int32)], True, (153, 85, 153), 1)
@@ -79,6 +79,11 @@ def draw_command_overlay(image, setup, pixels, active_index, detections, tracker
             cv2.drawMarker(image, point, (0, 153, 255), cv2.MARKER_CROSS, 6, 1, cv2.LINE_AA)
             cv2.putText(image, f'P{active_index + 1}', (point[0] + 7, point[1] - 7),
                         cv2.FONT_HERSHEY_SIMPLEX, .32, (0, 153, 255), 1, cv2.LINE_AA)
+    if commanded_pixel is not None:
+        point = tuple(np.rint(commanded_pixel).astype(int))
+        cv2.drawMarker(image, point, (221, 85, 255), cv2.MARKER_DIAMOND, 8, 1, cv2.LINE_AA)
+        cv2.putText(image, 'C', (point[0]+6, point[1]+10), cv2.FONT_HERSHEY_SIMPLEX,
+                    .32, (221, 85, 255), 1, cv2.LINE_AA)
     if show_roi and tracker is not None:
         cv2.circle(image, tuple(np.rint(tracker.center).astype(int)), round(tracker.radius), (68, 153, 68), 1)
     for trail in (trails or {}).values():

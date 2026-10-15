@@ -136,7 +136,8 @@ class PositionPID:
 
 
 class PositionFeedback:
-    def __init__(self, pid, *, validate=lambda target: None, clock=time.monotonic, settling=None):
+    def __init__(self, pid, *, validate=lambda target: None, clock=time.monotonic, settling=None, manual=False):
+        self.manual = manual
         self.pid, self.validate, self.clock = pid, validate, clock
         self.enabled = threading.Event()  # Opt-in, never enabled automatically.
         self.lock = threading.Lock()
@@ -148,7 +149,8 @@ class PositionFeedback:
 
     def begin_point(self, step, correction, on_applied=lambda correction: None):
         self.pid.reset()
-        self.pid.seed_output(correction)
+        if not self.manual:
+            self.pid.seed_output(correction)
         command = np.asarray(step.target_xy_m) + np.asarray(correction) / 1000
         if np.linalg.norm(correction) > 0:
             self.validate(command)
@@ -166,7 +168,8 @@ class PositionFeedback:
 
     def reset_history(self):
         self.pid.reset()
-        self.pid.seed_output(self.last_sent_u)
+        if not self.manual:
+            self.pid.seed_output(self.last_sent_u)
 
     def publish(self, **values):
         with self.lock:
@@ -181,7 +184,7 @@ class PositionFeedback:
         target_mm = np.asarray(step.target_xy_m) * 1000
         self.publish(desired_xy_mm=target_mm.tolist(), commanded_xy_mm=(target_mm + self.last_sent_u).tolist(),
                      correction_mm=self.last_sent_u.tolist(),
-                     mode='incremental' if self.pid.incremental else 'pid',
+                     mode='manual' if self.manual else ('incremental' if self.pid.incremental else 'pid'),
                      kp=float(self.pid.kp), adaptive=self.pid.adaptive, adaptation=self.pid.adaptation,
                      limit_mm=float(self.pid.limit), adaptive_limit=self.pid.adaptive_limit, limit_adaptation=self.pid.limit_adaptation,
                      ratio=step.ratio, angle_deg=step.angle_deg, state='Waiting', calculated_angles='',
@@ -204,7 +207,7 @@ class PositionFeedback:
                 positions = None if gate.positions is None else gate.positions.copy()
                 sample = gate.observed_at
                 generation = gate.loss_generation
-            enabled = self.enabled.is_set()
+            enabled = self.enabled.is_set() and not self.manual
             now = self.clock()
             if enabled != was_enabled:
                 self.reset_history()

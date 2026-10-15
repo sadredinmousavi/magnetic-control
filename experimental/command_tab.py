@@ -29,6 +29,7 @@ from position_control import PositionPID, PositionFeedback
 from settling_control import SettlingMonitor
 from hover_hint import HoverHint
 from learned_corrections import LearnedCorrections, correction_context
+from axis_calibration import RobotAxes
 
 
 class CommandTab:
@@ -48,6 +49,11 @@ class CommandTab:
         self.control_requested = False
         self.learned = LearnedCorrections()
         self.latest_applied = LearnedCorrections()
+        self.manual_targets = LearnedCorrections()
+        self.display_corrections = {}
+        self.manual_mode_var = tk.BooleanVar(value=False)
+        self.manual_mode_active = False
+        self.show_commanded_var = tk.BooleanVar(value=False)
         self.use_learned_var = tk.BooleanVar(value=True)
         self.adaptive_kp_var = tk.BooleanVar(value=True)
         self.kp_max_var = tk.StringVar(value='1')
@@ -205,6 +211,7 @@ class CommandTab:
         options = tk.Frame(parent)
         options.pack(fill="x", padx=8)
         for label, variable in (("Show desired lines", self.show_path_var), ("Show moving ROI", self.show_roi_var),
+                                ('Show commanded point', self.show_commanded_var),
                                 ("Show robot trails", self.show_trails_var)):
             tk.Checkbutton(options, text=label, variable=variable, command=self.render).pack(side="left", padx=3)
         tk.Label(options, text="Arrival tolerance (mm)").pack(side="left", padx=(8, 2))
@@ -217,6 +224,12 @@ class CommandTab:
         self.tracking_status.pack(fill="x", padx=10)
         learned_bar = tk.Frame(parent)
         learned_bar.pack(fill='x', padx=8, pady=2)
+        self.manual_check = tk.Checkbutton(learned_bar, text='Manual mode', variable=self.manual_mode_var,
+                                           command=self.change_manual_mode)
+        self.manual_check.pack(side='left')
+        HoverHint(self.manual_check, 'Select a point in the table, then click the camera to set commanded XY. '
+                  'Run selected point sends it; Finish/Stop before editing again. Save u keeps the last sent value. '
+                  'Automatic control is disabled in Manual mode.')
         self.learned_controls = []
         for label, action in [('Save u', self.save_learned), ('Export points + u', self.export_learned),
                               ('Load u', self.load_learned), ('Clear u', self.clear_learned)]:
@@ -523,6 +536,7 @@ class CommandTab:
         if getattr(self, 'recording', None) is not None:
             try:
                 options = dict(show_path=self.show_path_var.get(), show_roi=self.show_roi_var.get(),
+                               commanded_pixel=self.commanded_pixel() if self.show_commanded_var.get() else None,
                                trails=self.robot_trails if self.show_trails_var.get() else None)
                 args = (self.setup, self.pixels, self.active_index, self.tracking_detections, self.tracking_tracker)
                 annotated = draw_command_overlay(frame.copy(), *args, **options)
@@ -829,6 +843,9 @@ class CommandTab:
                     self.render()
             return
         if not self.roi_placement_var.get():
+            if getattr(self, 'manual_mode_var', None) is not None and self.manual_mode_var.get():
+                self.set_manual_target(event, canvas)
+                return
             self.click_target(event, screen_points=getattr(canvas, 'screen_points', None))
             return
         if self.running or self.precalculating:
@@ -879,16 +896,22 @@ class CommandTab:
             self.parent, 'GUI005 — Phase 3 camera', self.render,
             status_lines=2,
             toolbar_builder=self.build_popout_roi_controls,
+            toolbar_title='Tracking',
             extra_controls_enabled=lambda: not self.running and not self.precalculating,
-            actions=(('Crop', self.begin_crop_placement, None),
-                     ('Save u', self.save_learned, self.save_u_button),
-                     ('Place ROI', self.begin_roi_placement, self.place_roi_button),
+            actions=(('Place ROI', self.begin_roi_placement, self.place_roi_button),
                      ('Clear ROI', self.clear_command_roi, None),
                      ('First', self.run, self.run_button),
+                     ('Selected', self.run_selected, self.run_selected_button),
                      ('Next', self.next_point, self.next_button),
+                     ('Stop', self.stop, self.stop_button),
                      ('Control off', self.toggle_control, self.control_button),
-                     ('Stop', self.stop, self.stop_button)),
-            action_captions={'Run all': 'First', 'Next point': 'Next'},
+                     ('Save u', self.save_learned, self.save_u_button),
+                     ('Crop', self.begin_crop_placement, None)),
+            action_groups={'Place ROI': 'ROI', 'Clear ROI': 'ROI', 'First': 'Path',
+                           'Selected': 'Path', 'Next': 'Path', 'Stop': 'Path',
+                           'Control off': 'Control', 'Save u': 'Control', 'Crop': 'View'},
+            group_builders={'Control': self.build_popout_control_mode},
+            action_captions={'Run all': 'First', 'Run selected point': 'Selected', 'Next point': 'Next'},
             status_builder=self.build_popout_control_details, status_refresh=self.refresh_popout_control_details,
             render_version=lambda: (self.render_revision, self.frame_received_at),
             on_close=self.render,
@@ -911,10 +934,18 @@ class CommandTab:
             self.popout_roi_entries[label] = entry
             HoverHint(entry, hint)
 
+    def build_popout_control_mode(self, parent):
+        self.popout_manual_check = tk.Checkbutton(parent, text='Manual', variable=self.manual_mode_var,
+                                                command=self.change_manual_mode)
+        self.popout_manual_check.pack(side='left', padx=2)
+        HoverHint(self.popout_manual_check, 'Manual: click to set commanded XY, use Selected to send, then Save u to keep it. '
+                  'Automatic corrections are off. Finish/Stop before changing mode or editing a command.')
+
     def build_popout_control_details(self, parent):
         options = tk.Frame(parent)
         options.pack(fill='x', padx=8, pady=2)
         for label, variable in (('Desired lines', self.show_path_var), ('Moving ROI', self.show_roi_var),
+                                ('Commanded point', self.show_commanded_var),
                                 ('Robot trails', self.show_trails_var)):
             tk.Checkbutton(options, text=label, variable=variable, command=self.render).pack(side='left', padx=3)
         self.popout_arrival_entries = []
@@ -931,6 +962,7 @@ class CommandTab:
         return self.build_control_details(parent)
 
     def refresh_popout_control_details(self, label):
+        self.popout_manual_check.config(state='disabled' if self.running or self.precalculating else 'normal')
         for entry, source in self.popout_arrival_entries:
             entry.config(state=source.cget('state'))
         self.refresh_control_details(label)
@@ -950,6 +982,9 @@ class CommandTab:
         self.run(selected_only=True)
 
     def toggle_control(self):
+        if getattr(self, 'manual_mode_var', None) is not None and self.manual_mode_var.get():
+            self.status.config(text='Manual mode: automatic control is off. Uncheck Manual to enable control.')
+            return
         enabled = not self.control_requested
         if enabled and not show_view_dialog(self, messagebox.askyesno, 'Enable position control',
                 'Enable bounded XY feedback? It will send additional motor poses while running. '
@@ -1034,7 +1069,59 @@ class CommandTab:
         corrections = self.learned.snapshot(context, len(self.steps))
         if not self.use_learned_var.get():
             corrections = [[0.,0.] for step in self.steps]
+        if getattr(self, 'manual_mode_var', None) is not None and self.manual_mode_var.get():
+            corrections = [self.manual_targets.point(context, index) or correction
+                           for index, correction in enumerate(corrections)]
         return context, corrections
+
+    def change_manual_mode(self):
+        if self.running or self.precalculating:
+            self.manual_mode_var.set(getattr(self, 'manual_mode_active', False))
+            self.status.config(text='Finish/Stop the current operation before switching mode.')
+            return
+        self.manual_mode_active = self.manual_mode_var.get()
+        if self.manual_mode_var.get():
+            self.control_requested = False
+            self.control_button.config(text='Control off')
+            if self.feedback is not None:
+                self.feedback.enabled.clear()
+            self.show_commanded_var.set(True)
+            self.status.config(text='Manual: select a table row, click its commanded point, then Run selected point. Save u after testing.')
+        self.refresh_point_corrections()
+        self.render()
+
+    def set_manual_target(self, event, canvas):
+        if self.running or self.precalculating:
+            self.status.config(text='Finish/Stop the current run before changing the manual command.')
+            return
+        try:
+            index = self.active_index
+            if index is None:
+                raise ValueError('Select a desired point in the table first.')
+            transform = getattr(canvas, 'camera_transform', None)
+            if transform is None or self.frame is None:
+                raise ValueError('Wait for the camera image first.')
+            ox, oy, scale = transform
+            pixel = np.asarray([(event.x-ox)/scale, (event.y-oy)/scale])
+            h, w = self.frame.shape[:2]
+            if np.any(pixel < 0) or np.any(pixel >= [w, h]):
+                raise ValueError('Click inside the camera image.')
+            setup = self.current_setup()
+            axes = RobotAxes(setup['corners_px'], setup['rectangle_width_cm'],
+                             setup['rectangle_height_cm'], setup['axis_samples_px'])
+            target = axes.coordinates([pixel])[0] / 100
+            self.validate_corrected_target(target, setup, allow_outside_pins=self.allow_extrapolation_var.get())
+            context, _ = self.learned_snapshot(setup)
+            correction = target*1000 - np.asarray(self.steps[index].target_xy_m)*1000
+            self.manual_targets.remember(context, index, correction)
+            self.precalculated_signature = None
+            self.show_commanded_var.set(True)
+            self.show_point_correction(index, correction)
+            self.status.config(text=f'Point {index+1}: manual command ({target[0]*1000:.2f}, {target[1]*1000:.2f}) mm. '
+                               'Not sent. Run selected point to test; Save u to keep the sent correction.')
+            self.render()
+        except (ValueError, TypeError, KeyError, ImportError) as error:
+            self.status.config(text=f'Manual target not set: {error}')
 
     def save_learned(self):
         if self.precalculating:
@@ -1050,8 +1137,11 @@ class CommandTab:
             if correction is None:
                 raise ValueError('No command has been sent for this point in the current setup yet.')
             self.learned.remember(context, index, correction)
+            if getattr(self, 'manual_mode_var', None) is not None and self.manual_mode_var.get():
+                self.manual_targets.remember(context, index, correction)
             self.precalculated_signature = None
             self.show_point_correction(index, correction)
+            self.render()
             self.status.config(text=f'Point {index + 1}: u ({correction[0]:.2f}, {correction[1]:.2f}) mm saved in memory. '
                                'Export points + u to keep the path on disk.')
         except (ValueError, TypeError, KeyError, ImportError) as error:
@@ -1061,6 +1151,9 @@ class CommandTab:
         self.learned_file_action(False)
 
     def show_point_correction(self, index, correction):
+        if not hasattr(self, 'display_corrections'):
+            self.display_corrections = {}
+        self.display_corrections[index] = list(correction)
         desired = np.asarray(self.steps[index].target_xy_m) * 1000
         u = np.asarray(correction, float)
         for key, value in zip(('ux', 'uy', 'cx', 'cy'), (*u, *(desired + u))):
@@ -1097,6 +1190,7 @@ class CommandTab:
             if path:
                 if load:
                     self.learned.load(path, context, len(self.steps))
+                    self.manual_targets.clear(context)
                     self.precalculated_signature = None
                     self.refresh_point_corrections()
                 else:
@@ -1112,6 +1206,7 @@ class CommandTab:
             context, _ = self.learned_snapshot(self.current_setup())
             if show_view_dialog(self, messagebox.askyesno, 'Clear learned u', 'Clear learned corrections for this path/setup? Saved files are unchanged.'):
                 self.learned.clear(context)
+                self.manual_targets.clear(context)
                 self.refresh_point_corrections()
                 self.precalculated_signature = None
                 self.status.config(text='Learned u cleared for this path/setup.')
@@ -1206,6 +1301,7 @@ class CommandTab:
             return
         prepared = False
         try:
+            manual = getattr(self, 'manual_mode_var', None) is not None and self.manual_mode_var.get()
             allow_extrapolation = self.allow_extrapolation_var.get()
             if getattr(self, 'precalculated_signature', None) is not None:
                 if self.precalculated_signature != self.point_signature():
@@ -1215,7 +1311,7 @@ class CommandTab:
             arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
             feedback = None
             if hasattr(self, 'pid_vars'):
-                pid = PositionPID(kp=float(self.pid_vars['Alpha'].get()), incremental=True,
+                pid = PositionPID() if manual else PositionPID(kp=float(self.pid_vars['Alpha'].get()), incremental=True,
                                   limit_mm=float(self.pid_vars['Limit mm'].get()),
                                   slew_mm_s=float(self.pid_vars['Slew mm/s'].get()), period_s=float(self.pid_vars['Period s'].get()),
                                   adaptive=self.adaptive_kp_var.get(), tolerance_mm=arrival_gate.tolerance_mm,
@@ -1226,8 +1322,8 @@ class CommandTab:
                     self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
                 settling = SettlingMonitor(*[float(variable.get()) for variable in self.settling_vars.values()])
                 arrival_gate.settling = settling
-                feedback = PositionFeedback(pid, validate=validate_correction, settling=settling)
-                if self.control_requested:
+                feedback = PositionFeedback(pid, validate=validate_correction, settling=settling, manual=manual)
+                if self.control_requested and not manual:
                     feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)
             learned_context, corrections = (self.learned_snapshot(setup) if hasattr(self, 'learned') else
@@ -1245,7 +1341,7 @@ class CommandTab:
                 if np.linalg.norm(corrections[index]) > 0:
                     target = np.asarray(self.steps[index].target_xy_m) + np.asarray(corrections[index])/1000
                     self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
-                    if feedback is not None:
+                    if feedback is not None and not manual:
                         feedback.pid.seed_output(corrections[index])
             if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
                 raise ValueError("Connect the live camera and wait for a fresh frame before running.")
@@ -1270,6 +1366,7 @@ class CommandTab:
             return
         self.setup, self.pixels = setup, pixels
         self.running = True
+        self.run_manual_mode = manual
         self.active_index = None
         self.stop_event.clear()
         self.job += 1
@@ -1411,6 +1508,22 @@ class CommandTab:
         if self.running:
             self.after_id = self.parent.after(50, self.poll)
 
+    def commanded_pixel(self):
+        index = self.active_index
+        if self.setup is None or index is None or index >= len(self.steps):
+            return None
+        target = np.asarray(self.steps[index].target_xy_m) * 1000
+        correction = getattr(self, 'display_corrections', {}).get(index, [0., 0.])
+        commanded = target + correction
+        if self.running and self.feedback is not None:
+            data = self.feedback.snapshot()
+            if data.get('desired_xy_mm') is not None and np.allclose(data['desired_xy_mm'], target):
+                if data.get('commanded_xy_mm') is not None:
+                    commanded = np.asarray(data['commanded_xy_mm'])
+        axes = RobotAxes(self.setup['corners_px'], self.setup['rectangle_width_cm'],
+                         self.setup['rectangle_height_cm'], self.setup['axis_samples_px'])
+        return axes.pixel_positions([commanded/10])[0]
+
     def render(self, canvas=None):
         if canvas is None:
             self.render_revision = getattr(self, 'render_revision', 0) + 1
@@ -1478,6 +1591,16 @@ class CommandTab:
                 canvas.create_line(x - 3, y, x + 3, y, fill="#ff9900", width=1)
                 canvas.create_line(x, y - 3, x, y + 3, fill="#ff9900", width=1)
                 canvas.create_text(x + 5, y - 5, text=f"P{self.active_index + 1}", fill="#ff9900", font=("Segoe UI", 7), anchor="sw")
+        if enabled('show_commanded_var'):
+            try:
+                commanded = self.commanded_pixel()
+                if commanded is not None:
+                    x, y = commanded * scale + [ox, oy]
+                    canvas.create_polygon(x, y-4, x+4, y, x, y+4, x-4, y,
+                                          outline='#ff55dd', fill='', width=1)
+                    canvas.create_text(x+6, y+5, text='C', fill='#ff55dd', font=('Segoe UI', 8), anchor='nw')
+            except (ValueError, TypeError, KeyError):
+                pass
         tracker = getattr(self, "tracking_tracker", None)
         if tracker is not None and enabled("show_roi_var"):
             x, y = tracker.center * scale + [ox, oy]
