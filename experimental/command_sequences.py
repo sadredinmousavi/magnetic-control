@@ -137,6 +137,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
             feedback.publish(desired_xy_mm=(np.asarray(step.target_xy_m) * 1000).tolist(),
                              ratio=step.ratio, angle_deg=step.angle_deg, state='Calculating initial pose')
         def sent(result):
+            on_correction(index, correction.tolist())
             if arrival_gate is not None:
                 arrival_gate.arm(step.target_xy_m)
             report("sent", index, result)

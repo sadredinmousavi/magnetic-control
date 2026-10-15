@@ -131,19 +131,20 @@ settled. Learned corrections, recording crop and the motor solver are retained.
 ## Learning a path and replaying it
 
 Each sequence row has its own u_last in mm (including repeated desired points).
-After an actual corrective send, GUI005 remembers that row's applied u. **Use
+After an actual send, GUI005 tracks that row's latest applied u separately from
+the accepted path corrections. Press **Save u** to accept it for replay. **Use
 learned u** defaults on: restarting with First/Run all initially commands
 `p_d[i] + u_last[i]`, even with Control off. Arrival and desired-point overlays
 still refer to the ORIGINAL p_d. Missing/untrained rows start with zero u.
 Control on during replay refines the existing u for changed conditions. Control
 off holds the last sent pose and disables new corrections, not learned replay.
 
-Corrections remain in GUI memory across runs. **Save u** writes a dated JSON
+Accepted corrections remain in GUI memory across runs. **Export points + u** writes a dated JSON
 file in `experimental/setups`; **Load u** restores it after restarting the GUI.
-Files include desired XY, u_last, commanded XY, ratio and angle. This is explicit
-save/load, not automatic disk overwriting. **Clear u** clears only the current
+Files include every point's desired XY, saved u, commanded XY, ratio, angle, wait and motor zero.
+**Clear u** clears only the current
 path/setup in memory; files remain. Unchecking Use learned u starts a fresh run
-at nominal points (Control can learn replacements).
+at nominal points (Control can generate replacements to accept with Save u).
 
 A context fingerprint includes the full sequence/order/settings, camera and
 resolution, four pins and physical dimensions, captured axes, hardware model,
@@ -155,18 +156,22 @@ Matching context does not prove that experimental conditions are unchanged.
 
 The Commands table shows Desired X/Y, u X/Y and Command X/Y, all in mm.
 Each new context starts with u = (0, 0); Command XY = Desired XY + u.
-After a correction is successfully sent, its point's u and Command XY update
-in the table. Calculated proposals that are blocked or never sent do not replace u.
-The last sent u stays in memory for replay, including when restarting from the first point.
+The table shows accepted corrections for replay; live Control details show the
+latest applied correction while tuning. Calculated proposals that are blocked or
+never sent cannot be accepted. Saved u stays in memory for replay, including when restarting from the first point.
 **Save u** remains available during a run in both camera views: press it when
-satisfied with the settled position to save a snapshot of all points to a setup JSON file.
-This includes desired XY, last sent u, commanded XY, ratio and angle. **Load u**
+satisfied with the settled position to keep the active point's latest sent u
+in memory and update its table row, without a file dialog. While stopped, it
+uses the selected row, or the last active row if none is selected. Unvisited
+points cannot be saved. Other points' accepted u values remain unchanged.
+**Export points + u** writes all accepted corrections to disk. **Load u**
 restores a matching file and refreshes the table; **Clear u** returns the context
 to zero. Load/Clear are locked during execution. Saving does not turn Control off;
-later corrections may refine memory, while the saved file keeps the snapshot.
+later corrections remain separate until Save u is pressed again. Export does not
+accept unsaved corrections. Neither action sends a motor command.
 The control details show speed as `measured (limit)` in mm/s within one fixed cell.
 
-Precalculate all uses the current `p_d + u_last` snapshot. If learning changes
+Precalculate all uses the current `p_d + u_last` snapshot. If Save u changes
 u, old angles cannot be reused: run falls back to fresh calculation until
 precalculated again. For recording, train the path, restart it with Use learned
 u, and optionally Precalculate all first. Keep Control on for refinement or off

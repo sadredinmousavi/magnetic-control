@@ -28,6 +28,11 @@ class LearnedCorrections:
             points = self.values.get(context, {})
             return [list(points.get(str(index), [0., 0.])) for index in range(count)]
 
+    def point(self, context, index):
+        with self.lock:
+            value = self.values.get(context, {}).get(str(index))
+            return None if value is None else list(value)
+
     def remember(self, context, index, correction):
         vector = np.asarray(correction, float)
         if vector.shape != (2,) or not np.isfinite(vector).all():
@@ -45,7 +50,8 @@ class LearnedCorrections:
         if steps is not None:
             value['points'] = [dict(desired_xy_mm=(np.asarray(step.target_xy_m)*1000).tolist(),
                                    u_last_mm=u, commanded_xy_mm=(np.asarray(step.target_xy_m)*1000 + u).tolist(),
-                                   ratio=step.ratio, angle_deg=step.angle_deg)
+                                   ratio=step.ratio, angle_deg=step.angle_deg,
+                                   wait_seconds=step.wait_seconds, zero_angle_deg=step.zero_angle_deg)
                                for step,u in zip(steps, value['corrections'])]
         # Explicit Save dialog handles replacement approval; no automatic overwrite.
         Path(path).write_text(json.dumps(value, indent=2, allow_nan=False), encoding='utf-8')

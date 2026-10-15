@@ -47,6 +47,7 @@ class CommandTab:
         self.roi_placement_var = tk.BooleanVar(value=False)
         self.control_requested = False
         self.learned = LearnedCorrections()
+        self.latest_applied = LearnedCorrections()
         self.use_learned_var = tk.BooleanVar(value=True)
         self.adaptive_kp_var = tk.BooleanVar(value=True)
         self.kp_max_var = tk.StringVar(value='1')
@@ -217,13 +218,16 @@ class CommandTab:
         learned_bar = tk.Frame(parent)
         learned_bar.pack(fill='x', padx=8, pady=2)
         self.learned_controls = []
-        for label, action in [('Save u', self.save_learned), ('Load u', self.load_learned), ('Clear u', self.clear_learned)]:
+        for label, action in [('Save u', self.save_learned), ('Export points + u', self.export_learned),
+                              ('Load u', self.load_learned), ('Clear u', self.clear_learned)]:
             button = tk.Button(learned_bar, text=label, command=action)
             button.pack(side='left', padx=2)
             if label == 'Save u':
                 self.save_u_button = button
-                HoverHint(button, 'Save all points and their last successfully sent u (mm), including during a run. '
-                          'When the robot reaches the desired position, save for replay in later sessions.')
+                HoverHint(button, 'Keep the active point\'s latest sent u in memory and the table. '
+                          'When stopped, uses the selected point. No file dialog. Export points + u saves the whole path to disk.')
+            elif label == 'Export points + u':
+                self.export_u_button = button
             else:
                 self.learned_controls.append(button)
         tk.Label(learned_bar, text='XY and u: mm').pack(side='left', padx=6)
@@ -231,8 +235,9 @@ class CommandTab:
                                      command=self.refresh_point_corrections)
         learned_check.pack(side='left')
         self.learned_controls.append(learned_check)
-        HoverHint(learned_check, 'Replay each point at desired + its last SENT correction. Control may refine it. '
-                  'Memory is matched to the full sequence, calibration, hardware and robot count. Save u for later sessions.')
+        HoverHint(learned_check, 'Replay each point at desired + its saved u. Control may refine it; '
+                  'press Save u to keep a refinement. Memory matches sequence, calibration, hardware and robot count. '
+                  'Export points + u for later sessions.')
         pid_bar = tk.LabelFrame(parent, text='Incremental XY control — u = last sent u + Alpha × error')
         pid_bar.pack(fill='x', padx=8, pady=3)
         self.pid_entries = []
@@ -1032,6 +1037,27 @@ class CommandTab:
         return context, corrections
 
     def save_learned(self):
+        if self.precalculating:
+            return
+        try:
+            context = (self.run_correction_context if self.running else
+                       self.learned_snapshot(self.current_setup())[0])
+            selection = self.table.selection()
+            index = self.active_index if self.running else (int(selection[0]) if selection else self.active_index)
+            if index is None:
+                raise ValueError('Run a point and select it before saving its u.')
+            correction = self.latest_applied.point(context, index)
+            if correction is None:
+                raise ValueError('No command has been sent for this point in the current setup yet.')
+            self.learned.remember(context, index, correction)
+            self.precalculated_signature = None
+            self.show_point_correction(index, correction)
+            self.status.config(text=f'Point {index + 1}: u ({correction[0]:.2f}, {correction[1]:.2f}) mm saved in memory. '
+                               'Export points + u to keep the path on disk.')
+        except (ValueError, TypeError, KeyError, ImportError) as error:
+            show_view_dialog(self, messagebox.showerror, 'Save u', str(error))
+
+    def export_learned(self):
         self.learned_file_action(False)
 
     def show_point_correction(self, index, correction):
@@ -1065,7 +1091,7 @@ class CommandTab:
             if load:
                 path = show_view_dialog(self, filedialog.askopenfilename, title='Load learned u', **options)
             else:
-                path = show_view_dialog(self, filedialog.asksaveasfilename, title='Save learned u',
+                path = show_view_dialog(self, filedialog.asksaveasfilename, title='Export all points with saved u',
                                        initialfile=default_setup_name().replace('.json', '_u.json'),
                                        defaultextension='.json', **options)
             if path:
@@ -1075,7 +1101,7 @@ class CommandTab:
                     self.refresh_point_corrections()
                 else:
                     self.learned.save(path, context, len(self.steps), steps=self.steps)
-                self.status.config(text=f'Learned u {"loaded" if load else "saved"}: {path}')
+                self.status.config(text=f'{"Learned u loaded" if load else "Points and saved u exported"}: {path}')
         except (ValueError, TypeError, OSError, ImportError) as error:
             show_view_dialog(self, messagebox.showerror, 'Learned u', str(error))
 
@@ -1283,8 +1309,7 @@ class CommandTab:
 
         def remember_correction(index, u):
             if learned_context is not None:
-                self.learned.remember(learned_context, indices[index], u)
-            self.events.put((job, 'correction', indices[index], u))
+                self.latest_applied.remember(learned_context, indices[index], u)
 
         def worker():
             try:
@@ -1338,9 +1363,6 @@ class CommandTab:
             while True:
                 job, kind, index, result = self.events.get_nowait()
                 if job != self.job:
-                    continue
-                if kind == 'correction':
-                    self.show_point_correction(index, result)
                     continue
                 if kind == 'corrected':
                     self.table.set(str(index), 'angles', ', '.join(f'{angle:.2f}' for angle in result['angles_deg']))

@@ -308,7 +308,7 @@ class CommandSequenceTests(unittest.TestCase):
                 app.run_correction_context = context
                 with patch('command_tab.filedialog.asksaveasfilename', return_value=str(path)), \
                      patch('command_tab.XY_SEQUENCE_DIR', Path(folder) / 'xy_sequences'):
-                    app.save_learned()
+                    app.export_learned()
                 app.learned.clear(context)
                 app.learned.load(path, context, len(app.steps))
                 self.assertEqual(app.learned_snapshot(app.current_setup())[1], [[0., 0.], [2., -3.]])
@@ -319,15 +319,34 @@ class CommandSequenceTests(unittest.TestCase):
             app.refresh_point_corrections()
             self.assertEqual(app.learned_snapshot(app.current_setup())[1], [[0., 0.], [0., 0.]])
 
-    def test_correction_event_updates_original_point_without_finishing_run(self):
+    def test_save_u_keeps_only_active_point_without_a_file_dialog(self):
         app = self.run_app()
-        app.running = True
-        app.events.put((app.job, 'correction', 1, [2., -3.]))
-        app.poll()
+        app.running, app.precalculating, app.active_index = True, False, 1
+        app.run_correction_context = 'context'
+        app.latest_applied, app.learned = LearnedCorrections(), LearnedCorrections()
+        app.latest_applied.remember('context', 0, [9., 8.])
+        app.latest_applied.remember('context', 1, [2., -3.])
+        self.assertEqual(app.learned.snapshot('context', 2), [[0., 0.], [0., 0.]])
+        with patch('command_tab.filedialog.asksaveasfilename') as dialog:
+            app.save_learned()
+        dialog.assert_not_called()
         self.assertTrue(app.running)
+        self.assertEqual(app.learned.snapshot('context', 2), [[0., 0.], [2., -3.]])
         app.table.set.assert_any_call('1', 'cx', '12.00')
         app.table.set.assert_any_call('1', 'cy', '-3.00')
+        app.latest_applied.remember('context', 1, [4., -5.])
+        self.assertEqual(app.learned.point('context', 1), [2., -3.])
         app.set_running.assert_not_called()
+
+    def test_save_u_rejects_unsent_point(self):
+        app = self.run_app()
+        app.running, app.precalculating, app.active_index = True, False, 1
+        app.run_correction_context = 'context'
+        app.latest_applied, app.learned = LearnedCorrections(), LearnedCorrections()
+        with patch('command_tab.messagebox.showerror') as error:
+            app.save_learned()
+        self.assertIn('No command has been sent', error.call_args.args[1])
+        self.assertEqual(app.learned.snapshot('context', 2), [[0., 0.], [0., 0.]])
 
     def test_run_all_can_extrapolate_only_with_explicit_permission_and_warning(self):
         app = self.run_app()
