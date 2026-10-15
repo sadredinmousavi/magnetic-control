@@ -1052,8 +1052,10 @@ class CalibrationTab:
         canvas.delete("all")
         canvas.create_image(cw / 2, ch / 2, image=canvas.camera_photo, anchor="center")
 
-    def setup_data(self):
-        if getattr(self, "axis_busy", False) or getattr(self, "axis_pending", None):
+    def setup_data(self, *, require_capture=True):
+        if not require_capture and getattr(self, "axis_busy", False):
+            raise ValueError("Wait for the calibration motor move to finish before using the setup in Commands.")
+        if require_capture and (getattr(self, "axis_busy", False) or getattr(self, "axis_pending", None)):
             raise ValueError("Capture the current settled robot position before saving.")
         if self.frame is None or self.circle is None:
             raise ValueError("Select a frame, four points and an ROI first.")

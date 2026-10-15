@@ -302,6 +302,29 @@ class RobotAxisTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Incomplete axes"):
             app.setup_data()
 
+    def test_commands_use_complete_axes_without_requiring_another_capture(self):
+        from command_tab import CommandTab
+        from command_sequences import XYStep
+        calibration = self.app()
+        original_samples = dict(calibration.axis_samples)
+        calibration.axis_pending = '+X'
+        commands = CommandTab.__new__(CommandTab)
+        commands.calibration, commands.frame = calibration, calibration.frame
+        commands.steps = [XYStep((0, 0), 0, 180)]
+        data, pixels = commands.prepare()
+        self.assertEqual(data['axis_samples_px'], original_samples)
+        np.testing.assert_allclose(pixels, [original_samples['Origin']], atol=1e-6)
+        self.assertEqual(calibration.axis_pending, '+X')
+        with self.assertRaisesRegex(ValueError, 'before saving'):
+            calibration.setup_data()
+        calibration.axis_busy = True
+        with self.assertRaisesRegex(ValueError, 'motor move to finish'):
+            commands.prepare()
+        calibration.axis_busy = False
+        calibration.axis_samples.pop('+Y')
+        with self.assertRaisesRegex(ValueError, 'Incomplete axes'):
+            commands.prepare()
+
     def test_three_roi_captures_save_and_restore_complete_metric_calibration(self):
         app = self.app()
         app.axis_samples = {}

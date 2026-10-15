@@ -66,7 +66,6 @@ class CommandTab:
         self.events = queue.Queue()
         self.job = 0
         self.active_index = None
-        self.show_all = True
         self.after_id = None
         self.arrival_gate = None
         self.cell_editor = None
@@ -114,23 +113,21 @@ class CommandTab:
         self.load_button = tk.Button(bar, text="Load XY sequence", command=self.load_sequence)
         self.load_button.pack(side="left", padx=3)
         tk.Button(bar, text="Export XY sequence", command=self.export_sequence).pack(side="left", padx=3)
+        self.precalculate_button = tk.Button(bar, text='Precalculate all', command=self.precalculate_all)
+        self.precalculate_button.pack(side='left', padx=3)
         actions = tk.Frame(parent)
         actions.pack(fill="x", padx=8, pady=3)
-        self.show_button = tk.Button(actions, text="Show all points", command=self.show_points)
-        self.show_button.pack(side="left", padx=3)
         self.run_selected_button = tk.Button(actions, text="Run selected point", command=self.run_selected)
         self.run_selected_button.pack(side="left", padx=3)
         self.run_button = tk.Button(actions, text="Run all", command=self.run)
         self.run_button.pack(side="left", padx=3)
-        self.precalculate_button = tk.Button(actions, text='Precalculate all', command=self.precalculate_all)
-        self.precalculate_button.pack(side='left', padx=3)
         self.stop_button = tk.Button(actions, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="left", padx=3)
         self.control_button = tk.Button(actions, text='Control off', command=self.toggle_control)
         self.control_button.pack(side='left', padx=3)
         self.next_button = tk.Button(actions, text="Next point", command=self.next_point, state="disabled")
         self.next_button.pack(side="left", padx=3)
-        self.allow_extrapolation_var = tk.BooleanVar(value=False)
+        self.allow_extrapolation_var = tk.BooleanVar(value=True)
         self.extrapolation_check = tk.Checkbutton(actions, text="Allow beyond pins (extrapolated)",
                                                  variable=self.allow_extrapolation_var)
         self.extrapolation_check.pack(side="left", padx=8)
@@ -430,7 +427,7 @@ class CommandTab:
             self.status.config(text=f'Point edit rejected: {error}')
 
     def current_setup(self):
-        setup = json.loads(json.dumps(self.calibration.setup_data()))
+        setup = json.loads(json.dumps(self.calibration.setup_data(require_capture=False)))
         if not setup.get("control_case"):
             raise ValueError("Select the hardware case in Calibration first.")
         if self.frame is not None and list(self.frame.shape[1::-1]) != setup["video_size_px"]:
@@ -783,13 +780,6 @@ class CommandTab:
                 self.point_angle_var.set('Auto' if step.angle_deg is None else f'{step.angle_deg:g}')
             self.render()
 
-    def show_points(self):
-        self.show_all = True
-        if self.running:
-            self.render()
-        else:
-            self.refresh_calibration()
-
     def begin_roi_placement(self):
         if self.running or self.precalculating:
             self.tracking_status.config(text='Stop the run/precalculation before changing the ROI.')
@@ -861,8 +851,7 @@ class CommandTab:
             status_lines=2,
             toolbar_builder=self.build_popout_roi_controls,
             extra_controls_enabled=lambda: not self.running and not self.precalculating,
-            actions=(('Points', self.show_points, None),
-                     ('Crop', self.begin_crop_placement, None),
+            actions=(('Crop', self.begin_crop_placement, None),
                      ('Place ROI', self.begin_roi_placement, self.place_roi_button),
                      ('Clear ROI', self.clear_command_roi, None),
                      ('First', self.run, self.run_button),
@@ -1369,7 +1358,7 @@ class CommandTab:
         h, w = self.frame.shape[:2]
         cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
         low, high = np.array([0., 0.]), np.array([float(w), float(h)])
-        if self.pixels is not None and self.show_all:
+        if self.pixels is not None:
             low = np.minimum(low, self.pixels.min(axis=0) - [15, 15])
             high = np.maximum(high, self.pixels.max(axis=0) + [15, 15])
         extent = high - low
