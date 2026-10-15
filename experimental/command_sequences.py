@@ -128,6 +128,8 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
     for index, step in enumerate(steps):
         if not active():
             return "stopped"
+        if arrival_gate is not None:
+            arrival_gate.prepare_point(preserve_next=index == 0)
         report("calculating", index, None)
         correction = np.zeros(2) if initial_corrections is None else np.asarray(initial_corrections[index], float)
         command = tuple(np.asarray(step.target_xy_m) + correction / 1000)
@@ -139,7 +141,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
         def sent(result):
             on_correction(index, correction.tolist())
             if arrival_gate is not None:
-                arrival_gate.arm(step.target_xy_m)
+                arrival_gate.arm(step.target_xy_m, preserve_next=True)
             report("sent", index, result)
             if feedback is not None:
                 feedback.initial_sent()

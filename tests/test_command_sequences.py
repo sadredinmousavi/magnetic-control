@@ -170,6 +170,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.arrival_gate, app.run_indices, app.stop_event = None, (0,), threading.Event()
         for name in ("table", "status", "render", "set_running", "load_button", "run_button", "run_selected_button", "extrapolation_check", "stop_button", "units_combo", "next_button", "arrival_tolerance_entry", "arrival_hold_entry"):
             setattr(app, name, Mock())
+        app.table.selection.return_value = ()
         app.events.put((1, "sent", 0, {"angles_deg": [60, 70]}))
         app.events.put((1, "completed", 0, {"angles_deg": [60, 70]}))
         app.events.put((1, "finished", None, None))
@@ -407,7 +408,7 @@ class CommandSequenceTests(unittest.TestCase):
             thread.call_args.kwargs['target']()
             self.assertEqual(execute.call_args.kwargs['initial_corrections'], [[25., 0.]])
 
-    def test_run_all_can_extrapolate_only_with_explicit_permission_and_warning(self):
+    def test_run_all_uses_extrapolation_checkbox_without_confirmation(self):
         app = self.run_app()
         app.allow_extrapolation_var.get.return_value = True
         with patch("command_tab.messagebox.askyesno", return_value=True) as confirm, \
@@ -419,10 +420,42 @@ class CommandSequenceTests(unittest.TestCase):
             app.run()
             thread.call_args.kwargs["target"]()
             app.poll()
-        self.assertIn("WARNING", confirm.call_args.args[1])
+        confirm.assert_not_called()
         self.assertEqual(calculate.call_count, 2)
         self.assertEqual(move.call_count, 2)
         self.assertEqual(app.run_indices, (0, 1))
+
+    def test_next_can_queue_during_calculation_without_arrival(self):
+        from arrival_control import ArrivalGate
+        app = self.run_app()
+        app.running, app.precalculating = True, False
+        app.run_indices = (0, 1)
+        app.arrival_gate = ArrivalGate(require_arrival=False)
+        app.refresh_next_button()
+        app.next_button.config.assert_called_with(state='normal', text='Next point')
+        app.next_point()
+        self.assertTrue(app.arrival_gate.next_requested)
+        app.refresh_next_button()
+        app.next_button.config.assert_called_with(state='disabled', text='Next point')
+
+    def test_next_when_idle_runs_next_selected_row(self):
+        app = self.run_app()
+        app.precalculating = False
+        app.table.selection.return_value = ('0',)
+        app.select_point, app.run_selected = Mock(), Mock()
+        app.next_point()
+        app.table.selection_set.assert_called_once_with('1')
+        app.run_selected.assert_called_once()
+
+    def test_control_toggle_does_not_ask_for_confirmation(self):
+        app = self.run_app()
+        app.control_requested = False
+        app.control_button, app.feedback = Mock(), Mock()
+        with patch('command_tab.messagebox.askyesno') as confirm:
+            app.toggle_control()
+        confirm.assert_not_called()
+        self.assertTrue(app.control_requested)
+        app.feedback.enabled.set.assert_called_once()
 
     def test_show_all_fits_entire_image_and_even_off_frame_targets(self):
         app = CommandTab.__new__(CommandTab)

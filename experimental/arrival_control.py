@@ -25,7 +25,17 @@ class ArrivalGate:
         self.loss_generation = 0
         self.settling = None
 
-    def arm(self, target_xy_m):
+    def prepare_point(self, *, preserve_next=False):
+        with self.condition:
+            self.target = None
+            self.observed_at = self.inside_since = self.error_mm = None
+            self.positions = None
+            self.waiting_for_next = not self.require_arrival
+            if not preserve_next:
+                self.next_requested = False
+            self.condition.notify_all()
+
+    def arm(self, target_xy_m, *, preserve_next=False):
         with self.condition:
             self.target = np.asarray(target_xy_m, dtype=float)
             self.armed_at = self.clock()
@@ -33,7 +43,8 @@ class ArrivalGate:
                 self.settling.reset(self.armed_at)
             self.observed_at = self.inside_since = self.error_mm = None
             self.positions = None
-            self.waiting_for_next = self.next_requested = False
+            if not preserve_next:
+                self.next_requested = False
             self.waiting_for_next = not self.require_arrival
             self.condition.notify_all()
 
@@ -108,7 +119,7 @@ class ArrivalGate:
 
     def request_next(self):
         with self.condition:
-            if not self.waiting_for_next or self.next_requested or (self.require_arrival and not self._ready()):
+            if self.next_requested or (self.require_arrival and (not self.waiting_for_next or not self._ready())):
                 return False
             self.next_requested = True
             self.condition.notify_all()

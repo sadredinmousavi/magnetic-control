@@ -1,8 +1,8 @@
 # Commands position control
 
-Control is optional and off by default. Enabling it requires confirmation. It
-does not move anything until a sequence runs. The existing Run confirmation,
-camera/controller checks, arrival hold, Next/Finish and Stop remain in effect.
+Control is optional and off by default. Run and Control on/off act directly,
+without routine hardware-match or extrapolation confirmation dialogs.
+Camera/controller connections, calibration and target-validity checks remain.
 
 ## Idea
 
@@ -238,10 +238,11 @@ Missing/ambiguous tracking pauses corrections and resets transient history
 without discarding the applied u. Turning
 Control off stops further corrections; it does not undo the last motor pose.
 Once all expected robots are within tolerance of the ORIGINAL desired point,
-corrections pause. Next is manually available as soon as the original motor pose
-is sent, whether or not arrival is confirmed. It can be pressed during the row
-wait; advancement occurs after that wait. A queued Next also suppresses unsent
-PID corrections. If robots leave tolerance, feedback can resume unless Next
+corrections pause. Next can queue one advance even while the original motor pose
+is calculating, whether or not arrival is confirmed. The request survives the
+initial send; advancement occurs after the row's minimum wait. A queued Next also suppresses unsent
+PID corrections. While idle, Next selects and runs the following row; at the
+end it is labeled First point and returns to the first row. If robots leave tolerance, feedback can resume unless Next
 was requested. Transient controller history resets per point; learned u is per row.
 
 ## Orientation and ratio

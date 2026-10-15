@@ -156,7 +156,8 @@ class CommandTab:
             "Table shows mm. Double-click Ratio, Angle, Wait or Zero to edit each point (Enter applies). "
             "Ratio defaults to 1; Angle Auto is unconstrained and is ignored for ratio 1. "
             "Precalculate all prepares motor angles without moving; otherwise each point is calculated on demand. "
-            "Next enables once a motor command is sent; arrival is not required. The row's minimum wait still applies. "
+            "Next can queue one advance during calculation; arrival is not required. The row's minimum wait still applies. "
+            "When idle, Next runs the row after the selected point (First point at the end). "
             "Press Next point to advance (Finish for the last point). There is no automatic progression. "
             "Stop prevents further commands; it does not undo the last motor pose."
         ))
@@ -486,6 +487,8 @@ class CommandTab:
     def refresh_calibration(self):
         if self.running:
             return
+        if hasattr(self, 'next_button'):
+            self.refresh_next_button()
         try:
             setup = self.current_setup()
             self.configure_tracking(setup)
@@ -823,6 +826,7 @@ class CommandTab:
                 self.point_ratio_var.set(f'{step.ratio:g}')
                 self.point_angle_var.set('Auto' if step.angle_deg is None else f'{step.angle_deg:g}')
             self.render()
+            self.refresh_next_button()
 
     def begin_roi_placement(self):
         if self.running or self.precalculating:
@@ -987,10 +991,6 @@ class CommandTab:
             self.manual_mode_var.set(False)
             self.change_manual_mode()
         enabled = not self.control_requested
-        if enabled and not show_view_dialog(self, messagebox.askyesno, 'Enable position control',
-                'Enable bounded XY feedback? It will send additional motor poses while running. '
-                'Verify PID limits and physical hardware first. Orientation is not measured; ratio/angle stay fixed.'):
-            return
         self.control_requested = enabled
         self.control_button.config(text='Control on' if enabled else 'Control off')
         if self.feedback is not None:
@@ -1257,6 +1257,7 @@ class CommandTab:
             show_view_dialog(self, messagebox.showerror, 'Precalculate all', str(error))
             return
         self.precalculating = True
+        self.refresh_next_button()
         self.set_running(True)
         self.precalculated_signature = None
         self.preparation_stop.clear()
@@ -1288,6 +1289,7 @@ class CommandTab:
                     self.status.config(text=f'Precalculated {index + 1} points. No motors moved.')
                 else:
                     self.precalculating = False
+                    self.refresh_next_button()
                     self.set_running(False)
                     self.precalculate_button.config(state='normal')
                     self.run_button.config(state='normal')
@@ -1374,12 +1376,6 @@ class CommandTab:
         except (ValueError, TypeError, KeyError, ImportError) as error:
             show_view_dialog(self, messagebox.showerror, "Cannot run sequence", str(error))
             return
-        outside, _ = point_limits(pixels, setup)
-        extrapolated = sum(bool(outside[index]) for index in indices)
-        description = f"selected point {indices[0] + 1}" if selected_only else f"all {len(indices)} points"
-        warning = f"\nWARNING: {extrapolated} target(s) beyond pins. Mapping is extrapolated; confirm they are physically safe." if extrapolated else ""
-        if not show_view_dialog(self, messagebox.askyesno, "Run XY targets", f"Run {description} using {setup['control_case']}?\nInput units: {self.input_units}; table: mm; calibration: cm.\nArrival indicator: {arrival_gate.tolerance_mm:g} mm for {arrival_gate.stable_seconds:g} s. Next does NOT require arrival.\nRow wait is the minimum hold after sending; no automatic advance.\nConfirm the units and physical hardware match.{warning}"):
-            return
         self.setup, self.pixels = setup, pixels
         self.running = True
         self.run_manual_mode = manual
@@ -1406,7 +1402,7 @@ class CommandTab:
         self.stop_button.config(state="normal")
         self.units_combo.config(state="disabled")
         self.extrapolation_check.config(state="disabled")
-        self.next_button.config(state="disabled", text="Next point")
+        self.refresh_next_button()
         self.arrival_tolerance_entry.config(state="disabled")
         self.arrival_hold_entry.config(state="disabled")
         for index in indices:
@@ -1451,16 +1447,34 @@ class CommandTab:
             self.status.config(text="Stop requested. Unsent commands will be cancelled; an ongoing calculation may take time to return. Last pose stays applied.")
 
     def next_point(self):
+        if not self.running:
+            if not self.steps or self.precalculating:
+                return
+            selection = self.table.selection()
+            current = int(selection[0]) if selection else self.active_index
+            index = 0 if current is None else (current + 1) % len(self.steps)
+            self.table.selection_set(str(index))
+            self.table.see(str(index))
+            self.select_point()
+            self.run_selected()
+            return
         if self.running and self.arrival_gate is not None and self.arrival_gate.request_next():
             self.next_button.config(state="disabled")
             self.status.config(text='Next requested. Advancing after the current row minimum wait; no arrival requirement or extra queued presses.')
         else:
-            self.status.config(text='Next is unavailable until the current motor command has been sent, or a Next press is already queued.')
+            self.status.config(text='A Next press is already queued, or the run is stopping.')
 
     def refresh_next_button(self):
+        if not self.running:
+            selection = self.table.selection() if self.steps else ()
+            current = int(selection[0]) if selection else self.active_index
+            last = bool(self.steps) and current == len(self.steps) - 1
+            self.next_button.config(state='normal' if self.steps and not getattr(self, 'precalculating', False) else 'disabled',
+                                    text='First point' if last else 'Next point')
+            return
         gate = self.arrival_gate
         waiting = self.running and gate is not None and gate.waiting_for_next
-        ready = waiting and (not gate.require_arrival or gate.ready) and not self.stop_event.is_set() and not gate.next_requested
+        ready = gate is not None and (not gate.require_arrival or (waiting and gate.ready)) and not self.stop_event.is_set() and not gate.next_requested
         last = self.active_index is not None and self.active_index == self.run_indices[-1] if self.running else False
         self.next_button.config(state="normal" if ready else "disabled", text="Finish" if last else "Next point")
         if waiting and self.active_index is not None and not self.stop_event.is_set():
@@ -1509,7 +1523,7 @@ class CommandTab:
                     self.units_combo.config(state="readonly")
                     self.extrapolation_check.config(state="normal")
                     self.arrival_gate = None
-                    self.next_button.config(state="disabled", text="Next point")
+                    self.refresh_next_button()
                     self.arrival_tolerance_entry.config(state="normal")
                     self.arrival_hold_entry.config(state="normal")
                     if kind != "finished" and self.active_index is not None:
