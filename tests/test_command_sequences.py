@@ -372,10 +372,13 @@ class CommandSequenceTests(unittest.TestCase):
             np.testing.assert_allclose(app.commanded_pixel(), [150, 110], atol=1e-5)
             app.table.set.assert_any_call('1', 'cx', '20.00')
             move.assert_not_called()
-            previous = app.manual_targets.point(context, 1)
             app.running = True
+            app.run_correction_context = context
+            app.feedback = Mock()
+            app.arrival_gate = Mock(condition=threading.Condition(), next_requested=False)
             app.camera_click(Mock(x=105, y=85), surface)
-            self.assertEqual(app.manual_targets.point(context, 1), previous)
+            np.testing.assert_allclose(app.feedback.request_manual.call_args.args[1], [20, 0], atol=1e-5)
+            self.assertEqual(app.learned.snapshot(context, 2), [[0., 0.], [0., 0.]])
 
     def test_manual_run_uses_draft_and_disables_automatic_control(self):
         app = self.run_app()
@@ -383,7 +386,12 @@ class CommandSequenceTests(unittest.TestCase):
         app.manual_targets, app.learned = LearnedCorrections(), LearnedCorrections()
         app.use_learned_var = Mock(get=Mock(return_value=True))
         app.tracking_count_var = Mock(get=Mock(return_value='1'))
-        app.pid_vars, app.control_requested = {}, True
+        app.pid_vars = {key: Mock(get=Mock(return_value=value)) for key, value in
+                        [('Alpha', '.2'), ('Limit mm', '2'), ('Slew mm/s', '5'), ('Period s', '.25')]}
+        app.control_requested = True
+        app.adaptive_kp_var = Mock(get=Mock(return_value=True))
+        app.adaptive_limit_var = Mock(get=Mock(return_value=True))
+        app.kp_max_var, app.limit_max_var, app.adapt_percent_var = [Mock(get=Mock(return_value=value)) for value in ('1', '20', '50')]
         app.settling_vars = {key: Mock(get=Mock(return_value='.5')) for key in ('speed', 'window', 'hold', 'wait')}
         with patch('command_tab.load_hardware_case', return_value={}), \
              patch.object(app.commander, 'hardware_signature', return_value='hardware'), \

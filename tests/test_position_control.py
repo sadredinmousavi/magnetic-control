@@ -251,6 +251,57 @@ class PositionControlTests(unittest.TestCase):
         feedback = PositionFeedback(PositionPID())
         self.assertFalse(feedback.enabled.is_set())
 
+    def test_live_manual_updates_replace_pending_commands_and_save_only_sent_u(self):
+        feedback, gate, now, active = self.fixture()
+        step = XYStep((0, 0), 0, 90, 2, 45)
+        applied, report, commander = Mock(), Mock(), Mock()
+        feedback.set_manual_mode(True)
+        feedback.begin_point(step, [0, 0], applied)
+        feedback.request_manual(step, [4, 0])
+        result = {'angles_deg': [60, 70]}
+        def move(case, target, **kwargs):
+            if commander.move.call_count == 1:
+                np.testing.assert_allclose(target, [.004, 0])
+                feedback.request_manual(step, [8, -2])
+                self.assertFalse(kwargs['active']())
+                applied.assert_not_called()
+                return None
+            np.testing.assert_allclose(target, [.008, -.002])
+            self.assertTrue(kwargs['active']())
+            self.assertEqual((kwargs['ratio'], kwargs['angle_deg'], kwargs['zero_angle_deg']), (2, 45, 90))
+            kwargs['on_calculated'](result)
+            kwargs['on_sent'](result)
+            active[0] = False
+            return result
+        commander.move.side_effect = move
+        feedback.wait_at_target(step, commander, 'case', gate, lambda: active[0], report)
+        applied.assert_called_once_with([8., -2.])
+        self.assertEqual(feedback.snapshot()['commanded_xy_mm'], [8., -2.])
+        self.assertEqual(commander.move.call_count, 2)
+
+    def test_switching_to_manual_cancels_inflight_auto_correction(self):
+        feedback, gate, now, active = self.fixture()
+        step = XYStep((0, 0), 0, 90)
+        feedback.begin_point(step, [0, 0])
+        commander, report = Mock(), Mock()
+        def move(case, target, **kwargs):
+            feedback.set_manual_mode(True)
+            self.assertFalse(kwargs['active']())
+            active[0] = False
+            return None
+        commander.move.side_effect = move
+        feedback.wait_at_target(step, commander, 'case', gate, lambda: active[0], report)
+        report.assert_not_called()
+        self.assertFalse(feedback.enabled.is_set())
+
+    def test_resuming_control_preserves_large_manual_correction(self):
+        feedback = PositionFeedback(PositionPID(kp=.2, limit_mm=2, incremental=True), manual=True)
+        feedback.begin_point(XYStep((0, 0), 0, 90), [25, -3])
+        feedback.set_manual_mode(False)
+        feedback.reset_history()
+        np.testing.assert_allclose(feedback.pid.applied_output, [25, -3])
+        self.assertGreaterEqual(feedback.pid.limit, np.linalg.norm([25, -3]))
+
 
 if __name__ == '__main__':
     unittest.main()

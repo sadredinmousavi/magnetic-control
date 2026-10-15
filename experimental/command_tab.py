@@ -228,7 +228,8 @@ class CommandTab:
                                            command=self.change_manual_mode)
         self.manual_check.pack(side='left')
         HoverHint(self.manual_check, 'Select a point in the table, then click the camera to set commanded XY. '
-                  'Run selected point sends it; Finish/Stop before editing again. Save u keeps the last sent value. '
+                  'While stopped, Run selected point sends it. During a run, clicks send a new command for the active point. '
+                  'Save u keeps the last sent value. '
                   'Automatic control is disabled in Manual mode.')
         self.learned_controls = []
         for label, action in [('Save u', self.save_learned), ('Export points + u', self.export_learned),
@@ -939,7 +940,7 @@ class CommandTab:
                                                 command=self.change_manual_mode)
         self.popout_manual_check.pack(side='left', padx=2)
         HoverHint(self.popout_manual_check, 'Manual: click to set commanded XY, use Selected to send, then Save u to keep it. '
-                  'Automatic corrections are off. Finish/Stop before changing mode or editing a command.')
+                  'During a run, clicks send updates to the active point. Modes can change while running.')
 
     def build_popout_control_details(self, parent):
         options = tk.Frame(parent)
@@ -962,7 +963,7 @@ class CommandTab:
         return self.build_control_details(parent)
 
     def refresh_popout_control_details(self, label):
-        self.popout_manual_check.config(state='disabled' if self.running or self.precalculating else 'normal')
+        self.popout_manual_check.config(state='disabled' if self.precalculating else 'normal')
         for entry, source in self.popout_arrival_entries:
             entry.config(state=source.cget('state'))
         self.refresh_control_details(label)
@@ -983,8 +984,8 @@ class CommandTab:
 
     def toggle_control(self):
         if getattr(self, 'manual_mode_var', None) is not None and self.manual_mode_var.get():
-            self.status.config(text='Manual mode: automatic control is off. Uncheck Manual to enable control.')
-            return
+            self.manual_mode_var.set(False)
+            self.change_manual_mode()
         enabled = not self.control_requested
         if enabled and not show_view_dialog(self, messagebox.askyesno, 'Enable position control',
                 'Enable bounded XY feedback? It will send additional motor poses while running. '
@@ -1075,24 +1076,30 @@ class CommandTab:
         return context, corrections
 
     def change_manual_mode(self):
-        if self.running or self.precalculating:
+        if self.precalculating:
             self.manual_mode_var.set(getattr(self, 'manual_mode_active', False))
-            self.status.config(text='Finish/Stop the current operation before switching mode.')
+            self.status.config(text='Wait for precalculation to finish before switching mode.')
             return
         self.manual_mode_active = self.manual_mode_var.get()
+        if self.feedback is not None:
+            self.feedback.set_manual_mode(self.manual_mode_active)
         if self.manual_mode_var.get():
             self.control_requested = False
             self.control_button.config(text='Control off')
             if self.feedback is not None:
                 self.feedback.enabled.clear()
             self.show_commanded_var.set(True)
-            self.status.config(text='Manual: select a table row, click its commanded point, then Run selected point. Save u after testing.')
-        self.refresh_point_corrections()
+            self.status.config(text='Manual: click the active point\'s commanded position to send an update while running. '
+                               'When stopped, select a row, click, then Run selected point. Save u to keep it.')
+        else:
+            self.status.config(text='Manual off. Control on/off is available for the current point.')
+        if not self.running:
+            self.refresh_point_corrections()
         self.render()
 
     def set_manual_target(self, event, canvas):
-        if self.running or self.precalculating:
-            self.status.config(text='Finish/Stop the current run before changing the manual command.')
+        if self.precalculating:
+            self.status.config(text='Wait for precalculation before changing the manual command.')
             return
         try:
             index = self.active_index
@@ -1106,19 +1113,28 @@ class CommandTab:
             h, w = self.frame.shape[:2]
             if np.any(pixel < 0) or np.any(pixel >= [w, h]):
                 raise ValueError('Click inside the camera image.')
-            setup = self.current_setup()
+            setup = self.setup if self.running else self.current_setup()
             axes = RobotAxes(setup['corners_px'], setup['rectangle_width_cm'],
                              setup['rectangle_height_cm'], setup['axis_samples_px'])
             target = axes.coordinates([pixel])[0] / 100
             self.validate_corrected_target(target, setup, allow_outside_pins=self.allow_extrapolation_var.get())
-            context, _ = self.learned_snapshot(setup)
+            context = self.run_correction_context if self.running else self.learned_snapshot(setup)[0]
             correction = target*1000 - np.asarray(self.steps[index].target_xy_m)*1000
+            if self.running:
+                if self.stop_event.is_set() or self.feedback is None:
+                    raise ValueError('Wait for the run to finish stopping.')
+                with self.arrival_gate.condition:
+                    if self.arrival_gate.next_requested:
+                        raise ValueError('The path is advancing; wait for the next active point.')
+                    self.feedback.request_manual(self.steps[index], correction)
+                    self.arrival_gate.condition.notify_all()
             self.manual_targets.remember(context, index, correction)
             self.precalculated_signature = None
             self.show_commanded_var.set(True)
             self.show_point_correction(index, correction)
+            action = 'Queued for the active point; newest click replaces older pending clicks.' if self.running else 'Not sent. Run selected point to test.'
             self.status.config(text=f'Point {index+1}: manual command ({target[0]*1000:.2f}, {target[1]*1000:.2f}) mm. '
-                               'Not sent. Run selected point to test; Save u to keep the sent correction.')
+                               f'{action} Save u to keep the sent correction.')
             self.render()
         except (ValueError, TypeError, KeyError, ImportError) as error:
             self.status.config(text=f'Manual target not set: {error}')
@@ -1311,7 +1327,7 @@ class CommandTab:
             arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
             feedback = None
             if hasattr(self, 'pid_vars'):
-                pid = PositionPID() if manual else PositionPID(kp=float(self.pid_vars['Alpha'].get()), incremental=True,
+                pid = PositionPID(kp=float(self.pid_vars['Alpha'].get()), incremental=True,
                                   limit_mm=float(self.pid_vars['Limit mm'].get()),
                                   slew_mm_s=float(self.pid_vars['Slew mm/s'].get()), period_s=float(self.pid_vars['Period s'].get()),
                                   adaptive=self.adaptive_kp_var.get(), tolerance_mm=arrival_gate.tolerance_mm,

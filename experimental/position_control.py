@@ -146,8 +146,33 @@ class PositionFeedback:
         self.last_sent_at = None
         self.on_applied = lambda correction: None
         self.settling = settling
+        self.current_step = None
+        self.command_revision = 0
+        self.pending_manual = None
+
+    def set_manual_mode(self, manual):
+        with self.lock:
+            self.manual = bool(manual)
+            self.command_revision += 1
+            self.pending_manual = None
+        if manual:
+            self.enabled.clear()
+
+    def request_manual(self, step, correction):
+        vector = np.asarray(correction, float)
+        if vector.shape != (2,) or not np.isfinite(vector).all():
+            raise ValueError('Manual u must be a finite X,Y pair.')
+        with self.lock:
+            if not self.manual or self.current_step is not step:
+                raise ValueError('Wait for the active point to start before changing its command.')
+            self.command_revision += 1
+            self.pending_manual = (self.command_revision, vector.copy())
 
     def begin_point(self, step, correction, on_applied=lambda correction: None):
+        with self.lock:
+            self.current_step = step
+            self.pending_manual = None
+            self.command_revision += 1
         self.pid.reset()
         if not self.manual:
             self.pid.seed_output(correction)
@@ -169,6 +194,11 @@ class PositionFeedback:
     def reset_history(self):
         self.pid.reset()
         if not self.manual:
+            # Resuming control must start at the applied manual pose, not clip it.
+            magnitude = float(np.linalg.norm(self.last_sent_u))
+            self.pid.limit = max(self.pid.limit, magnitude)
+            if self.pid.adaptive_limit:
+                self.pid.limit_max = max(self.pid.limit_max, magnitude)
             self.pid.seed_output(self.last_sent_u)
 
     def publish(self, **values):
@@ -191,6 +221,7 @@ class PositionFeedback:
                      sent_angles=[] if initial_result is None else [float(value) for value in initial_result['angles_deg']])
         last_update = last_sample = None
         was_enabled = self.enabled.is_set()
+        was_manual = self.manual
         while active():
             with gate.condition:
                 ready = gate._ready()
@@ -207,13 +238,48 @@ class PositionFeedback:
                 positions = None if gate.positions is None else gate.positions.copy()
                 sample = gate.observed_at
                 generation = gate.loss_generation
+            with self.lock:
+                pending = self.pending_manual
+                revision = self.command_revision
+            if pending is not None and self.manual:
+                request_revision, correction = pending
+                command = (target_mm + correction) / 1000
+                def manual_active():
+                    with gate.condition:
+                        with self.lock:
+                            return (active() and self.manual and self.current_step is step
+                                    and self.command_revision == request_revision and not gate.next_requested)
+                try:
+                    self.validate(command)
+                    self.publish(proposed_xy_mm=(command*1000).tolist(), state='Calculating manual command', calculated_angles='')
+                    def manual_sent(result):
+                        self.last_sent_u = correction.copy()
+                        self.initial_sent()
+                        self.on_applied(correction.tolist())
+                        self.publish(commanded_xy_mm=(command*1000).tolist(), correction_mm=correction.tolist(),
+                                     sent_angles=[float(v) for v in result['angles_deg']],
+                                     sent_time_s=self.clock(), state='Manual command sent', mode='manual')
+                        report(result)
+                    commander.move(case_name, command, ratio=step.ratio, angle_deg=step.angle_deg,
+                                   settle_seconds=0, zero_angle_deg=step.zero_angle_deg,
+                                   active=manual_active, on_sent=manual_sent,
+                                   on_calculated=lambda result: self.publish(calculated_angles=[float(v) for v in result['angles_deg']]))
+                except ValueError as error:
+                    self.publish(state=f'Manual command blocked: {error}')
+                finally:
+                    with self.lock:
+                        if self.command_revision == request_revision:
+                            self.pending_manual = None
+                continue
             enabled = self.enabled.is_set() and not self.manual
             now = self.clock()
-            if enabled != was_enabled:
+            if enabled != was_enabled or self.manual != was_manual:
                 self.reset_history()
                 if self.settling is not None:
                     self.settling.reset(self.last_sent_at)
                 was_enabled = enabled
+                was_manual = self.manual
+            self.publish(mode='manual' if self.manual else ('incremental' if self.pid.incremental else 'pid'))
             fresh = positions is not None and sample is not None and now - sample <= 1.
             if not fresh:
                 self.reset_history()
@@ -266,6 +332,7 @@ class PositionFeedback:
                     def correction_active():
                         with gate.condition:
                             return (active() and self.enabled.is_set() and gate.positions is not None
+                                    and not self.manual and self.command_revision == revision
                                     and gate.observed_at is not None and self.clock() - sample <= 1.
                                     and gate.loss_generation == generation
                                     and (self.settling is None or self.settling.snapshot(self.clock())['ready'])

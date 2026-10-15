@@ -176,9 +176,12 @@ The control details show speed as `measured (limit)` in mm/s within one fixed ce
 Enable **Manual mode**, select a desired point in the table, then click the
 camera to place its commanded position. Native pixels are converted through the
 loaded four-pin/robot-axis calibration; `u = commanded - desired`, in mm.
-The table previews that point's manual u and commanded XY. Clicking does not
-send motors or accept u for export. **Run selected point** tests the draft;
-press **Finish** or **Stop** before changing it for another trial. **Save u**
+The table previews that point's manual u and commanded XY. While stopped,
+clicking sets a draft and **Run selected point** sends it. During a run,
+clicking in Manual sends an update for the active point through the existing
+sequence worker, without requiring Finish or Stop. A newer click supersedes
+older unsent manual calculations. Updates retain the active row's ratio,
+angle and motor zero; they do not advance the path. **Save u**
 accepts the latest actually sent correction. **Export points + u** exports
 accepted values, never untested drafts. Manual drafts are scoped to the same
 sequence/calibration context; switching out of Manual returns to accepted u.
@@ -188,7 +191,15 @@ Manual mode disables automatic corrections; its commands use the same magnet
 calculation, ratio, angle and motor zero as normal sequence execution. The
 PID correction magnitude cap is not applied to mouse-selected commands. The
 camera boundary and **Allow beyond pins** selection still apply. Mode changes
-and manual point edits are locked during runs and precalculation.
+and manual edits remain available during execution, and are locked only during
+precalculation. **Control on** exits Manual and resumes configured automatic
+control; **Control off** holds the last applied pose. Entering Manual cancels
+unsent automatic corrections. Leaving Manual cancels unsent manual updates.
+Already transmitted motor commands cannot be withdrawn. On resuming automatic
+control, its effective correction bound includes the already-applied manual u,
+so switching modes cannot clip u or introduce a command jump by itself.
+An in-progress optimizer must return before the worker can calculate a newer
+request; its outdated result is checked and discarded before sending.
 
 **Show commanded point** draws a thin magenta diamond marked C for the active
 point, alongside its orange desired target. While stopped it shows the current
