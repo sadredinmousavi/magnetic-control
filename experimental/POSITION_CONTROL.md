@@ -153,6 +153,19 @@ invalidate physical calibration or learned u. Saved corrections are validated
 against current limits, the camera and the selected pin-extrapolation setting before moving.
 Matching context does not prove that experimental conditions are unchanged.
 
+The Commands table shows Desired X/Y, u X/Y and Command X/Y, all in mm.
+Each new context starts with u = (0, 0); Command XY = Desired XY + u.
+After a correction is successfully sent, its point's u and Command XY update
+in the table. Calculated proposals that are blocked or never sent do not replace u.
+The last sent u stays in memory for replay, including when restarting from the first point.
+**Save u** remains available during a run in both camera views: press it when
+satisfied with the settled position to save a snapshot of all points to a setup JSON file.
+This includes desired XY, last sent u, commanded XY, ratio and angle. **Load u**
+restores a matching file and refreshes the table; **Clear u** returns the context
+to zero. Load/Clear are locked during execution. Saving does not turn Control off;
+later corrections may refine memory, while the saved file keeps the snapshot.
+The control details show speed as `measured (limit)` in mm/s within one fixed cell.
+
 Precalculate all uses the current `p_d + u_last` snapshot. If learning changes
 u, old angles cannot be reused: run falls back to fresh calculation until
 precalculated again. For recording, train the path, restart it with Use learned

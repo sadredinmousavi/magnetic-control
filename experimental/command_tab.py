@@ -155,12 +155,14 @@ class CommandTab:
         ))
         table_frame = tk.Frame(parent)
         table_frame.pack(fill="x", padx=8)
-        self.table = ttk.Treeview(table_frame, columns=("x", "y", "wait", "zero", "ratio", "angle", "state", "angles"),
+        self.table = ttk.Treeview(table_frame, columns=("x", "y", "ux", "uy", "cx", "cy", "wait", "zero", "ratio", "angle", "state", "angles"),
                                   show="tree headings", height=6, selectmode="browse")
         self.table.tag_configure("outside", foreground="#b00020")
         self.table.heading("#0", text="Point")
         self.table.column("#0", width=55, stretch=False)
-        for key, title, width in (("x", "X (mm)", 75), ("y", "Y (mm)", 75),
+        for key, title, width in (("x", "Desired X", 75), ("y", "Desired Y", 75),
+                                  ("ux", "u X", 65), ("uy", "u Y", 65),
+                                  ("cx", "Command X", 80), ("cy", "Command Y", 80),
                                   ("wait", "Wait (s)", 65), ("zero", "Zero (deg)", 75),
                                   ("ratio", "Ratio", 60), ("angle", "Angle (deg)", 80),
                                   ("state", "State", 95), ("angles", "Calculated motor angles (deg)", 380)):
@@ -169,6 +171,9 @@ class CommandTab:
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
+        horizontal = ttk.Scrollbar(table_frame, orient='horizontal', command=self.table.xview)
+        self.table.configure(xscrollcommand=horizontal.set)
+        horizontal.pack(side='bottom', fill='x')
         self.table.pack(side="left", fill="x", expand=True)
         self.table.bind("<<TreeviewSelect>>", self.select_point)
         self.table.bind("<Double-1>", self.edit_point_cell)
@@ -215,8 +220,15 @@ class CommandTab:
         for label, action in [('Save u', self.save_learned), ('Load u', self.load_learned), ('Clear u', self.clear_learned)]:
             button = tk.Button(learned_bar, text=label, command=action)
             button.pack(side='left', padx=2)
-            self.learned_controls.append(button)
-        learned_check = tk.Checkbutton(learned_bar, text='Use learned u', variable=self.use_learned_var)
+            if label == 'Save u':
+                self.save_u_button = button
+                HoverHint(button, 'Save all points and their last successfully sent u (mm), including during a run. '
+                          'When the robot reaches the desired position, save for replay in later sessions.')
+            else:
+                self.learned_controls.append(button)
+        tk.Label(learned_bar, text='XY and u: mm').pack(side='left', padx=6)
+        learned_check = tk.Checkbutton(learned_bar, text='Use learned u', variable=self.use_learned_var,
+                                     command=self.refresh_point_corrections)
         learned_check.pack(side='left')
         self.learned_controls.append(learned_check)
         HoverHint(learned_check, 'Replay each point at desired + its last SENT correction. Control may refine it. '
@@ -336,6 +348,7 @@ class CommandTab:
         for index, step in enumerate(steps):
             self.table.insert("", "end", iid=str(index), text=str(index + 1), values=(
                 f"{step.target_xy_m[0] * 1000:g}", f"{step.target_xy_m[1] * 1000:g}",
+                '0.00', '0.00', f"{step.target_xy_m[0] * 1000:.2f}", f"{step.target_xy_m[1] * 1000:.2f}",
                 f"{step.wait_seconds:g}", f"{step.zero_angle_deg:g}", f"{step.ratio:g}",
                 "Auto" if step.angle_deg is None else f"{step.angle_deg:g}", "Pending", ""))
         self.refresh_calibration()
@@ -345,7 +358,7 @@ class CommandTab:
             return
         row = self.table.identify_row(event.y)
         column = self.table.identify_column(event.x)
-        fields = {"#3": "wait", "#4": "zero", "#5": "ratio", "#6": "angle"}
+        fields = {"#7": "wait", "#8": "zero", "#9": "ratio", "#10": "angle"}
         if not row or column not in fields:
             return
         if self.cell_editor is not None:
@@ -379,6 +392,7 @@ class CommandTab:
                     self.table.set(row, key, 'Auto' if value is None else f'{value:g}')
                     self.table.set(row, 'angles', '')
                     self.table.set(row, 'state', 'Pending')
+                    self.refresh_point_corrections()
                     self.status.config(text=f'Point {int(row) + 1}: {key} updated. Export XY sequence to save edits.')
                 except ValueError as error:
                     self.status.config(text=f'Point edit rejected: {error}')
@@ -422,6 +436,7 @@ class CommandTab:
             self.table.set(str(index), 'angle', 'Auto' if angle is None else f'{angle:g}')
             self.table.set(str(index), 'angles', '')
             self.table.set(str(index), 'state', 'Pending')
+            self.refresh_point_corrections()
             self.status.config(text=f'Point {index + 1} settings applied. Export XY sequence to save them.')
         except ValueError as error:
             self.status.config(text=f'Point edit rejected: {error}')
@@ -455,6 +470,7 @@ class CommandTab:
         try:
             setup = self.current_setup()
             self.configure_tracking(setup)
+            self.refresh_point_corrections(setup)
             if not self.steps:
                 self.setup, self.pixels = setup, None
                 self.status.config(text='Calibration ROI/settings applied. Check Phase 3 robots; reposition ROI if needed, then load a sequence.')
@@ -860,6 +876,7 @@ class CommandTab:
             toolbar_builder=self.build_popout_roi_controls,
             extra_controls_enabled=lambda: not self.running and not self.precalculating,
             actions=(('Crop', self.begin_crop_placement, None),
+                     ('Save u', self.save_learned, self.save_u_button),
                      ('Place ROI', self.begin_roi_placement, self.place_roi_button),
                      ('Clear ROI', self.clear_command_roi, None),
                      ('First', self.run, self.run_button),
@@ -945,7 +962,7 @@ class CommandTab:
         rows = (
             (('desired', 'Desired'), ('measured', 'Measured'), ('u', 'u'), ('commanded', 'Commanded')),
             (('ratio', 'Ratio'), ('angle', 'Angle'), ('speed', 'Speed mm/s'),
-             ('speed_limit', 'Speed limit'), ('hold', 'Hold'), ('state', 'State')),
+             ('hold', 'Hold'), ('state', 'State')),
             (('proposed', 'Proposed'), ('alpha', 'Alpha'), ('limit', 'Limit mm')),
             (('calculated', 'Calculated motors'), ('sent', 'Last sent motors')),
         )
@@ -983,7 +1000,7 @@ class CommandTab:
             desired=f"({xy('desired_xy_mm')})", measured=f"({xy('measured_xy_mm')})",
             u=f"({xy('correction_mm')})", commanded=f"({xy('commanded_xy_mm')})",
             ratio=str(data.get('ratio', '—')), angle=str(data.get('angle_deg', 'Auto')),
-            speed=speed, speed_limit=str(data.get('settle_speed_limit_mm_s', '—')),
+            speed=f"{speed} ({data.get('settle_speed_limit_mm_s', '—')})",
             hold=hold, state=data.get('state', 'Control off'),
             proposed=f"({xy('proposed_xy_mm')})",
             alpha=f"{kp}: {adaptation}".rstrip(': '),
@@ -1017,14 +1034,31 @@ class CommandTab:
     def save_learned(self):
         self.learned_file_action(False)
 
+    def show_point_correction(self, index, correction):
+        desired = np.asarray(self.steps[index].target_xy_m) * 1000
+        u = np.asarray(correction, float)
+        for key, value in zip(('ux', 'uy', 'cx', 'cy'), (*u, *(desired + u))):
+            self.table.set(str(index), key, f'{value:.2f}')
+
+    def refresh_point_corrections(self, setup=None):
+        if not self.steps or not hasattr(self, 'learned'):
+            return
+        try:
+            _, corrections = self.learned_snapshot(self.current_setup() if setup is None else setup)
+        except (ValueError, TypeError, KeyError, ImportError):
+            corrections = [[0., 0.] for step in self.steps]
+        for index, correction in enumerate(corrections):
+            self.show_point_correction(index, correction)
+
     def load_learned(self):
         self.learned_file_action(True)
 
     def learned_file_action(self, load):
-        if self.running or self.precalculating:
+        if (load and self.running) or self.precalculating:
             return
         try:
-            context, _ = self.learned_snapshot(self.current_setup())
+            context = (self.run_correction_context if self.running else
+                       self.learned_snapshot(self.current_setup())[0])
             folder = XY_SEQUENCE_DIR.parent / 'setups'
             folder.mkdir(parents=True, exist_ok=True)
             options = dict(initialdir=str(folder), filetypes=[('Learned corrections', '*.json')])
@@ -1037,6 +1071,8 @@ class CommandTab:
             if path:
                 if load:
                     self.learned.load(path, context, len(self.steps))
+                    self.precalculated_signature = None
+                    self.refresh_point_corrections()
                 else:
                     self.learned.save(path, context, len(self.steps), steps=self.steps)
                 self.status.config(text=f'Learned u {"loaded" if load else "saved"}: {path}')
@@ -1050,6 +1086,7 @@ class CommandTab:
             context, _ = self.learned_snapshot(self.current_setup())
             if show_view_dialog(self, messagebox.askyesno, 'Clear learned u', 'Clear learned corrections for this path/setup? Saved files are unchanged.'):
                 self.learned.clear(context)
+                self.refresh_point_corrections()
                 self.precalculated_signature = None
                 self.status.config(text='Learned u cleared for this path/setup.')
         except (ValueError, ImportError) as error:
@@ -1215,6 +1252,9 @@ class CommandTab:
         self.run_indices = indices
         self.arrival_gate = arrival_gate
         self.feedback = feedback
+        self.run_correction_context = learned_context
+        for index, correction in enumerate(corrections):
+            self.show_point_correction(index, correction)
         for widget in getattr(self, 'learned_controls', []):
             widget.config(state='disabled')
         for entry in getattr(self, 'pid_entries', []):
@@ -1241,6 +1281,11 @@ class CommandTab:
                     and self.camera_running() and self.frame_received_at is not None
                     and time.monotonic() - self.frame_received_at <= 2)
 
+        def remember_correction(index, u):
+            if learned_context is not None:
+                self.learned.remember(learned_context, indices[index], u)
+            self.events.put((job, 'correction', indices[index], u))
+
         def worker():
             try:
                 outcome = execute_xy_sequence(steps, self.commander, hardware_case_name(setup["control_case"]),
@@ -1248,8 +1293,7 @@ class CommandTab:
                                               self.events.put((job, kind, indices[index], result)),
                                               arrival_gate=arrival_gate, prepared=prepared, feedback=feedback,
                                               initial_corrections=[corrections[index] for index in indices],
-                                              on_correction=lambda index,u: self.learned.remember(learned_context, indices[index], u)
-                                              if learned_context is not None else None)
+                                              on_correction=remember_correction)
                 self.events.put((job, outcome, None, None))
             except Exception as error:
                 self.events.put((job, "error", None, str(error)))
@@ -1294,6 +1338,9 @@ class CommandTab:
             while True:
                 job, kind, index, result = self.events.get_nowait()
                 if job != self.job:
+                    continue
+                if kind == 'correction':
+                    self.show_point_correction(index, result)
                     continue
                 if kind == 'corrected':
                     self.table.set(str(index), 'angles', ', '.join(f'{angle:.2f}' for angle in result['angles_deg']))

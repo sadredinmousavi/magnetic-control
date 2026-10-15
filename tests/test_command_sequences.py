@@ -19,6 +19,7 @@ from command_sequences import (
 )
 from command_tab import CommandTab
 from point_control import PointCommander
+from learned_corrections import LearnedCorrections
 
 
 CORNERS = [(10, 10), (210, 10), (210, 210), (10, 210)]
@@ -282,6 +283,51 @@ class CommandSequenceTests(unittest.TestCase):
         error.assert_called_once()
         thread.assert_not_called()
         self.assertFalse(app.running)
+
+    def test_point_corrections_start_zero_and_persist_through_save_load(self):
+        app = self.run_app()
+        app.learned = LearnedCorrections()
+        app.use_learned_var = Mock(get=Mock(return_value=True))
+        app.tracking_count_var = Mock(get=Mock(return_value='1'))
+        with patch('command_tab.load_hardware_case', return_value={}), \
+             patch.object(app.commander, 'hardware_signature', return_value='hardware'):
+            app.refresh_point_corrections()
+            app.table.set.assert_any_call('0', 'ux', '0.00')
+            app.table.set.assert_any_call('1', 'cx', '10.00')
+            context, values = app.learned_snapshot(app.current_setup())
+            self.assertEqual(values, [[0., 0.], [0., 0.]])
+            app.learned.remember(context, 1, [2., -3.])
+            app.refresh_point_corrections()
+            app.table.set.assert_any_call('1', 'ux', '2.00')
+            app.table.set.assert_any_call('1', 'uy', '-3.00')
+            app.table.set.assert_any_call('1', 'cx', '12.00')
+            app.table.set.assert_any_call('1', 'cy', '-3.00')
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'u.json'
+                app.running, app.precalculating = True, False
+                app.run_correction_context = context
+                with patch('command_tab.filedialog.asksaveasfilename', return_value=str(path)), \
+                     patch('command_tab.XY_SEQUENCE_DIR', Path(folder) / 'xy_sequences'):
+                    app.save_learned()
+                app.learned.clear(context)
+                app.learned.load(path, context, len(app.steps))
+                self.assertEqual(app.learned_snapshot(app.current_setup())[1], [[0., 0.], [2., -3.]])
+            # Replaying from the first point includes the saved u in synthesized targets.
+            signature = app.point_signature()
+            np.testing.assert_allclose(signature[1][1].target_xy_m, [.012, -.003])
+            app.use_learned_var.get.return_value = False
+            app.refresh_point_corrections()
+            self.assertEqual(app.learned_snapshot(app.current_setup())[1], [[0., 0.], [0., 0.]])
+
+    def test_correction_event_updates_original_point_without_finishing_run(self):
+        app = self.run_app()
+        app.running = True
+        app.events.put((app.job, 'correction', 1, [2., -3.]))
+        app.poll()
+        self.assertTrue(app.running)
+        app.table.set.assert_any_call('1', 'cx', '12.00')
+        app.table.set.assert_any_call('1', 'cy', '-3.00')
+        app.set_running.assert_not_called()
 
     def test_run_all_can_extrapolate_only_with_explicit_permission_and_warning(self):
         app = self.run_app()

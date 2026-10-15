@@ -28,16 +28,18 @@ class CameraPopoutTests(unittest.TestCase):
              patch('command_tab.tk.Label', side_effect=lambda *args, **kwargs: Mock()) as labels, \
              patch('command_tab.HoverHint', side_effect=lambda *args: Mock()):
             fields = app.build_control_details(Mock())
-        self.assertEqual(len(fields), 15)
+        self.assertEqual(len(fields), 14)
         values = [call for call in labels.call_args_list if 'width' in call.kwargs]
         self.assertTrue(all(call.kwargs['width'] == 1 and call.kwargs['height'] == 1 for call in values))
         app.feedback = Mock()
         app.feedback.snapshot.return_value = dict(
             desired_xy_mm=[-100.12, 99.5], correction_mm=[1, -2],
+            robot_speed_mm_s=.12, settle_speed_limit_mm_s=.5,
             state='Waiting for settled response', calculated_angles=[123.4] * 8)
         original_widgets = {key: pair[0] for key, pair in fields.items()}
         app.refresh_control_details(fields)
         fields['desired'][0].config.assert_called_with(text='(-100.12, 99.50)')
+        fields['speed'][0].config.assert_called_with(text='0.12 (0.5)')
         self.assertEqual(fields['state'][1].text, 'Waiting for settled response')
         self.assertEqual(fields['calculated'][1].text, ', '.join(['123.4'] * 8))
         self.assertEqual(original_widgets, {key: pair[0] for key, pair in fields.items()})
