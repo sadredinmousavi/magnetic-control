@@ -23,11 +23,14 @@ class ArrivalGate:
         self.next_requested = False
         self.positions = None
         self.loss_generation = 0
+        self.settling = None
 
     def arm(self, target_xy_m):
         with self.condition:
             self.target = np.asarray(target_xy_m, dtype=float)
             self.armed_at = self.clock()
+            if self.settling is not None:
+                self.settling.reset(self.armed_at)
             self.observed_at = self.inside_since = self.error_mm = None
             self.positions = None
             self.waiting_for_next = self.next_requested = False
@@ -40,6 +43,8 @@ class ArrivalGate:
                 return
             timestamp = self.clock() if observed_at is None else observed_at
             if positions_xy_m is None:
+                if self.settling is not None:
+                    self.settling.observe(None, timestamp)
                 self.loss_generation += 1
                 self.positions = None
                 self.inside_since = self.error_mm = None
@@ -51,6 +56,8 @@ class ArrivalGate:
                 return
             positions = np.asarray(positions_xy_m, dtype=float)
             if positions.ndim != 2 or positions.shape[1] != 2 or not len(positions) or not np.isfinite(positions).all():
+                if self.settling is not None:
+                    self.settling.observe(None, timestamp)
                 self.loss_generation += 1
                 self.positions = None
                 self.inside_since = self.error_mm = None
@@ -64,6 +71,8 @@ class ArrivalGate:
                     self.next_requested = False
             self.observed_at = timestamp
             self.positions = positions.copy()
+            if self.settling is not None:
+                self.settling.observe(positions*1000, timestamp)
             self.error_mm = float(np.linalg.norm(positions - self.target, axis=1).max() * 1000)
             if self.error_mm <= self.tolerance_mm:
                 if self.inside_since is None:
@@ -77,7 +86,8 @@ class ArrivalGate:
     def _ready(self):
         return (self.observed_at is not None and self.inside_since is not None
                 and self.clock() - self.observed_at <= 2
-                and self.observed_at - self.inside_since >= self.stable_seconds)
+                and self.observed_at - self.inside_since >= self.stable_seconds
+                and (self.settling is None or self.settling.snapshot(self.clock())['ready']))
 
     @property
     def ready(self):

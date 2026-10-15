@@ -26,6 +26,7 @@ from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay, video_crop_circle
 from camera_popout import CameraPopout, show_view_dialog
 from position_control import PositionPID, PositionFeedback
+from settling_control import SettlingMonitor
 from hover_hint import HoverHint
 from learned_corrections import LearnedCorrections, correction_context
 
@@ -54,6 +55,8 @@ class CommandTab:
         self.adapt_percent_var = tk.StringVar(value='50')
         self.pid_vars = {key: tk.StringVar(value=value) for key, value in
                          [('Alpha', '.2'), ('Limit mm', '2'), ('Slew mm/s', '5'), ('Period s', '.25')]}
+        self.settling_vars = {key: tk.StringVar(value='.5') for key in
+                              ('Speed mm/s', 'Window s', 'Hold s', 'Min wait s')}
         self.precalculating = False
         self.precalculated_signature = None
         self.preparation_stop = threading.Event()
@@ -256,6 +259,17 @@ class CommandTab:
             entry = tk.Entry(pid_bar, textvariable=variable, width=5)
             entry.pack(side='left')
             self.pid_entries.append(entry)
+        settling_bar = tk.Frame(parent)
+        settling_bar.pack(fill='x', padx=8, pady=2)
+        tk.Label(settling_bar, text='Settle before correction:').pack(side='left')
+        for key, variable in self.settling_vars.items():
+            tk.Label(settling_bar, text=key).pack(side='left', padx=(6,2))
+            entry = tk.Entry(settling_bar, textvariable=variable, width=4)
+            entry.pack(side='left')
+            self.pid_entries.append(entry)
+            HoverHint(entry, 'Every robot must stay below the speed threshold for Hold s. Window s smooths velocity '
+                      'over at least three frames. Min wait s starts after each sent command. Then one correction uses '
+                      'the average settled position. Settings are locked during a run.')
         self.control_details = self.build_control_details(parent)
         recording_bar = tk.Frame(parent)
         recording_bar.pack(fill='x', padx=8, pady=3)
@@ -615,7 +629,7 @@ class CommandTab:
             return
         if getattr(self, "arrival_gate", None) is not None:
             positions = (None if center is None else
-                         np.asarray([item["xy_cm"] for item in self.tracking_detections]) * .01)
+                         np.asarray([item["xy_cm"] for item in sorted(self.tracking_detections, key=lambda item: item['robot_id'])]) * .01)
             self.arrival_gate.observe(positions, self.frame_received_at)
             self.refresh_next_button()
         target = None if self.active_index is None else self.steps[self.active_index].target_xy_m
@@ -658,6 +672,11 @@ class CommandTab:
                 'control_kp': control_data.get('kp', ''),
                 'control_mode': control_data.get('mode', ''),
                 'control_alpha': control_data.get('kp', ''),
+                'robot_speed_mm_s': control_data.get('robot_speed_mm_s', ''),
+                'settling_state': control_data.get('settling_state', ''),
+                'settle_hold_elapsed_s': control_data.get('settle_hold_elapsed_s', ''),
+                'settled_xy_mm': json.dumps(control_data.get('settled_xy_mm')),
+                'settled': control_data.get('settled', 0),
                 'adaptive_kp': int(control_data.get('adaptive', False)),
                 'kp_adaptation': control_data.get('adaptation', ''),
                 'control_limit_mm': control_data.get('limit_mm', ''),
@@ -848,7 +867,7 @@ class CommandTab:
                      ('Control off', self.toggle_control, self.control_button),
                      ('Stop', self.stop, self.stop_button)),
             action_captions={'Run all': 'First', 'Next point': 'Next'},
-            status_builder=self.build_control_details, status_refresh=self.refresh_control_details,
+            status_builder=self.build_popout_control_details, status_refresh=self.refresh_popout_control_details,
             render_version=lambda: (self.render_revision, self.frame_received_at),
             on_close=self.render,
             status=lambda: f"{self.status.cget('text')}  {self.tracking_status.cget('text')}",
@@ -869,7 +888,30 @@ class CommandTab:
             entry.pack(side='left')
             self.popout_roi_entries[label] = entry
             HoverHint(entry, hint)
-        tk.Checkbutton(bar, text='ROI', variable=self.show_roi_var, command=self.render).pack(side='left', padx=3)
+
+    def build_popout_control_details(self, parent):
+        options = tk.Frame(parent)
+        options.pack(fill='x', padx=8, pady=2)
+        for label, variable in (('Desired lines', self.show_path_var), ('Moving ROI', self.show_roi_var),
+                                ('Robot trails', self.show_trails_var)):
+            tk.Checkbutton(options, text=label, variable=variable, command=self.render).pack(side='left', padx=3)
+        self.popout_arrival_entries = []
+        for label, variable, source, hint in (
+                ('Tolerance (mm)', self.arrival_tolerance_var, self.arrival_tolerance_entry,
+                 'Maximum distance from the desired point for arrival; shared with the main tab.'),
+                ('In-range hold (s)', self.arrival_hold_var, self.arrival_hold_entry,
+                 'Continuous time inside arrival tolerance. Speed-based settling is checked separately.')):
+            tk.Label(options, text=label).pack(side='left', padx=(8,2))
+            entry = tk.Entry(options, textvariable=variable, width=4, state=source.cget('state'))
+            entry.pack(side='left')
+            self.popout_arrival_entries.append((entry, source))
+            HoverHint(entry, hint)
+        return self.build_control_details(parent)
+
+    def refresh_popout_control_details(self, label):
+        for entry, source in self.popout_arrival_entries:
+            entry.config(state=source.cget('state'))
+        self.refresh_control_details(label)
 
     def click_target(self, event, *, screen_points=None):
         screen_points = getattr(self, 'screen_points', None) if screen_points is None else screen_points
@@ -899,12 +941,31 @@ class CommandTab:
     def build_control_details(self, parent):
         panel = tk.LabelFrame(parent, text='Control details (mm)')
         panel.pack(fill='x', padx=8, pady=3)
-        label = tk.Label(panel, text='Desired — | Measured — | u — | Commanded —\nRatio — | Angle — | Orientation: unavailable',
-                         height=4, anchor='nw', justify='left', foreground='#173c68')
-        label.pack(fill='x', padx=6)
-        return label
+        fields = {}
+        rows = (
+            (('desired', 'Desired'), ('measured', 'Measured'), ('u', 'u'), ('commanded', 'Commanded')),
+            (('ratio', 'Ratio'), ('angle', 'Angle'), ('speed', 'Speed mm/s'),
+             ('speed_limit', 'Speed limit'), ('hold', 'Hold'), ('state', 'State')),
+            (('proposed', 'Proposed'), ('alpha', 'Alpha'), ('limit', 'Limit mm')),
+            (('calculated', 'Calculated motors'), ('sent', 'Last sent motors')),
+        )
+        for row in rows:
+            strip = tk.Frame(panel)
+            strip.pack(fill='x', padx=6)
+            for column, (key, caption) in enumerate(row):
+                # Equal-sized cells depend on available width, never on live text.
+                strip.columnconfigure(column, weight=1, uniform='details')
+                cell = tk.Frame(strip)
+                cell.grid(row=0, column=column, sticky='ew', padx=(0, 8))
+                tk.Label(cell, text=caption + ':', anchor='w', foreground='#526477').pack(side='left')
+                value = tk.Label(cell, text='—', width=1, height=1, anchor='w',
+                                 foreground='#173c68')
+                value.pack(side='left', fill='x', expand=True)
+                fields[key] = (value, HoverHint(value, '—'))
+        self.refresh_control_details(fields)
+        return fields
 
-    def refresh_control_details(self, label):
+    def refresh_control_details(self, fields):
         data = {} if getattr(self, 'feedback', None) is None else self.feedback.snapshot()
         def xy(key):
             value = data.get(key)
@@ -916,10 +977,23 @@ class CommandTab:
         kp = '—' if data.get('kp') is None else f"{data['kp']:.3f}"
         adaptation = data.get('adaptation', '').replace('Kp', 'Alpha')
         limit = '—' if data.get('limit_mm') is None else f"{data['limit_mm']:.2f}"
-        label.config(text=f"Desired ({xy('desired_xy_mm')}) | Measured ({xy('measured_xy_mm')}) | u ({xy('correction_mm')}) | Commanded ({xy('commanded_xy_mm')})\n"
-                          f"Ratio {data.get('ratio', '—')} | Angle {data.get('angle_deg', 'Auto')} | Orientation: unavailable | {data.get('state', 'Control off')}\n"
-                          f"Proposed ({xy('proposed_xy_mm')}) | Alpha {kp}: {adaptation} | Limit {limit} mm: {data.get('limit_adaptation', '')}\n"
-                          f"Calculated motors: {calculated} | Last sent motors: {sent}")
+        speed = '—' if data.get('robot_speed_mm_s') is None else f"{data['robot_speed_mm_s']:.2f}"
+        hold = f"{data.get('settle_hold_elapsed_s', 0):.1f}/{data.get('settle_hold_s', 0):.1f} s"
+        values = dict(
+            desired=f"({xy('desired_xy_mm')})", measured=f"({xy('measured_xy_mm')})",
+            u=f"({xy('correction_mm')})", commanded=f"({xy('commanded_xy_mm')})",
+            ratio=str(data.get('ratio', '—')), angle=str(data.get('angle_deg', 'Auto')),
+            speed=speed, speed_limit=str(data.get('settle_speed_limit_mm_s', '—')),
+            hold=hold, state=data.get('state', 'Control off'),
+            proposed=f"({xy('proposed_xy_mm')})",
+            alpha=f"{kp}: {adaptation}".rstrip(': '),
+            limit=f"{limit}: {data.get('limit_adaptation', '')}".rstrip(': '),
+            calculated=calculated, sent=sent)
+        for key, text in values.items():
+            widget, hint = fields[key]
+            widget.config(text=text)
+            # Full content remains accessible when a narrow window clips a cell.
+            hint.text = text
 
     def point_signature(self):
         if not hasattr(self, 'learned'):
@@ -1090,7 +1164,9 @@ class CommandTab:
                     project_sequence(corrected, setup, validate=True)  # Always inside pins + camera.
                     if not np.isfinite(target).all():
                         raise ValueError('Corrected XY must be finite.')
-                feedback = PositionFeedback(pid, validate=validate_correction)
+                settling = SettlingMonitor(*[float(variable.get()) for variable in self.settling_vars.values()])
+                arrival_gate.settling = settling
+                feedback = PositionFeedback(pid, validate=validate_correction, settling=settling)
                 if self.control_requested:
                     feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)

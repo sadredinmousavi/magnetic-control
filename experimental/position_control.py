@@ -136,7 +136,7 @@ class PositionPID:
 
 
 class PositionFeedback:
-    def __init__(self, pid, *, validate=lambda target: None, clock=time.monotonic):
+    def __init__(self, pid, *, validate=lambda target: None, clock=time.monotonic, settling=None):
         self.pid, self.validate, self.clock = pid, validate, clock
         self.enabled = threading.Event()  # Opt-in, never enabled automatically.
         self.lock = threading.Lock()
@@ -144,6 +144,7 @@ class PositionFeedback:
         self.last_sent_u = np.zeros(2)
         self.last_sent_at = None
         self.on_applied = lambda correction: None
+        self.settling = settling
 
     def begin_point(self, step, correction, on_applied=lambda correction: None):
         self.pid.reset()
@@ -158,6 +159,10 @@ class PositionFeedback:
 
     def initial_sent(self):
         self.last_sent_at = self.clock()
+        if self.settling is not None:
+            self.settling.reset(self.last_sent_at)
+            self.publish(robot_speed_mm_s=None, settling_state='Minimum wait', settle_hold_elapsed_s=0., settled=0,
+                         settled_xy_mm=None)
 
     def reset_history(self):
         self.pid.reset()
@@ -182,7 +187,7 @@ class PositionFeedback:
                      ratio=step.ratio, angle_deg=step.angle_deg, state='Waiting', calculated_angles='',
                      sent_angles=[] if initial_result is None else [float(value) for value in initial_result['angles_deg']])
         last_update = last_sample = None
-        was_enabled = False
+        was_enabled = self.enabled.is_set()
         while active():
             with gate.condition:
                 ready = gate._ready()
@@ -203,15 +208,35 @@ class PositionFeedback:
             now = self.clock()
             if enabled != was_enabled:
                 self.reset_history()
+                if self.settling is not None:
+                    self.settling.reset(self.last_sent_at)
                 was_enabled = enabled
             fresh = positions is not None and sample is not None and now - sample <= 1.
             if not fresh:
                 self.reset_history()
-                self.publish(state='Tracking lost — corrections paused', measured_xy_mm=None)
+                if self.settling is not None:
+                    self.settling.reset(self.last_sent_at)
+                self.publish(state='Tracking lost — corrections paused', measured_xy_mm=None,
+                             robot_speed_mm_s=None, settling_state='Waiting for tracking',
+                             settle_hold_elapsed_s=0., settled=0, settled_xy_mm=None)
             else:
                 measured = positions.mean(axis=0) * 1000
                 self.publish(measured_xy_mm=measured.tolist())
-                if ready:
+                motion = None if self.settling is None else self.settling.snapshot(now)
+                settled = motion is None or motion['ready']
+                if motion is not None:
+                    self.publish(robot_speed_mm_s=motion['speed_mm_s'], settling_state=motion['state'],
+                                 settle_hold_elapsed_s=motion['hold_elapsed_s'],
+                                 settle_hold_s=float(self.settling.hold), settle_speed_limit_mm_s=float(self.settling.speed_limit),
+                                 settled=int(settled))
+                    if settled:
+                        measured = motion['positions_mm'].mean(axis=0)
+                        self.publish(settled_xy_mm=measured.tolist())
+                    else:
+                        self.publish(settled_xy_mm=None)
+                if not settled:
+                    self.publish(state=f"{motion['state']} — {'holding u' if enabled else 'Control off'}")
+                elif ready:
                     self.publish(state='Reached — waiting for Next')
                 elif not enabled:
                     self.publish(state='Control off — tracking only')
@@ -240,6 +265,7 @@ class PositionFeedback:
                             return (active() and self.enabled.is_set() and gate.positions is not None
                                     and gate.observed_at is not None and self.clock() - sample <= 1.
                                     and gate.loss_generation == generation
+                                    and (self.settling is None or self.settling.snapshot(self.clock())['ready'])
                                     and np.linalg.norm(gate.positions.mean(axis=0) * 1000 - measured) <= gate.tolerance_mm
                                     and not gate.next_requested and not gate._ready())
 
@@ -247,6 +273,10 @@ class PositionFeedback:
                         self.pid.mark_sent(target_mm - measured, self.clock())
                         self.last_sent_u = correction.copy()
                         self.last_sent_at = self.clock()
+                        if self.settling is not None:
+                            self.settling.reset(self.last_sent_at)
+                            self.publish(robot_speed_mm_s=None, settling_state='Minimum wait', settle_hold_elapsed_s=0.,
+                                         settled=0, settled_xy_mm=None)
                         self.on_applied(correction.tolist())
                         self.publish(commanded_xy_mm=(command * 1000).tolist(), correction_mm=correction.tolist(),
                                      sent_angles=[float(v) for v in result['angles_deg']],

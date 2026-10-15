@@ -84,12 +84,49 @@ and CSVs. Incremental compensation is bounded by this radius and does not
 guarantee 1 mm accuracy.
 
 There is no added settling sleep between corrections. Updates require a new
-valid camera sample and the configured minimum period. One motor-angle solve
+valid camera sample, speed-based settling, and the configured minimum period. One motor-angle solve
 and send runs at a time; actual cadence also depends on live FPS, solver runtime
 and serial throughput. The 0.25 s setting is not a guaranteed 4 Hz send rate.
 The initial sequence row's Wait still applies before feedback begins. A new
 incremental update also needs a sample at least one period AFTER the previous
 successful send; repeated/pre-send observations cannot repeatedly accumulate u.
+
+## Speed-based settling before correction
+
+GUI005 now holds u while the robot is moving. Each successfully sent command
+(including the initial learned replay command) starts a new settling cycle.
+Speed is estimated from calibrated XY samples in mm using a rolling linear fit
+over **Window s**, with at least three fresh frames. A residual-motion check
+also detects oscillation that would otherwise cancel out in the fitted velocity.
+For multiple robots, identities are ordered and the maximum individual speed is
+used; opposite motions cannot cancel through the group centroid.
+
+The default editable settings are:
+
+- Speed mm/s: **0.5**, maximum speed for every robot.
+- Window s: **0.5**, velocity estimation interval.
+- Hold s: **0.5**, continuous observed time below that speed.
+- Min wait s: **0.5**, minimum time after sending before the low-speed hold starts.
+
+Only after the speed window and hold are satisfied does the controller compute
+error from the mean robot positions during the low-speed hold, update Alpha/the
+adaptive limit, and propose ONE incremental correction. Sending it resets the
+settling window. In tolerance, the learned u remains applied. Settling means
+stationary; arrival additionally requires the desired-position tolerance. The
+settings are locked during a run. These defaults require experimental tuning
+to camera noise and robot response; minimum wait should cover delayed motion.
+
+Repeated frames cannot advance the hold. Tracking loss, an observation gap over
+one second, or a changed robot count discard the settling history. Stale data
+never count as settled. If motion continues, corrections stay paused and the
+display stays Moving; there is no timeout that forces a correction. Next/Stop
+remain available. Before a calculated pose is sent, settling is checked again;
+new motion during calculation causes the pose to be discarded.
+
+Both camera views show maximum speed, threshold, hold progress, and controller
+state (Minimum wait / Measuring speed / Moving / Settling / Reached). CSV adds
+robot_speed_mm_s, settling_state, settle_hold_elapsed_s, settled_xy_mm and
+settled. Learned corrections, recording crop and the motor solver are retained.
 
 ## Learning a path and replaying it
 
@@ -188,5 +225,6 @@ overlays and never changes detection, calibration, desired points or control.
 
 Files: `position_control.py` (PID/feedback), `command_sequences.py` (point loop),
 `command_tab.py` (controls/display/CSV), `arrival_control.py` (fresh observations),
+`settling_control.py` (speed estimation and continuous hold),
 `learned_corrections.py` (context-scoped memory/files), `command_recording.py`
 (native-coordinate overlays and circular recording crop).
