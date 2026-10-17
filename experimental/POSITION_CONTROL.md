@@ -1,288 +1,113 @@
-# Commands position control
+# Commands: equilibrium force compensation
 
-Control is optional and off by default. Run and Control on/off act directly,
-without routine hardware-match or extrapolation confirmation dialogs.
-Camera/controller connections, calibration and target-validity checks remain.
+GUI005 Control now uses stationary force estimation and constrained cosine-space
+allocation. Incremental XY/PID control, Alpha and adaptive-limit options are no
+longer used by this GUI. Manual mode and saved XY offsets remain separate.
 
-## Idea
+## Automatic cycle and defaults
 
-In calibrated robot XY (millimetres):
+1. Send the normal point pose, optionally using its saved manual XY offset.
+2. Keep all eight commands fixed while one robot settles.
+3. Require fresh tracking, a full speed window with at least three frames,
+   and low speed/residual motion continuously for the hold interval.
+4. Estimate d_hat = -A(p_measured) cos(theta_LAST_SENT), using the averaged
+   settled position. Positions are metres for the magnetic model.
+5. Allocate c_new so A(p_desired) c_new approximately equals -d_hat at the
+   ORIGINAL desired point. Preserve the baseline potential Hessian and
+   respect cosine bounds [0,1] and the maximum actual angle change.
+6. Recheck freshness, motion, tracking loss, mode and Next/Stop before sending.
+7. Reset settling after transmission. The next estimate uses the NEW angles.
 
-`error = desired - measured`
+Default speed threshold is **0.5 mm/s**. Window, Hold and Min wait are each
+0.5 s. Maximum angle step is 10 degrees per stationary correction.
+Control defaults off. Preview only defaults off.
+Settings are configurable and locked during a run. Arrival tolerance (1 mm
+by default) stops further correction once the settled position is close enough.
+A slow frame, duplicate observation or tracking loss cannot complete the hold.
+The monitor checks residual motion as well as regression velocity to reject
+oscillations that return to their starting position.
 
-`u_candidate = u_last_sent + Alpha*error`
+The allocator uses a normalized quadratic force-error objective and small
+movement/baseline penalties. All three independent entries of the baseline
+potential Hessian are constrained and checked after solving; its eigenvalues
+must be positive. An angle-limited update may cancel only part of the force.
+A failed, non-improving or infeasible solve holds the last pose and reports
+its reason. It is consumed once for that fixed-command stationary epoch,
+rather than retried every camera frame. New motion, a send or a Control toggle
+allows a new estimate. There is no error integrator or during-motion braking.
 
-`commanded = desired + bounded(u_candidate)`
+**Preview only** calculates one result per stationary epoch without sending it.
+Initial path and manual commands still move normally.
 
-The desired sequence point never changes. This is incremental, discrete
-integral-like compensation, NOT `u = Kp*error`. It retains the bias needed to
-hold the robot at the target. **Only a successful motor send commits u**;
-rejected/stale calculations never accumulate into the next correction.
-GUI005 uses Alpha (default 0.2); Ki/Kd inputs are removed from this tab. The
-reusable PositionPID class retains its legacy PID mode for other callers.
-There is a vector correction limit and a slew-rate limit; the starting
-correction radius is 2 mm. GUI defaults are slew 5 mm/s and minimum update period
-0.25 s (the reusable PID class retains its original 1 mm/s and 1 s defaults).
-These are starting settings, not experimentally tuned gains. Test on your
-hardware carefully. Settings are locked during a run.
+## Functions and ownership
 
-## Adaptive Alpha (formerly Adaptive Kp)
+- functions_main.py: estimate_equilibrium_disturbance and
+  find_force_compensated_inputs contain the magnetic math and constrained solve.
+- control_workflow.py: calculate_equilibrium_force_control constructs the case
+  model. EquilibriumForceFeedback contains the reusable control state machine.
+- experimental/point_control.py: serializes calculation and transmission.
+- experimental/command_tab.py: widgets, display and service connections only.
 
-The GUI's **Adaptive Alpha** checkbox defaults on; Control itself still defaults
-off. Uncheck it for fixed Alpha (still incremental control). The existing **Arrival tolerance
-(mm)** is also the feedback goal, default **1 mm**. Starting Alpha defaults to 0.2;
-adaptive Alpha is bounded between 0.05 and the editable **Alpha max** (default 1).
-Current Alpha and the adjustment reason appear in both
-control-detail views and tracking/recording CSVs.
+The old position_control.py remains a legacy reusable module for compatibility;
+GUI005 does not import it or expose its PID/adaptive controls.
 
-This is a conservative error-based gain scheduler, not a plant-identification
-or guaranteed-convergence controller. It consumes only fresh, complete-group
-observations following successfully SENT corrections, at least one control
-period after the send. Each response with less than 5% (or 0.05 mm)
-improvement increases Alpha immediately: **Adapt %** defaults to 50% per response
-far from the target. The increase tapers toward 10% near tolerance (at the
-default pace); configurable Adapt % must be greater than zero and at most 100.
-For example, stagnant 10 mm error with 1 mm tolerance raises Alpha from
-0.2 → 0.3 → 0.45 → 0.675 → 1 in four eligible responses, rather than four checks
-for each 10% step. Crossing the target (error-vector reversal) or
-error growth greater than 10% (or 0.2 mm) reduces Alpha by 20%. Clear improvement
-holds Alpha. Correction/slew saturation suppresses increases. These thresholds are
-initial heuristics, not hardware-tuned values.
+The reference Hessian is evaluated at the desired point from its nominal
+optimizer inputs and retained across corrections. If the initial point used a
+shifted XY command, the nominal optimizer runs once at the original desired
+point to establish the reference with its requested ratio/orientation; that
+reference is cached. A non-positive reference is rejected.
 
-Within tolerance, corrections pause using the existing arrival logic; gains do
-not keep increasing. For multiple robots this controls the group centroid;
-individual arrival is still reported separately. Tracking loss, Control toggles
-and each new point reset Alpha to the starting value and clear response history,
-but preserve that point's last sent u. Inside tolerance u is held, not zeroed.
-No new motor-command path is introduced: workspace, freshness, Stop, correction
-and slew limits still apply. Adaptive Alpha cannot fix bad calibration, tracking
-noise, a stuck robot or insufficient correction range; reaching 1 mm is not
-guaranteed. Begin with one robot and conservative limits.
+## Manual XY, saved u and navigation
 
-## Adaptive correction limit
+Manual mode and mouse editing stay live during execution. A click requests an
+active-point update through the existing worker; newer unsent clicks supersede
+older ones. While stopped, clicking drafts commanded XY and Run selected sends.
+Save u accepts the latest actually sent manual/initial XY correction in memory
+and the table. Export points + u writes all accepted XY offsets to JSON;
+Load/Clear restore/reset them. Drafts are not exported.
 
-**Adaptive limit** defaults on in the GUI, independently of Adaptive Alpha.
-**Limit mm** is now the starting correction radius (default 2 mm); **Limit max
-(mm)** is the editable ceiling (default 20 mm, not a hardware-tuned value).
-Uncheck Adaptive limit to retain the original fixed cap.
+Automatic force compensation directly changes eight magnet inputs. It has no
+unique equivalent XY offset, does not overwrite saved u, and leaves Commanded
+XY/C marker blank or hidden after application. Save u explains this distinction
+instead of storing an old XY value as the force correction. Force corrections
+are relearned on each visit; the XY-u JSON does not store them.
 
-After each valid applied response at the actual correction cap with error
-still outside tolerance and without substantial worsening, the radius expands
-by half of Adapt % (default 25%) or 0.25 mm, whichever is larger, up to the ceiling. A slew-limited command
-that has not reached the cap does not count. Overshoot/error growth reduces the
-radius by 20%, but never below the starting radius or the magnitude of the
-current applied output, avoiding abrupt clipping. Reaching tolerance holds the
-radius. No successfully sent response means no expansion. New sends preserve
-an unconsumed response anchor so camera/solver timing cannot indefinitely
-postpone adaptation. Reset conditions also restore the starting radius.
+Control on exits Manual and enables force compensation. Control off holds the
+last transmitted pose. Entering Manual cancels unsent automatic work.
+Next can queue one advance during calculation without requiring arrival;
+the row minimum wait still applies. While idle it runs the following row
+(First point at the end). There are no routine hardware confirmation dialogs.
+Actual camera/controller, calibration and target-validity checks remain.
 
-Alpha remains held while capped; once the radius opens enough, gain adaptation can
-resume. The existing slew limit remains unchanged and every corrected target
-must still be inside the camera and, unless extrapolation is enabled, the pins. Blocked commands cannot drive limit
-growth. Current radius and its adjustment reason appear in both detail views
-and CSVs. Incremental compensation is bounded by this radius and does not
-guarantee 1 mm accuracy.
+## Display, logging and interpretation
 
-There is no added settling sleep between corrections. Updates require a new
-valid camera sample, speed-based settling, and the configured minimum period. One motor-angle solve
-and send runs at a time; actual cadence also depends on live FPS, solver runtime
-and serial throughput. The 0.25 s setting is not a guaranteed 4 Hz send rate.
-The initial sequence row's Wait still applies before feedback begins. A new
-incremental update also needs a sample at least one period AFTER the previous
-successful send; repeated/pre-send observations cannot repeatedly accumulate u.
+Main/pop-out fixed cells show desired/measured XY, speed (threshold), hold,
+disturbance and requested cancelling force in model micro-newtons, predicted
+force residual, and calculated/sent angles. Hover reveals clipped content.
+The CSV stores forces in N: disturbance_n, requested_force_n,
+predicted_force_n, force_residual_n, magnet_cosine_inputs,
+stiffness_eigenvalues_n_m, control_calculation_time_s, force_compensated,
+plus positions, settling data and calculated/sent angles.
 
-## Speed-based settling before correction
+The force scale uses nominal case magnetic properties. Micro-newtons are
+model estimates, not independently calibrated measurements. The disturbance
+includes magnetic-model error and contact reactions; transfer from measured
+to desired position assumes locally similar disturbance. Positive magnetic
+curvature does not prove total stability if unknown force gradients matter.
 
-GUI005 now holds u while the robot is moving. Each successfully sent command
-(including the initial learned replay command) starts a new settling cycle.
-Speed is estimated from calibrated XY samples in mm using a rolling linear fit
-over **Window s**, with at least three fresh frames. A residual-motion check
-also detects oscillation that would otherwise cancel out in the fitted velocity.
-For multiple robots, identities are ordered and the maximum individual speed is
-used; opposite motions cannot cancel through the group centroid.
+Automatic force compensation requires one tracked robot; it does not infer
+individual forces from a swarm centroid. Multi-robot tracking, ordinary path
+execution and Manual remain available. Transmission completion is not motor
+position confirmation. The sequential motor protocol, including explicit
+sleeps, is unchanged. This compensates final offsets, not delayed braking.
 
-The default editable settings are:
+## Circular recording export
 
-- Speed mm/s: **0.5**, maximum speed for every robot.
-- Window s: **0.5**, velocity estimation interval.
-- Hold s: **0.5**, continuous observed time below that speed.
-- Min wait s: **0.5**, minimum time after sending before the low-speed hold starts.
-
-Only after the speed window and hold are satisfied does the controller compute
-error from the mean robot positions during the low-speed hold, update Alpha/the
-adaptive limit, and propose ONE incremental correction. Sending it resets the
-settling window. In tolerance, the learned u remains applied. Settling means
-stationary; arrival additionally requires the desired-position tolerance. The
-settings are locked during a run. These defaults require experimental tuning
-to camera noise and robot response; minimum wait should cover delayed motion.
-
-Repeated frames cannot advance the hold. Tracking loss, an observation gap over
-one second, or a changed robot count discard the settling history. Stale data
-never count as settled. If motion continues, corrections stay paused and the
-display stays Moving; there is no timeout that forces a correction. Next/Stop
-remain available. Before a calculated pose is sent, settling is checked again;
-new motion during calculation causes the pose to be discarded.
-
-Both camera views show maximum speed, threshold, hold progress, and controller
-state (Minimum wait / Measuring speed / Moving / Settling / Reached). CSV adds
-robot_speed_mm_s, settling_state, settle_hold_elapsed_s, settled_xy_mm and
-settled. Learned corrections, recording crop and the motor solver are retained.
-
-## Learning a path and replaying it
-
-Each sequence row has its own u_last in mm (including repeated desired points).
-After an actual send, GUI005 tracks that row's latest applied u separately from
-the accepted path corrections. Press **Save u** to accept it for replay. **Use
-learned u** defaults on: restarting with First/Run all initially commands
-`p_d[i] + u_last[i]`, even with Control off. Arrival and desired-point overlays
-still refer to the ORIGINAL p_d. Missing/untrained rows start with zero u.
-Control on during replay refines the existing u for changed conditions. Control
-off holds the last sent pose and disables new corrections, not learned replay.
-
-Accepted corrections remain in GUI memory across runs. **Export points + u** writes a dated JSON
-file in `experimental/setups`; **Load u** restores it after restarting the GUI.
-Files include every point's desired XY, saved u, commanded XY, ratio, angle, wait and motor zero.
-**Clear u** clears only the current
-path/setup in memory; files remain. Unchecking Use learned u starts a fresh run
-at nominal points (Control can generate replacements to accept with Save u).
-
-A context fingerprint includes the full sequence/order/settings, camera and
-resolution, four pins and physical dimensions, captured axes, hardware model,
-and Phase 3 robot count. Changed contexts never silently reuse old corrections;
-loading a mismatched file is rejected. Moving the detection ROI does not
-invalidate physical calibration or learned u. Saved corrections are validated
-against current limits, the camera and the selected pin-extrapolation setting before moving.
-Matching context does not prove that experimental conditions are unchanged.
-
-The Commands table shows Desired X/Y, u X/Y and Command X/Y, all in mm.
-Each new context starts with u = (0, 0); Command XY = Desired XY + u.
-The table shows accepted corrections for replay; live Control details show the
-latest applied correction while tuning. Calculated proposals that are blocked or
-never sent cannot be accepted. Saved u stays in memory for replay, including when restarting from the first point.
-**Save u** remains available during a run in both camera views: press it when
-satisfied with the settled position to keep the active point's latest sent u
-in memory and update its table row, without a file dialog. While stopped, it
-uses the selected row, or the last active row if none is selected. Unvisited
-points cannot be saved. Other points' accepted u values remain unchanged.
-**Export points + u** writes all accepted corrections to disk. **Load u**
-restores a matching file and refreshes the table; **Clear u** returns the context
-to zero. Load/Clear are locked during execution. Saving does not turn Control off;
-later corrections remain separate until Save u is pressed again. Export does not
-accept unsaved corrections. Neither action sends a motor command.
-The control details show speed as `measured (limit)` in mm/s within one fixed cell.
-
-## Manual commanded points
-
-Enable **Manual mode**, select a desired point in the table, then click the
-camera to place its commanded position. Native pixels are converted through the
-loaded four-pin/robot-axis calibration; `u = commanded - desired`, in mm.
-The table previews that point's manual u and commanded XY. While stopped,
-clicking sets a draft and **Run selected point** sends it. During a run,
-clicking in Manual sends an update for the active point through the existing
-sequence worker, without requiring Finish or Stop. A newer click supersedes
-older unsent manual calculations. Updates retain the active row's ratio,
-angle and motor zero; they do not advance the path. **Save u**
-accepts the latest actually sent correction. **Export points + u** exports
-accepted values, never untested drafts. Manual drafts are scoped to the same
-sequence/calibration context; switching out of Manual returns to accepted u.
-Load/Clear u also clears manual drafts for that context.
-
-Manual mode disables automatic corrections; its commands use the same magnet
-calculation, ratio, angle and motor zero as normal sequence execution. The
-PID correction magnitude cap is not applied to mouse-selected commands. The
-camera boundary and **Allow beyond pins** selection still apply. Mode changes
-and manual edits remain available during execution, and are locked only during
-precalculation. **Control on** exits Manual and resumes configured automatic
-control; **Control off** holds the last applied pose. Entering Manual cancels
-unsent automatic corrections. Leaving Manual cancels unsent manual updates.
-Already transmitted motor commands cannot be withdrawn. On resuming automatic
-control, its effective correction bound includes the already-applied manual u,
-so switching modes cannot clip u or introduce a command jump by itself.
-An in-progress optimizer must return before the worker can calculate a newer
-request; its outdated result is checked and discarded before sending.
-
-**Show commanded point** draws a thin magenta diamond marked C for the active
-point, alongside its orange desired target. While stopped it shows the current
-draft/replay value; during a run it shows the latest sent command when available.
-Both controls and mouse placement work in the main and pop-out views. The C
-marker is also included in annotated/overlay recordings when enabled. ROI and
-export-circle placement take priority over manual-target clicking.
-
-Precalculate all uses the current `p_d + u_last` snapshot. If Save u changes
-u, old angles cannot be reused: run falls back to fresh calculation until
-precalculated again. For recording, train the path, restart it with Use learned
-u, and optionally Precalculate all first. Keep Control on for refinement or off
-for a fixed learned replay. This reduces repeated correction transients but
-does not add continuous path interpolation or guarantee smooth motor motion.
-
-## Execution
-
-The original point plus any enabled learned u is sent first (precalculated if available). Its row wait
-still applies. Then feedback uses the centroid of a complete detected group.
-Each correction is solved freshly in a worker with the row's ratio, equilibrium
-angle and motor zero; corrections do not reuse the original cached pose.
-Only one solve/send is in flight. Camera and serial work stay under the existing
-motor-command lock. **Allow beyond pins (extrapolated)** applies to sequence targets,
-feedback corrections and replayed learned corrections alike. When checked, these
-targets may extend beyond the four pins; when unchecked, the pin boundary is enforced.
-All targets must remain inside the camera frame. The setting is captured when a run starts.
-
-Observations must be no older than one second. Before sending, the observation
-must still be valid, the group must not have moved by more than the arrival
-tolerance, no tracking loss may have occurred during calculation, Control must
-still be on and Stop must not have been pressed. Late solver results are
-discarded. If optimization takes longer than the freshness window, corrections
-may all be discarded; this is intentional protection, not a high-rate motor loop.
-
-Missing/ambiguous tracking pauses corrections and resets transient history
-without discarding the applied u. Turning
-Control off stops further corrections; it does not undo the last motor pose.
-Once all expected robots are within tolerance of the ORIGINAL desired point,
-corrections pause. Next can queue one advance even while the original motor pose
-is calculating, whether or not arrival is confirmed. The request survives the
-initial send; advancement occurs after the row's minimum wait. A queued Next also suppresses unsent
-PID corrections. While idle, Next selects and runs the following row; at the
-end it is labeled First point and returns to the first row. If robots leave tolerance, feedback can resume unless Next
-was requested. Transient controller history resets per point; learned u is per row.
-
-## Orientation and ratio
-
-Robot orientation is NOT measured by the current centre/blob detector. There
-is no orientation PID, inferred heading or measured shape-ratio feedback. The
-sequence's ratio and equilibrium angle remain fixed. Ratio describes the
-equilibrium shape; angle is its orientation, not a motor angle. With ratio 1,
-the existing solver ignores angle. Group-centroid position control cannot
-independently control each robot or guarantee a group orientation.
-
-## Display and CSV
-
-Main and pop-out views show desired XY, measured centroid, last applied u,
-last commanded XY, proposed XY, ratio/angle, controller state, newly calculated
-motor angles and LAST SENT motor angles separately. The status/hint area remains
-two lines. Tracking and recording CSVs include the correction, commanded/proposed
-XY, calculated/sent motor angles and send time (monotonic seconds). A calculated
-angle is not proof that it was sent. Blank orientation is intentional. CSV
-includes control_mode=incremental and control_alpha; control_kp remains as a
-legacy-compatible alias for Alpha.
-
-## Circular video export
-
-Enable **Circle crop** before Start recording. **Fit workspace (4 pins)** uses
-the minimum enclosing circle of the calibrated pins, rounded outward so all
-four pins fit. Otherwise set **Radius px** in native camera pixels and **Place
-crop**, then click either camera view for its center (Place crop unchecks Fit).
-A thin blue circle previews the export boundary; this is NOT the tracking ROI.
-The pop-out also has a Crop action. Disable Circle crop for full-frame export.
-
-All three exported videos use the same fixed square of diameter 2*radius, with
-outside-circle pixels black (blue for chroma-key overlays). Areas beyond the
-source frame are padded, not stretched. Geometry is frozen and crop controls
-locked during recording. CSV remains in native source pixels and calibrated
-physical coordinates, unaffected by crop/zoom. Cropping is applied AFTER
-overlays and never changes detection, calibration, desired points or control.
-
-Files: `position_control.py` (PID/feedback), `command_sequences.py` (point loop),
-`command_tab.py` (controls/display/CSV), `arrival_control.py` (fresh observations),
-`settling_control.py` (speed estimation and continuous hold),
-`learned_corrections.py` (context-scoped memory/files), `command_recording.py`
-(native-coordinate overlays and circular recording crop).
+Circle crop and Fit workspace use a fixed native-pixel circular crop for all
+three exported videos. Set Radius px and Place crop for a manual centre.
+Outside pixels are black (blue in chroma-key overlay), with out-of-frame areas
+padded. Crop is applied after overlays and does not change tracking/control
+coordinates. Settings freeze while recording; CSV remains in native camera
+pixels and calibrated physical coordinates. Show commanded point adds the C
+marker for XY/manual commands; no fictitious XY marker is drawn for a direct
+force correction.

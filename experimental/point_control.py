@@ -14,7 +14,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from case_loader import load_case, normalize_case_name
-from control_workflow import calculate_point_control
+from control_workflow import calculate_point_control, calculate_equilibrium_force_control
 
 
 def hardware_case_name(case_name):
@@ -103,9 +103,20 @@ class PointCommander:
         return calculate_point_control(load_hardware_case(case_name), target_xy_m,
                                        ratio=ratio, angle_deg=angle_deg)
 
+    def move_equilibrium_compensation(self, case_name, target_xy_m, measured_xy_m, applied_angles_deg,
+                                      reference_inputs, *, max_angle_step_deg=10., zero_angle_deg=None,
+                                      active=lambda: True, on_sent=None, on_calculated=None, preview_only=False,
+                                      ratio=1., angle_deg=None):
+        return self.move(case_name, target_xy_m, zero_angle_deg=zero_angle_deg,
+                         active=active, on_sent=on_sent, on_calculated=on_calculated,
+                         force_request=dict(measured_xy_m=measured_xy_m, applied_angles_deg=applied_angles_deg,
+                                            reference_inputs=reference_inputs, max_angle_step_deg=max_angle_step_deg,
+                                            ratio=ratio, angle_deg=angle_deg),
+                         preview_only=preview_only)
+
     def move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
              settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False, prepared_point=False,
-             on_calculated=None):
+             on_calculated=None, force_request=None, preview_only=False):
         """Calculate fresh motor angles, send them, then wait interruptibly.
 
         Cancellation skips unsent commands; it cannot undo an already sent pose.
@@ -125,7 +136,9 @@ class PointCommander:
             port = self.port_provider()
             if port is None or not getattr(port, "is_open", False):
                 raise RuntimeError("Connect the serial controller in Connections first.")
-            if prepared_point:
+            if force_request is not None:
+                result = calculate_equilibrium_force_control(load_hardware_case(case_name), target_xy_m, **force_request)
+            elif prepared_point:
                 name = hardware_case_name(case_name)
                 cached = self.prepared_points.get(name)
                 signature = self.hardware_signature(load_hardware_case(name))
@@ -144,6 +157,8 @@ class PointCommander:
                 result = self.calculate(case_name, target_xy_m, ratio=ratio, angle_deg=angle_deg)
             if on_calculated is not None:
                 on_calculated(result)
+            if preview_only:
+                return result
             if not active():
                 return None
             if self.port_provider() is not port or not getattr(port, "is_open", False):

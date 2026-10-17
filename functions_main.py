@@ -1,7 +1,7 @@
 import numpy as np
 import warnings
 from scipy.constants import mu_0  # Magnetic constant (permeability of free space)
-from scipy.optimize import minimize
+from scipy.optimize import minimize, LinearConstraint
 
 
 def _optimization_failure(message, fallback, failure_mode):
@@ -583,6 +583,90 @@ def calculate_potential_hessian(target_pos, source_positions, C_F, u):
 
 
 
+
+
+def estimate_equilibrium_disturbance(position_m, source_positions, C_F, applied_inputs):
+    """Model-relative disturbance in N at a stationary, fixed-command position.
+
+    Inputs are cos(model angle), never servo angles including the motor zero.
+    The caller must establish stationary motion and use the actually sent inputs.
+    """
+    position = np.asarray(position_m, float)
+    inputs = np.asarray(applied_inputs, float)
+    if (position.shape != (2,) or inputs.shape != (len(source_positions),)
+            or not np.isfinite(position).all() or not np.isfinite(inputs).all()
+            or np.any(inputs < 0) or np.any(inputs > 1)):
+        raise ValueError('Equilibrium estimate needs finite XY metres and cosine inputs in [0, 1].')
+    return -build_actuation_matrix(position, source_positions, C_F) @ inputs
+
+
+def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_n,
+                                  applied_inputs, reference_inputs, *, max_angle_step_deg=10.):
+    """Allocate a stationary disturbance correction without changing trap shape.
+
+    The normalized quadratic objective matches A(desired)c = -disturbance,
+    with small tie-breaking penalties on movement and departure from baseline.
+    All three entries of the baseline potential Hessian are preserved exactly.
+    Bounds enforce the existing [0,1] cosine branch and an actual angle-step limit.
+    An infeasible, unstable, unvalidated or non-improving solve raises; no fallback
+    angles may be sent. Partial force cancellation is allowed when angle-limited.
+    """
+    desired = np.asarray(desired_m, float)
+    disturbance = np.asarray(disturbance_n, float)
+    current, reference = np.asarray(applied_inputs, float), np.asarray(reference_inputs, float)
+    n = len(source_positions)
+    if (desired.shape != (2,) or disturbance.shape != (2,)
+            or current.shape != (n,) or reference.shape != (n,)
+            or not all(np.isfinite(x).all() for x in (desired, disturbance, current, reference))
+            or np.any(current < 0) or np.any(current > 1)
+            or np.any(reference < 0) or np.any(reference > 1)
+            or not np.isfinite(max_angle_step_deg) or not 0 < max_angle_step_deg <= 90):
+        raise ValueError('Invalid force compensation inputs or maximum angle step (0, 90] degrees.')
+    A = build_actuation_matrix(desired, source_positions, C_F)
+    columns = [calculate_potential_hessian(desired, source_positions, C_F, row)
+               for row in np.eye(n)]
+    B = np.asarray([[H[0, 0], H[0, 1], H[1, 1]] for H in columns]).T
+    H0 = calculate_potential_hessian(desired, source_positions, C_F, reference)
+    eigenvalues = np.linalg.eigvalsh(H0)
+    if eigenvalues[0] <= 0:
+        raise ValueError('The baseline trap has no positive restoring stiffness at the desired point.')
+    hscale = max(float(np.linalg.norm(H0)), 1e-30)
+    fscale = max(float(np.linalg.norm(A)), float(np.linalg.norm(disturbance)), 1e-30)
+    M, d = A / fscale, disturbance / fscale
+    # SVD removes redundant Hessian equalities without dropping physical constraints.
+    U, s, Vt = np.linalg.svd(B / hscale, full_matrices=False)
+    rank = int(np.sum(s > max(s[0], 1e-30)*1e-10))
+    E = Vt[:rank]
+    goal = E @ reference
+    theta = np.arccos(current)
+    step = np.deg2rad(max_angle_step_deg)
+    lower = np.cos(np.minimum(np.pi/2, theta+step))
+    upper = np.cos(np.maximum(0, theta-step))
+    lower = np.maximum(0., lower)
+    def objective(c):
+        return float(np.sum((M @ c+d)**2) + 1e-8*np.sum((c-current)**2)
+                     + 1e-9*np.sum((c-reference)**2))
+    def gradient(c):
+        return 2*M.T @ (M @ c+d) + 2e-8*(c-current) + 2e-9*(c-reference)
+    result = minimize(objective, np.clip(current, lower, upper), jac=gradient,
+                      method='SLSQP', bounds=list(zip(lower, upper)),
+                      constraints=[LinearConstraint(E, goal, goal)],
+                      options={'maxiter': 300, 'ftol': 1e-13})
+    c = np.asarray(result.x, float)
+    H = calculate_potential_hessian(desired, source_positions, C_F, c)
+    if (not result.success or not np.isfinite(c).all()
+            or np.any(c < lower-1e-8) or np.any(c > upper+1e-8)
+            or np.linalg.norm(H-H0) > hscale*1e-5
+            or np.linalg.eigvalsh(H)[0] <= 0):
+        raise ValueError(f'Force allocation infeasible or failed validation: {result.message}')
+    residual = float(np.linalg.norm(A @ c+disturbance))
+    before = float(np.linalg.norm(A @ current+disturbance))
+    if before <= fscale*1e-10 or residual >= before*(1-1e-5):
+        raise ValueError('No useful force improvement within the angle-step and stiffness constraints.')
+    return c, dict(disturbance_n=disturbance, requested_force_n=-disturbance,
+                   predicted_force_n=A @ c, force_residual_n=residual,
+                   initial_force_residual_n=before, stiffness_eigenvalues=np.linalg.eigvalsh(H),
+                   H=H, allocation_iterations=int(result.nit))
 
 
 def default_target_effort(num_sources):

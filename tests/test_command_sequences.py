@@ -387,12 +387,9 @@ class CommandSequenceTests(unittest.TestCase):
         app.manual_targets, app.learned = LearnedCorrections(), LearnedCorrections()
         app.use_learned_var = Mock(get=Mock(return_value=True))
         app.tracking_count_var = Mock(get=Mock(return_value='1'))
-        app.pid_vars = {key: Mock(get=Mock(return_value=value)) for key, value in
-                        [('Alpha', '.2'), ('Limit mm', '2'), ('Slew mm/s', '5'), ('Period s', '.25')]}
+        app.force_step_var = Mock(get=Mock(return_value='10'))
+        app.force_preview_var = Mock(get=Mock(return_value=False))
         app.control_requested = True
-        app.adaptive_kp_var = Mock(get=Mock(return_value=True))
-        app.adaptive_limit_var = Mock(get=Mock(return_value=True))
-        app.kp_max_var, app.limit_max_var, app.adapt_percent_var = [Mock(get=Mock(return_value=value)) for value in ('1', '20', '50')]
         app.settling_vars = {key: Mock(get=Mock(return_value='.5')) for key in ('speed', 'window', 'hold', 'wait')}
         with patch('command_tab.load_hardware_case', return_value={}), \
              patch.object(app.commander, 'hardware_signature', return_value='hardware'), \
@@ -455,7 +452,7 @@ class CommandSequenceTests(unittest.TestCase):
             app.toggle_control()
         confirm.assert_not_called()
         self.assertTrue(app.control_requested)
-        app.feedback.enabled.set.assert_called_once()
+        app.feedback.set_enabled.assert_called_once_with(True)
 
     def test_show_all_fits_entire_image_and_even_off_frame_targets(self):
         app = CommandTab.__new__(CommandTab)

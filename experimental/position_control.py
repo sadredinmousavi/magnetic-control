@@ -184,7 +184,7 @@ class PositionFeedback:
         self.on_applied = on_applied
         return command
 
-    def initial_sent(self):
+    def initial_sent(self, result=None):
         self.last_sent_at = self.clock()
         if self.settling is not None:
             self.settling.reset(self.last_sent_at)

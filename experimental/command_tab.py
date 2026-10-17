@@ -25,7 +25,7 @@ from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay, video_crop_circle
 from camera_popout import CameraPopout, show_view_dialog
-from position_control import PositionPID, PositionFeedback
+from control_workflow import EquilibriumForceFeedback
 from settling_control import SettlingMonitor
 from hover_hint import HoverHint
 from learned_corrections import LearnedCorrections, correction_context
@@ -55,13 +55,8 @@ class CommandTab:
         self.manual_mode_active = False
         self.show_commanded_var = tk.BooleanVar(value=False)
         self.use_learned_var = tk.BooleanVar(value=True)
-        self.adaptive_kp_var = tk.BooleanVar(value=True)
-        self.kp_max_var = tk.StringVar(value='1')
-        self.adaptive_limit_var = tk.BooleanVar(value=True)
-        self.limit_max_var = tk.StringVar(value='20')
-        self.adapt_percent_var = tk.StringVar(value='50')
-        self.pid_vars = {key: tk.StringVar(value=value) for key, value in
-                         [('Alpha', '.2'), ('Limit mm', '2'), ('Slew mm/s', '5'), ('Period s', '.25')]}
+        self.force_step_var = tk.StringVar(value='10')
+        self.force_preview_var = tk.BooleanVar(value=False)
         self.settling_vars = {key: tk.StringVar(value='.5') for key in
                               ('Speed mm/s', 'Window s', 'Hold s', 'Min wait s')}
         self.precalculating = False
@@ -250,55 +245,31 @@ class CommandTab:
                                      command=self.refresh_point_corrections)
         learned_check.pack(side='left')
         self.learned_controls.append(learned_check)
-        HoverHint(learned_check, 'Replay each point at desired + its saved u. Control may refine it; '
-                  'press Save u to keep a refinement. Memory matches sequence, calibration, hardware and robot count. '
+        HoverHint(learned_check, 'Start each point at desired + its saved manual XY u. '
+                  'Force control changes magnet angles separately, not XY u. Memory matches sequence, calibration, hardware and robot count. '
                   'Export points + u for later sessions.')
-        pid_bar = tk.LabelFrame(parent, text='Incremental XY control — u = last sent u + Alpha × error')
-        pid_bar.pack(fill='x', padx=8, pady=3)
-        self.pid_entries = []
-        self.adaptive_kp_check = tk.Checkbutton(pid_bar, text='Adaptive Alpha', variable=self.adaptive_kp_var)
-        self.adaptive_kp_check.pack(side='left')
-        HoverHint(self.adaptive_kp_check, 'Adjusts Alpha after each applied response toward Arrival tolerance (default 1 mm). '
-                  'Reduces gain on overshoot/error growth. Bounded; accuracy is not guaranteed. Uncheck for fixed PID.')
-        tk.Label(pid_bar, text='Alpha max').pack(side='left')
-        max_entry = tk.Entry(pid_bar, textvariable=self.kp_max_var, width=4)
-        max_entry.pack(side='left')
-        HoverHint(max_entry, 'Upper adaptive Alpha bound; default 1. Starting Alpha must be between 0.05 and this value. Locked during a run.')
-        self.pid_entries.extend([self.adaptive_kp_check, max_entry])
-        limit_bar = tk.Frame(parent)
-        limit_bar.pack(fill='x', padx=8, pady=2)
-        limit_check = tk.Checkbutton(limit_bar, text='Adaptive limit', variable=self.adaptive_limit_var)
-        limit_check.pack(side='left')
-        HoverHint(limit_check, 'Starts at Limit mm. Each applied response at the cap with persistent error gradually expands it. '
-                  'Workspace and slew limits remain. Uncheck for a fixed correction limit.')
-        tk.Label(limit_bar, text='Limit max (mm)').pack(side='left')
-        limit_entry = tk.Entry(limit_bar, textvariable=self.limit_max_var, width=5)
-        limit_entry.pack(side='left')
-        HoverHint(limit_entry, 'Maximum adaptive correction magnitude, default 20 mm. This is a ceiling, not a jump command. '
-                  'Choose for your hardware; must be at least Limit mm. Locked during a run.')
-        self.pid_entries.extend([limit_check, limit_entry])
-        tk.Label(limit_bar, text='Adapt %').pack(side='left', padx=(8,2))
-        adapt_entry = tk.Entry(limit_bar, textvariable=self.adapt_percent_var, width=4)
-        adapt_entry.pack(side='left')
-        HoverHint(adapt_entry, 'Maximum Alpha increase per valid response (default 50%, range >0 to 100%). '
-                  'Tapers near tolerance. Limit expansion uses half this rate. No four-cycle wait.')
-        self.pid_entries.append(adapt_entry)
-        for key, variable in self.pid_vars.items():
-            tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
-            entry = tk.Entry(pid_bar, textvariable=variable, width=5)
-            entry.pack(side='left')
-            self.pid_entries.append(entry)
-        settling_bar = tk.Frame(parent)
-        settling_bar.pack(fill='x', padx=8, pady=2)
-        tk.Label(settling_bar, text='Settle before correction:').pack(side='left')
+        settling_bar = tk.LabelFrame(parent, text='Equilibrium force compensation — one stationary robot')
+        settling_bar.pack(fill='x', padx=8, pady=3)
+        self.force_entries = []
         for key, variable in self.settling_vars.items():
             tk.Label(settling_bar, text=key).pack(side='left', padx=(6,2))
             entry = tk.Entry(settling_bar, textvariable=variable, width=4)
             entry.pack(side='left')
-            self.pid_entries.append(entry)
+            self.force_entries.append(entry)
             HoverHint(entry, 'Every robot must stay below the speed threshold for Hold s. Window s smooths velocity '
                       'over at least three frames. Min wait s starts after each sent command. Then one correction uses '
-                      'the average settled position. Settings are locked during a run.')
+                      'the average settled position and last sent magnet angles to estimate disturbance. '
+                      'Default speed is 0.5 mm/s. No error integration or PID gains. Locked during a run.')
+        tk.Label(settling_bar, text='Max angle step (deg)').pack(side='left', padx=(6, 2))
+        force_step = tk.Entry(settling_bar, textvariable=self.force_step_var, width=4)
+        force_step.pack(side='left')
+        preview = tk.Checkbutton(settling_bar, text='Preview only', variable=self.force_preview_var)
+        preview.pack(side='left')
+        self.force_entries.extend([force_step, preview])
+        HoverHint(force_step, 'Maximum model-angle change per stationary correction; default 10 degrees. '
+                  'The solver preserves baseline stiffness and holds if no feasible improvement exists.')
+        HoverHint(preview, 'Calculate and display a force correction after settling without sending it. '
+                  'Initial path and manual commands still move normally.')
         self.control_details = self.build_control_details(parent)
         recording_bar = tk.Frame(parent)
         recording_bar.pack(fill='x', padx=8, pady=3)
@@ -713,19 +684,20 @@ class CommandTab:
                 "desired_angle_deg": "" if self.active_index is None or self.steps[self.active_index].angle_deg is None else self.steps[self.active_index].angle_deg,
                 'control_enabled': int(feedback.enabled.is_set()) if feedback is not None else 0,
                 'control_state': control_data.get('state', 'Off'),
-                'control_kp': control_data.get('kp', ''),
                 'control_mode': control_data.get('mode', ''),
-                'control_alpha': control_data.get('kp', ''),
                 'robot_speed_mm_s': control_data.get('robot_speed_mm_s', ''),
                 'settling_state': control_data.get('settling_state', ''),
                 'settle_hold_elapsed_s': control_data.get('settle_hold_elapsed_s', ''),
                 'settled_xy_mm': json.dumps(control_data.get('settled_xy_mm')),
                 'settled': control_data.get('settled', 0),
-                'adaptive_kp': int(control_data.get('adaptive', False)),
-                'kp_adaptation': control_data.get('adaptation', ''),
-                'control_limit_mm': control_data.get('limit_mm', ''),
-                'adaptive_limit': int(control_data.get('adaptive_limit', False)),
-                'limit_adaptation': control_data.get('limit_adaptation', ''),
+                'disturbance_n': json.dumps(control_data.get('disturbance_n')),
+                'requested_force_n': json.dumps(control_data.get('requested_force_n')),
+                'predicted_force_n': json.dumps(control_data.get('predicted_force_n')),
+                'force_residual_n': control_data.get('force_residual_n', ''),
+                'magnet_cosine_inputs': json.dumps(control_data.get('magnet_inputs')),
+                'stiffness_eigenvalues_n_m': json.dumps(control_data.get('stiffness_eigenvalues')),
+                'control_calculation_time_s': control_data.get('calculation_time_s', ''),
+                'force_compensated': int(control_data.get('force_compensated', False)),
                 'correction_x_mm': (control_data.get('correction_mm') or ['', ''])[0],
                 'correction_y_mm': (control_data.get('correction_mm') or ['', ''])[1],
                 'commanded_x_mm': (control_data.get('commanded_xy_mm') or ['', ''])[0],
@@ -994,17 +966,17 @@ class CommandTab:
         self.control_requested = enabled
         self.control_button.config(text='Control on' if enabled else 'Control off')
         if self.feedback is not None:
-            (self.feedback.enabled.set if enabled else self.feedback.enabled.clear)()
+            self.feedback.set_enabled(enabled)
 
     def build_control_details(self, parent):
-        panel = tk.LabelFrame(parent, text='Control details (mm)')
+        panel = tk.LabelFrame(parent, text='Control details (XY mm; model force µN)')
         panel.pack(fill='x', padx=8, pady=3)
         fields = {}
         rows = (
             (('desired', 'Desired'), ('measured', 'Measured'), ('u', 'u'), ('commanded', 'Commanded')),
             (('ratio', 'Ratio'), ('angle', 'Angle'), ('speed', 'Speed mm/s'),
              ('hold', 'Hold'), ('state', 'State')),
-            (('proposed', 'Proposed'), ('alpha', 'Alpha'), ('limit', 'Limit mm')),
+            (('disturbance', 'Disturbance µN'), ('requested_force', 'Requested µN'), ('residual', 'Residual µN')),
             (('calculated', 'Calculated motors'), ('sent', 'Last sent motors')),
         )
         for row in rows:
@@ -1032,9 +1004,9 @@ class CommandTab:
         sent = '—' if not angles else ', '.join(f'{angle:.1f}' for angle in angles)
         calculated = data.get('calculated_angles', '')
         calculated = '—' if not calculated else ', '.join(f'{angle:.1f}' for angle in calculated)
-        kp = '—' if data.get('kp') is None else f"{data['kp']:.3f}"
-        adaptation = data.get('adaptation', '').replace('Kp', 'Alpha')
-        limit = '—' if data.get('limit_mm') is None else f"{data['limit_mm']:.2f}"
+        def force(key):
+            value = data.get(key)
+            return '—' if value is None else ', '.join(f'{v*1e6:.3g}' for v in np.atleast_1d(value))
         speed = '—' if data.get('robot_speed_mm_s') is None else f"{data['robot_speed_mm_s']:.2f}"
         hold = f"{data.get('settle_hold_elapsed_s', 0):.1f}/{data.get('settle_hold_s', 0):.1f} s"
         values = dict(
@@ -1043,9 +1015,7 @@ class CommandTab:
             ratio=str(data.get('ratio', '—')), angle=str(data.get('angle_deg', 'Auto')),
             speed=f"{speed} ({data.get('settle_speed_limit_mm_s', '—')})",
             hold=hold, state=data.get('state', 'Control off'),
-            proposed=f"({xy('proposed_xy_mm')})",
-            alpha=f"{kp}: {adaptation}".rstrip(': '),
-            limit=f"{limit}: {data.get('limit_adaptation', '')}".rstrip(': '),
+            disturbance=force('disturbance_n'), requested_force=force('requested_force_n'), residual=force('force_residual_n'),
             calculated=calculated, sent=sent)
         for key, text in values.items():
             widget, hint = fields[key]
@@ -1149,6 +1119,10 @@ class CommandTab:
             index = self.active_index if self.running else (int(selection[0]) if selection else self.active_index)
             if index is None:
                 raise ValueError('Run a point and select it before saving its u.')
+            if (getattr(self, 'feedback', None) is not None
+                    and getattr(self.feedback, 'current_step', None) is self.steps[index]
+                    and self.feedback.snapshot().get('force_compensated')):
+                raise ValueError('The applied correction is in magnet inputs, not XY u. Its forces and angles are in the tracking CSV.')
             correction = self.latest_applied.point(context, index)
             if correction is None:
                 raise ValueError('No command has been sent for this point in the current setup yet.')
@@ -1328,19 +1302,13 @@ class CommandTab:
                     prepared = True
             arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
             feedback = None
-            if hasattr(self, 'pid_vars'):
-                pid = PositionPID(kp=float(self.pid_vars['Alpha'].get()), incremental=True,
-                                  limit_mm=float(self.pid_vars['Limit mm'].get()),
-                                  slew_mm_s=float(self.pid_vars['Slew mm/s'].get()), period_s=float(self.pid_vars['Period s'].get()),
-                                  adaptive=self.adaptive_kp_var.get(), tolerance_mm=arrival_gate.tolerance_mm,
-                                  kp_max=float(self.kp_max_var.get()), adaptive_limit=self.adaptive_limit_var.get(),
-                                  limit_max_mm=float(self.limit_max_var.get()),
-                                  adapt_percent=float(self.adapt_percent_var.get()))
+            if hasattr(self, 'force_step_var'):
                 def validate_correction(target):
                     self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
                 settling = SettlingMonitor(*[float(variable.get()) for variable in self.settling_vars.values()])
                 arrival_gate.settling = settling
-                feedback = PositionFeedback(pid, validate=validate_correction, settling=settling, manual=manual)
+                feedback = EquilibriumForceFeedback(validate=validate_correction, settling=settling, manual=manual,
+                    max_angle_step_deg=float(self.force_step_var.get()), preview_only=self.force_preview_var.get())
                 if self.control_requested and not manual:
                     feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)
@@ -1359,8 +1327,6 @@ class CommandTab:
                 if np.linalg.norm(corrections[index]) > 0:
                     target = np.asarray(self.steps[index].target_xy_m) + np.asarray(corrections[index])/1000
                     self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
-                    if feedback is not None and not manual:
-                        feedback.pid.seed_output(corrections[index])
             if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
                 raise ValueError("Connect the live camera and wait for a fresh frame before running.")
             port = self.commander.port_provider()
@@ -1392,7 +1358,7 @@ class CommandTab:
             self.show_point_correction(index, correction)
         for widget in getattr(self, 'learned_controls', []):
             widget.config(state='disabled')
-        for entry in getattr(self, 'pid_entries', []):
+        for entry in getattr(self, 'force_entries', []):
             entry.config(state='disabled')
         if hasattr(self, 'precalculate_button'):
             self.precalculate_button.config(state='disabled')
@@ -1510,7 +1476,7 @@ class CommandTab:
                     self.running = False
                     for widget in getattr(self, 'learned_controls', []):
                         widget.config(state='normal')
-                    for entry in getattr(self, 'pid_entries', []):
+                    for entry in getattr(self, 'force_entries', []):
                         entry.config(state='normal')
                     if getattr(self, 'feedback', None) is not None:
                         self.feedback.enabled.clear()
@@ -1547,6 +1513,8 @@ class CommandTab:
         commanded = target + correction
         if self.running and self.feedback is not None:
             data = self.feedback.snapshot()
+            if data.get('force_compensated'):
+                return None  # Direct magnet-force corrections have no unique commanded XY.
             if data.get('desired_xy_mm') is not None and np.allclose(data['desired_xy_mm'], target):
                 if data.get('commanded_xy_mm') is not None:
                     commanded = np.asarray(data['commanded_xy_mm'])

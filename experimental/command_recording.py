@@ -55,7 +55,8 @@ TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot
                    'roi_radius_px sequence_running arrival_ready arrival_max_error_mm '
                    'desired_ratio desired_angle_deg recording_frame recording_time_s '
                    'crop_center_x_px crop_center_y_px crop_radius_px '
-                   'control_enabled control_state control_mode control_alpha control_kp adaptive_kp kp_adaptation control_limit_mm adaptive_limit limit_adaptation '
+                   'control_enabled control_state control_mode disturbance_n requested_force_n predicted_force_n force_residual_n '
+                   'magnet_cosine_inputs stiffness_eigenvalues_n_m control_calculation_time_s force_compensated '
                    'robot_speed_mm_s settling_state settle_hold_elapsed_s settled_xy_mm settled '
                    'correction_x_mm correction_y_mm commanded_x_mm commanded_y_mm '
                    'proposed_xy_mm calculated_motor_angles_deg sent_motor_angles_deg motor_sent_time_s orientation_measured_deg').split()

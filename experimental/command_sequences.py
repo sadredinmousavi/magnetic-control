@@ -144,7 +144,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
                 arrival_gate.arm(step.target_xy_m, preserve_next=True)
             report("sent", index, result)
             if feedback is not None:
-                feedback.initial_sent()
+                feedback.initial_sent(result)
                 feedback.publish(commanded_xy_mm=(np.asarray(command) * 1000).tolist(), correction_mm=correction.tolist(),
                                  sent_angles=[float(v) for v in result['angles_deg']], sent_time_s=feedback.clock(), state='Sent')
 

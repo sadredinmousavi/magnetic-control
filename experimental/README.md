@@ -109,13 +109,18 @@ Partial or cancelled results are not used. Stop cancels after the current solver
 returns; calibration controls are locked while preparing. Without precalculation,
 commands retain fresh per-point synthesis. Arrival, manual Next, waits and motor
 zero settings apply in either mode.
-The Commands pop-out uses short captions: Points, First, Next/Finish, Control,
+The Commands pop-out uses grouped controls: First, Selected, Next/Finish, Manual, Control,
 Stop. First starts the sequence at point 1, then waits for your Next
 press at each step; it is disabled during execution/precalculation. Control is
-an opt-in bounded XY PID mode, disabled by default. It retains row ratio/angle;
-orientation feedback is not yet measurable. Main/pop-out Control details and
-CSV include desired, measured, proposed and commanded XY plus calculated/sent
-motor angles. See [POSITION_CONTROL.md](POSITION_CONTROL.md) for limits and behavior.
+an opt-in equilibrium-force compensator, disabled by default. For one robot,
+it waits for speed below the configurable threshold (default 0.5 mm/s), a
+continuous stationary hold, and fresh tracking, then estimates disturbance from
+the last sent angles and reallocates cosine inputs at the desired point.
+It preserves baseline trap stiffness and bounds angle changes. Main/pop-out
+details show model disturbance, requested force, residual and calculated/sent
+angles. Preview only computes without sending corrections. The former PID,
+Alpha and adaptive-limit settings have been removed from GUI005.
+See [POSITION_CONTROL.md](POSITION_CONTROL.md) for the algorithm and diagnostics.
 In Commands, load a file from `experimental/xy_sequences`:
 
 Commands uses the loaded/applied calibration ROI, area and contrast by default;
@@ -129,8 +134,8 @@ Place ROI / Clear ROI also work in the camera pop-out. Its synchronized Robots,
 ROI px (radius), Area
 and Contrast inputs, plus the ROI visibility toggle. These inputs are locked
 during execution/precalculation; Next/Stop remain available.
-Clearing or replacing the
-ROI is blocked during execution/precalculation. Camera resolution changes require
+Clearing the ROI stops tracking and cancels active execution; replacing it
+requires an idle run. Camera resolution changes require
 placing it again. The large instruction paragraph is now hover help on Help ?.
 
 `[x, y] | wait_seconds | motor_zero_degrees`
@@ -160,11 +165,11 @@ The preview reports sequence and pin extents in mm; the origin is the captured
 robot Center, which need not equal the geometric rectangle center.
 The table displays XY in millimetres. Commands use each row's ratio/angle and calculate fresh
 motor angles for each point; the wait starts after sending that pose.
-The row wait is a minimum motor hold. Next enables immediately after a motor pose
-is sent, without waiting for arrival. An early press is queued until the minimum
+The row wait is a minimum motor hold. Next can queue during calculation,
+without waiting for arrival. An early press is queued until the minimum
 hold finishes. The last or single selected point uses Finish. There is no automatic
 advance or queued permission for subsequent rows. Tracking tolerance/hold remain
-arrival indicators and PID deadband settings, not permission to advance. Missing
+arrival indicators and force-control position tolerance, not permission to advance. Missing
 robot detection pauses corrections but does not revoke manual Next. Camera loss,
 controller disconnection and Stop still cancel execution.
 Run requires a live camera, connected controller, complete robot axes, and each
