@@ -454,6 +454,25 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertTrue(app.control_requested)
         app.feedback.set_enabled.assert_called_once_with(True)
 
+    def test_gui_constructs_continuous_force_pid_with_correct_unit_conversion(self):
+        app = self.run_app()
+        app.force_step_var = Mock(get=Mock(return_value='10'))
+        app.force_preview_var = Mock(get=Mock(return_value=False))
+        app.force_continuous_var = Mock(get=Mock(return_value=True))
+        app.control_requested = True
+        app.force_pid_settings = {key: Mock(get=Mock(return_value=value)) for key, value in (
+            ('Kp', '.01'), ('Ki', '0'), ('Kv', '.02'), ('Period s', '.25'),
+            ('Velocity filter s', '.15'), ('Rate deg/s', '20'), ('I max µN', '.5'), ('Deadband deg', '.1'))}
+        app.settling_vars = {key: Mock(get=Mock(return_value='.5')) for key in ('speed', 'window', 'hold', 'wait')}
+        with patch('command_tab.threading.Thread'), patch('command_tab.load_hardware_case', return_value={}):
+            app.run_selected()
+        self.assertTrue(app.feedback.continuous)
+        self.assertTrue(app.feedback.enabled.is_set())
+        self.assertAlmostEqual(app.feedback.pid.kp, 1e-5)
+        self.assertEqual(app.feedback.pid.ki, 0)
+        self.assertAlmostEqual(app.feedback.pid.kv, 2e-5)
+        self.assertAlmostEqual(app.feedback.pid.integral_limit, 5e-7)
+
     def test_show_all_fits_entire_image_and_even_off_frame_targets(self):
         app = CommandTab.__new__(CommandTab)
         app.frame = np.full((400, 400, 3), 240, np.uint8)

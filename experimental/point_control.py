@@ -14,7 +14,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from case_loader import load_case, normalize_case_name
-from control_workflow import calculate_point_control, calculate_equilibrium_force_control
+from control_workflow import calculate_point_control, calculate_equilibrium_force_control, calculate_force_pid_control
 
 
 def hardware_case_name(case_name):
@@ -39,6 +39,14 @@ class PointCommander:
         self.lock = threading.Lock()
         self.prepared_axes = {}
         self.prepared_points = {}
+        self.motor_repetitions = 3
+
+    def set_motor_repetitions(self, repetitions):
+        if repetitions not in (1, 2, 3) or int(repetitions) != repetitions:
+            raise ValueError('Motor command repetitions must be 1, 2 or 3.')
+        # UI updates never wait for the solver lock. Each transmission takes a
+        # single snapshot, so changing this cannot alter a batch halfway through.
+        self.motor_repetitions = int(repetitions)
 
     @staticmethod
     def point_key(target, ratio, angle):
@@ -114,9 +122,24 @@ class PointCommander:
                                             ratio=ratio, angle_deg=angle_deg),
                          preview_only=preview_only)
 
+    def move_force_pid(self, case_name, target_xy_m, measured_xy_m, applied_angles_deg,
+                       reference_inputs, pid_force_n, disturbance_n, *, stationary_position_m=None,
+                       max_angle_step_deg=10., ratio=1., angle_deg=None, rebase_integral=False,
+                       zero_angle_deg=None, active=lambda: True, on_sent=None, on_calculated=None,
+                       on_held=None, preview_only=False, motor_deadband_deg=.1):
+        return self.move(case_name, target_xy_m, zero_angle_deg=zero_angle_deg, active=active,
+                         on_sent=on_sent, on_calculated=on_calculated, preview_only=preview_only,
+                         on_held=on_held, unchanged_angles_deg=applied_angles_deg,
+                         motor_deadband_deg=motor_deadband_deg,
+                         force_request=dict(measured_xy_m=measured_xy_m, applied_angles_deg=applied_angles_deg,
+                            reference_inputs=reference_inputs, pid_force_n=pid_force_n, disturbance_n=disturbance_n,
+                            stationary_position_m=stationary_position_m, max_angle_step_deg=max_angle_step_deg,
+                            ratio=ratio, angle_deg=angle_deg, rebase_integral=rebase_integral))
+
     def move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
              settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False, prepared_point=False,
-             on_calculated=None, force_request=None, preview_only=False):
+             on_calculated=None, force_request=None, preview_only=False, on_held=None,
+             unchanged_angles_deg=None, motor_deadband_deg=0.):
         """Calculate fresh motor angles, send them, then wait interruptibly.
 
         Cancellation skips unsent commands; it cannot undo an already sent pose.
@@ -137,7 +160,8 @@ class PointCommander:
             if port is None or not getattr(port, "is_open", False):
                 raise RuntimeError("Connect the serial controller in Connections first.")
             if force_request is not None:
-                result = calculate_equilibrium_force_control(load_hardware_case(case_name), target_xy_m, **force_request)
+                solver = calculate_force_pid_control if 'pid_force_n' in force_request else calculate_equilibrium_force_control
+                result = solver(load_hardware_case(case_name), target_xy_m, **force_request)
             elif prepared_point:
                 name = hardware_case_name(case_name)
                 cached = self.prepared_points.get(name)
@@ -166,7 +190,15 @@ class PointCommander:
             angles = np.asarray(result["angles_deg"], dtype=float)
             if angles.ndim != 1 or not angles.size or not np.isfinite(angles).all():
                 raise ValueError("Calculation did not produce valid motor angles.")
-            moveArray(port, angles, 0, zero_angle_deg)
+            if (unchanged_angles_deg is not None
+                    and np.max(np.abs(angles-np.asarray(unchanged_angles_deg))) <= motor_deadband_deg):
+                if on_held is not None:
+                    # Use the ACTUAL held pose for anti-windup, not the proposed angles.
+                    held = dict(result, predicted_force_n=result['applied_force_n'],
+                                force_residual_n=result['applied_force_residual_n'])
+                    on_held(held)
+                return result
+            moveArray(port, angles, 0, zero_angle_deg, repetitions=self.motor_repetitions)
             if on_sent is not None:
                 on_sent(result)
             deadline = time.monotonic() + settle_seconds

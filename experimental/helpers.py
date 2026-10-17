@@ -46,13 +46,15 @@ def setLedStatus(port, id, ls):
     return
 
 
-def moveArray(port, angs, wait, zeroAng):
+def moveArray(port, angs, wait, zeroAng, *, repetitions=3):
+    """Send each identical motor target 1, 2 or 3 times (legacy default: 3)."""
+    if repetitions not in (1, 2, 3) or int(repetitions) != repetitions:
+        raise ValueError('Motor command repetitions must be 1, 2 or 3.')
     for key, value in enumerate(angs):
-        move(port, key + 1, value + zeroAng)
-        sleep(0.01)
-        move(port, key + 1, value + zeroAng)
-        sleep(0.01)
-        move(port, key + 1, value + zeroAng)
+        for attempt in range(int(repetitions)):
+            if attempt:
+                sleep(0.01)
+            move(port, key + 1, value + zeroAng)
     sleep(wait)
 
     return

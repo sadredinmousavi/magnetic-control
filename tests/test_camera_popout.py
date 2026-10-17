@@ -28,7 +28,7 @@ class CameraPopoutTests(unittest.TestCase):
              patch('command_tab.tk.Label', side_effect=lambda *args, **kwargs: Mock()) as labels, \
              patch('command_tab.HoverHint', side_effect=lambda *args: Mock()):
             fields = app.build_control_details(Mock())
-        self.assertEqual(len(fields), 14)
+        self.assertEqual(len(fields), 15)
         values = [call for call in labels.call_args_list if 'width' in call.kwargs]
         self.assertTrue(all(call.kwargs['width'] == 1 and call.kwargs['height'] == 1 for call in values))
         app.feedback = Mock()

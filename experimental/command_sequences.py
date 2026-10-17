@@ -132,6 +132,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
             arrival_gate.prepare_point(preserve_next=index == 0)
         report("calculating", index, None)
         correction = np.zeros(2) if initial_corrections is None else np.asarray(initial_corrections[index], float)
+        continuous = feedback is not None and bool(getattr(feedback, 'continuous', False))
         command = tuple(np.asarray(step.target_xy_m) + correction / 1000)
         if feedback is not None:
             command = feedback.begin_point(step, correction,
@@ -141,7 +142,8 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
         def sent(result):
             on_correction(index, correction.tolist())
             if arrival_gate is not None:
-                arrival_gate.arm(step.target_xy_m, preserve_next=True)
+                arrival_gate.arm(step.target_xy_m, preserve_next=True,
+                                 **({'minimum_wait_s': step.wait_seconds} if continuous else {}))
             report("sent", index, result)
             if feedback is not None:
                 feedback.initial_sent(result)
@@ -150,7 +152,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
 
         result = commander.move(
             case_name, command, ratio=step.ratio, angle_deg=step.angle_deg,
-            settle_seconds=step.wait_seconds, zero_angle_deg=step.zero_angle_deg,
+            settle_seconds=0 if continuous else step.wait_seconds, zero_angle_deg=step.zero_angle_deg,
             active=active, on_sent=sent,
             **({'prepared_point': True} if prepared else {}),
             **({'on_calculated': lambda result: feedback.publish(calculated_angles=[float(v) for v in result['angles_deg']])}

@@ -26,6 +26,7 @@ from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay, video_crop_circle
 from camera_popout import CameraPopout, show_view_dialog
 from control_workflow import EquilibriumForceFeedback
+from functions_main import MagneticForcePID
 from settling_control import SettlingMonitor
 from hover_hint import HoverHint
 from learned_corrections import LearnedCorrections, correction_context
@@ -47,6 +48,9 @@ class CommandTab:
         self.calibration_revision = None
         self.roi_placement_var = tk.BooleanVar(value=False)
         self.control_requested = False
+        self.repeat_motors_var = tk.BooleanVar(value=True)
+        self.motor_repeat_count_var = tk.StringVar(value='3')
+        self.motor_repeat_selectors = []
         self.learned = LearnedCorrections()
         self.latest_applied = LearnedCorrections()
         self.manual_targets = LearnedCorrections()
@@ -57,6 +61,10 @@ class CommandTab:
         self.use_learned_var = tk.BooleanVar(value=True)
         self.force_step_var = tk.StringVar(value='10')
         self.force_preview_var = tk.BooleanVar(value=False)
+        self.force_continuous_var = tk.BooleanVar(value=True)
+        self.force_pid_settings = {key: tk.StringVar(value=value) for key, value in (
+            ('Kp', '.01'), ('Ki', '0'), ('Kv', '.01'), ('Period s', '.25'),
+            ('Velocity filter s', '.15'), ('Rate deg/s', '20'), ('I max µN', '.5'), ('Deadband deg', '.1'))}
         self.settling_vars = {key: tk.StringVar(value='.5') for key in
                               ('Speed mm/s', 'Window s', 'Hold s', 'Min wait s')}
         self.precalculating = False
@@ -220,6 +228,9 @@ class CommandTab:
         self.tracking_status.pack(fill="x", padx=10)
         learned_bar = tk.Frame(parent)
         learned_bar.pack(fill='x', padx=8, pady=2)
+        transmission = tk.LabelFrame(learned_bar, text='Motor commands')
+        transmission.pack(side='right', padx=4)
+        self.build_motor_repeat_controls(transmission)
         self.manual_check = tk.Checkbutton(learned_bar, text='Manual mode', variable=self.manual_mode_var,
                                            command=self.change_manual_mode)
         self.manual_check.pack(side='left')
@@ -248,7 +259,7 @@ class CommandTab:
         HoverHint(learned_check, 'Start each point at desired + its saved manual XY u. '
                   'Force control changes magnet angles separately, not XY u. Memory matches sequence, calibration, hardware and robot count. '
                   'Export points + u for later sessions.')
-        settling_bar = tk.LabelFrame(parent, text='Equilibrium force compensation — one stationary robot')
+        settling_bar = tk.LabelFrame(parent, text='Disturbance learning — stationary threshold (one robot)')
         settling_bar.pack(fill='x', padx=8, pady=3)
         self.force_entries = []
         for key, variable in self.settling_vars.items():
@@ -259,7 +270,8 @@ class CommandTab:
             HoverHint(entry, 'Every robot must stay below the speed threshold for Hold s. Window s smooths velocity '
                       'over at least three frames. Min wait s starts after each sent command. Then one correction uses '
                       'the average settled position and last sent magnet angles to estimate disturbance. '
-                      'Default speed is 0.5 mm/s. No error integration or PID gains. Locked during a run.')
+                      'Default speed is 0.5 mm/s. In continuous PID this gates disturbance learning only; '
+                      'braking remains active during motion. Locked during a run.')
         tk.Label(settling_bar, text='Max angle step (deg)').pack(side='left', padx=(6, 2))
         force_step = tk.Entry(settling_bar, textvariable=self.force_step_var, width=4)
         force_step.pack(side='left')
@@ -268,8 +280,24 @@ class CommandTab:
         self.force_entries.extend([force_step, preview])
         HoverHint(force_step, 'Maximum model-angle change per stationary correction; default 10 degrees. '
                   'The solver preserves baseline stiffness and holds if no feasible improvement exists.')
-        HoverHint(preview, 'Calculate and display a force correction after settling without sending it. '
+        HoverHint(preview, 'Calculate and display force corrections without sending them. '
                   'Initial path and manual commands still move normally.')
+        pid_bar = tk.LabelFrame(parent, text='Force PID — gains in µN, mm and seconds (Ki=0 starts with PD)')
+        pid_bar.pack(fill='x', padx=8, pady=2)
+        self.continuous_control_check = tk.Checkbutton(pid_bar, text='Continuous PID', variable=self.force_continuous_var)
+        self.continuous_control_check.pack(side='left')
+        self.force_entries.append(self.continuous_control_check)
+        HoverHint(self.continuous_control_check, 'Checked: PID force allocation during motion, plus a held disturbance estimate. '
+                  'Unchecked: the earlier stationary-only force compensation. Mode/settings are selected before a run.')
+        for key, variable in self.force_pid_settings.items():
+            tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
+            entry = tk.Entry(pid_bar, textvariable=variable, width=5)
+            entry.pack(side='left')
+            self.force_entries.append(entry)
+            HoverHint(entry, 'Kp: µN/mm; Ki: µN/(mm·s); Kv: µN·s/mm, damping from filtered measured velocity. '
+                      'These are starting gains, not hardware-tuned. Period is a maximum update cadence, not guaranteed timing. '
+                      'Rate bounds angle changes per elapsed second; deadband suppresses motor-command chatter. '
+                      'Integral is bounded and freezes when requested force is not achievable.')
         self.control_details = self.build_control_details(parent)
         recording_bar = tk.Frame(parent)
         recording_bar.pack(fill='x', padx=8, pady=3)
@@ -698,6 +726,16 @@ class CommandTab:
                 'stiffness_eigenvalues_n_m': json.dumps(control_data.get('stiffness_eigenvalues')),
                 'control_calculation_time_s': control_data.get('calculation_time_s', ''),
                 'force_compensated': int(control_data.get('force_compensated', False)),
+                'velocity_xy_mm_s': json.dumps(control_data.get('velocity_xy_mm_s')),
+                'position_error_mm': json.dumps(control_data.get('position_error_mm')),
+                'pid_force_n': json.dumps(control_data.get('pid_force_n')),
+                'integral_force_n': json.dumps(control_data.get('integral_force_n')),
+                'held_disturbance_n': json.dumps(control_data.get('held_disturbance_n')),
+                'observation_age_s': control_data.get('observation_age_s', ''),
+                'control_cycle_time_s': control_data.get('control_cycle_time_s', ''),
+                'force_kp_n_m': control_data.get('force_kp_n_m', ''),
+                'force_ki_n_m_s': control_data.get('force_ki_n_m_s', ''),
+                'force_kv_n_s_m': control_data.get('force_kv_n_s_m', ''),
                 'correction_x_mm': (control_data.get('correction_mm') or ['', ''])[0],
                 'correction_y_mm': (control_data.get('correction_mm') or ['', ''])[1],
                 'commanded_x_mm': (control_data.get('commanded_xy_mm') or ['', ''])[0],
@@ -917,6 +955,30 @@ class CommandTab:
         self.popout_manual_check.pack(side='left', padx=2)
         HoverHint(self.popout_manual_check, 'Manual: click to set commanded XY, use Selected to send, then Save u to keep it. '
                   'During a run, clicks send updates to the active point. Modes can change while running.')
+        self.build_motor_repeat_controls(parent)
+        self.popout_continuous_check = tk.Checkbutton(parent, text='PID', variable=self.force_continuous_var,
+                                                      state=self.continuous_control_check.cget('state'))
+        self.popout_continuous_check.pack(side='left', padx=2)
+
+    def build_motor_repeat_controls(self, parent):
+        repeat = tk.Checkbutton(parent, text='Repeat', variable=self.repeat_motors_var,
+                                command=self.update_motor_repeats)
+        repeat.pack(side='left', padx=(4, 0))
+        count = ttk.Combobox(parent, values=('2', '3'), textvariable=self.motor_repeat_count_var,
+                             state='readonly' if self.repeat_motors_var.get() else 'disabled', width=2)
+        count.pack(side='left', padx=(0, 3))
+        count.bind('<<ComboboxSelected>>', lambda event: self.update_motor_repeats())
+        self.motor_repeat_selectors.append(count)
+        HoverHint(repeat, 'Checked: send each motor target 2 or 3 times, with 10 ms between copies. '
+                  'Unchecked: send once. Shared with Calibration axis moves and all Commands moves. '
+                  'Applies to the next transmission; repeats do not recalculate or add to the angle.')
+
+    def update_motor_repeats(self):
+        count = int(self.motor_repeat_count_var.get()) if self.repeat_motors_var.get() else 1
+        self.commander.set_motor_repetitions(count)
+        self.motor_repeat_selectors = [widget for widget in self.motor_repeat_selectors if widget.winfo_exists()]
+        for widget in self.motor_repeat_selectors:
+            widget.config(state='readonly' if self.repeat_motors_var.get() else 'disabled')
 
     def build_popout_control_details(self, parent):
         options = tk.Frame(parent)
@@ -940,6 +1002,7 @@ class CommandTab:
 
     def refresh_popout_control_details(self, label):
         self.popout_manual_check.config(state='disabled' if self.precalculating else 'normal')
+        self.popout_continuous_check.config(state=self.continuous_control_check.cget('state'))
         for entry, source in self.popout_arrival_entries:
             entry.config(state=source.cget('state'))
         self.refresh_control_details(label)
@@ -976,7 +1039,8 @@ class CommandTab:
             (('desired', 'Desired'), ('measured', 'Measured'), ('u', 'u'), ('commanded', 'Commanded')),
             (('ratio', 'Ratio'), ('angle', 'Angle'), ('speed', 'Speed mm/s'),
              ('hold', 'Hold'), ('state', 'State')),
-            (('disturbance', 'Disturbance µN'), ('requested_force', 'Requested µN'), ('residual', 'Residual µN')),
+            (('disturbance', 'Disturbance µN'), ('feedback_force', 'PID µN'),
+             ('requested_force', 'Requested µN'), ('residual', 'Residual µN')),
             (('calculated', 'Calculated motors'), ('sent', 'Last sent motors')),
         )
         for row in rows:
@@ -1015,7 +1079,8 @@ class CommandTab:
             ratio=str(data.get('ratio', '—')), angle=str(data.get('angle_deg', 'Auto')),
             speed=f"{speed} ({data.get('settle_speed_limit_mm_s', '—')})",
             hold=hold, state=data.get('state', 'Control off'),
-            disturbance=force('disturbance_n'), requested_force=force('requested_force_n'), residual=force('force_residual_n'),
+            disturbance=force('disturbance_n'), feedback_force=force('pid_force_n'),
+            requested_force=force('requested_force_n'), residual=force('force_residual_n'),
             calculated=calculated, sent=sent)
         for key, text in values.items():
             widget, hint = fields[key]
@@ -1307,8 +1372,18 @@ class CommandTab:
                     self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
                 settling = SettlingMonitor(*[float(variable.get()) for variable in self.settling_vars.values()])
                 arrival_gate.settling = settling
+                pid = None
+                continuous = getattr(self, 'force_continuous_var', None) is not None and self.force_continuous_var.get()
+                angle_rate, deadband = 20., .1
+                if hasattr(self, 'force_pid_settings'):
+                    values = {key: float(variable.get()) for key, variable in self.force_pid_settings.items()}
+                    pid = MagneticForcePID(kp=values['Kp']*1e-3, ki=values['Ki']*1e-3, kv=values['Kv']*1e-3,
+                        velocity_tau_s=values['Velocity filter s'], integral_limit_n=values['I max µN']*1e-6,
+                        period_s=values['Period s'])
+                    angle_rate, deadband = values['Rate deg/s'], values['Deadband deg']
                 feedback = EquilibriumForceFeedback(validate=validate_correction, settling=settling, manual=manual,
-                    max_angle_step_deg=float(self.force_step_var.get()), preview_only=self.force_preview_var.get())
+                    max_angle_step_deg=float(self.force_step_var.get()), preview_only=self.force_preview_var.get(),
+                    continuous=continuous, pid=pid, angle_rate_deg_s=angle_rate, motor_deadband_deg=deadband)
                 if self.control_requested and not manual:
                     feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)

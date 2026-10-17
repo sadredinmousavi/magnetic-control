@@ -601,7 +601,8 @@ def estimate_equilibrium_disturbance(position_m, source_positions, C_F, applied_
 
 
 def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_n,
-                                  applied_inputs, reference_inputs, *, max_angle_step_deg=10.):
+                                  applied_inputs, reference_inputs, *, max_angle_step_deg=10.,
+                                  allocation_position_m=None, allow_no_improvement=False):
     """Allocate a stationary disturbance correction without changing trap shape.
 
     The normalized quadratic objective matches A(desired)c = -disturbance,
@@ -622,7 +623,10 @@ def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_
             or np.any(reference < 0) or np.any(reference > 1)
             or not np.isfinite(max_angle_step_deg) or not 0 < max_angle_step_deg <= 90):
         raise ValueError('Invalid force compensation inputs or maximum angle step (0, 90] degrees.')
-    A = build_actuation_matrix(desired, source_positions, C_F)
+    allocation_position = desired if allocation_position_m is None else np.asarray(allocation_position_m, float)
+    if allocation_position.shape != (2,) or not np.isfinite(allocation_position).all():
+        raise ValueError('Allocation position must be finite XY metres.')
+    A = build_actuation_matrix(allocation_position, source_positions, C_F)
     columns = [calculate_potential_hessian(desired, source_positions, C_F, row)
                for row in np.eye(n)]
     B = np.asarray([[H[0, 0], H[0, 1], H[1, 1]] for H in columns]).T
@@ -661,12 +665,78 @@ def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_
         raise ValueError(f'Force allocation infeasible or failed validation: {result.message}')
     residual = float(np.linalg.norm(A @ c+disturbance))
     before = float(np.linalg.norm(A @ current+disturbance))
-    if before <= fscale*1e-10 or residual >= before*(1-1e-5):
+    if not allow_no_improvement and (before <= fscale*1e-10 or residual >= before*(1-1e-5)):
         raise ValueError('No useful force improvement within the angle-step and stiffness constraints.')
     return c, dict(disturbance_n=disturbance, requested_force_n=-disturbance,
                    predicted_force_n=A @ c, force_residual_n=residual,
                    initial_force_residual_n=before, stiffness_eigenvalues=np.linalg.eigvalsh(H),
                    H=H, allocation_iterations=int(result.nit))
+
+
+class MagneticForcePID:
+    """Position PID with force output (SI), filtered measured velocity and anti-windup.
+
+    Observation and proposal are separate: velocity uses every new frame, while
+    integral updates commit only for an accepted/applied allocation. No motor IO.
+    """
+    def __init__(self, kp=1e-5, ki=0., kv=1e-5, velocity_tau_s=.15,
+                 integral_limit_n=5e-7, period_s=.25):
+        values = np.asarray([kp, ki, kv, velocity_tau_s, integral_limit_n, period_s], float)
+        if not np.isfinite(values).all() or np.any(values[:4] < 0) or np.any(values[4:] <= 0):
+            raise ValueError('Force PID gains/filter must be nonnegative; integral limit and period positive.')
+        self.kp, self.ki, self.kv, self.tau, self.integral_limit, self.period = values
+        self.reset()
+
+    def reset(self, *, keep_integral=False):
+        if not keep_integral or not hasattr(self, 'integral_force'):
+            self.integral_force = np.zeros(2)
+        self.position = self.observed_at = self.committed_at = None
+        self.velocity = np.zeros(2)
+        self.velocity_ready = False
+
+    def observe(self, position_m, timestamp):
+        p = np.asarray(position_m, float)
+        if p.shape != (2,) or not np.isfinite(p).all() or not np.isfinite(timestamp):
+            raise ValueError('Velocity observation needs finite XY and timestamp.')
+        if self.observed_at is not None:
+            dt = timestamp-self.observed_at
+            if dt <= 0:
+                return
+            if dt > 1.:
+                self.reset(keep_integral=True)
+            else:
+                raw = (p-self.position)/dt
+                alpha = 1. if self.tau == 0 else -np.expm1(-dt/self.tau)
+                self.velocity = raw if not self.velocity_ready else self.velocity+alpha*(raw-self.velocity)
+                self.velocity_ready = True
+        self.position, self.observed_at = p.copy(), float(timestamp)
+
+    def propose(self, desired_m, *, tolerance_m=0.):
+        if not self.velocity_ready:
+            raise ValueError('Two fresh position samples are required for velocity damping.')
+        error = np.asarray(desired_m, float)-self.position
+        if error.shape != (2,) or not np.isfinite(error).all() or not np.isfinite(tolerance_m) or tolerance_m < 0:
+            raise ValueError('PID target and tolerance must be finite; tolerance nonnegative.')
+        dt = 0. if self.committed_at is None else max(0., min(self.observed_at-self.committed_at, 2*self.period))
+        increment = np.zeros(2) if np.linalg.norm(error) <= tolerance_m else self.ki*error*dt
+        integral = np.clip(self.integral_force+increment, -self.integral_limit, self.integral_limit)
+        control_error = error*max(0., 1-tolerance_m/max(float(np.linalg.norm(error)), 1e-30))
+        return dict(error_m=error.copy(), velocity_m_s=self.velocity.copy(),
+                    integral_force_n=integral, pid_force_n=self.kp*control_error+integral-self.kv*self.velocity,
+                    timestamp=self.observed_at, dt_s=dt)
+
+    def commit(self, proposal, requested_force_n, achieved_force_n, *, integral_rebase_n=None):
+        if self.ki == 0:
+            self.integral_force[:] = 0.
+        else:
+            rebase = np.zeros(2) if integral_rebase_n is None else np.asarray(integral_rebase_n)
+            self.integral_force = np.clip(self.integral_force+rebase, -self.integral_limit, self.integral_limit)
+            candidate = np.clip(proposal['integral_force_n']+rebase, -self.integral_limit, self.integral_limit)
+            increment = candidate-self.integral_force
+            unmet = np.asarray(requested_force_n)-np.asarray(achieved_force_n)
+            # Do not integrate further into any force/angle/stiffness saturation.
+            self.integral_force = np.where(increment*unmet > 1e-24, self.integral_force, candidate)
+        self.committed_at = proposal['timestamp']
 
 
 def default_target_effort(num_sources):

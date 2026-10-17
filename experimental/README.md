@@ -112,14 +112,17 @@ zero settings apply in either mode.
 The Commands pop-out uses grouped controls: First, Selected, Next/Finish, Manual, Control,
 Stop. First starts the sequence at point 1, then waits for your Next
 press at each step; it is disabled during execution/precalculation. Control is
-an opt-in equilibrium-force compensator, disabled by default. For one robot,
-it waits for speed below the configurable threshold (default 0.5 mm/s), a
-continuous stationary hold, and fresh tracking, then estimates disturbance from
-the last sent angles and reallocates cosine inputs at the desired point.
+an opt-in force controller, disabled by default. Continuous PID defaults on
+with Ki=0 (PD): position feedback and filtered-velocity damping allocate total
+magnetic force during motion at the measured position. The 0.5 mm/s stationary
+threshold/hold gates disturbance learning only. Uncheck Continuous PID to use
+the stationary-only force compensator instead. Row Wait delays Next navigation,
+not continuous feedback or braking.
 It preserves baseline trap stiffness and bounds angle changes. Main/pop-out
 details show model disturbance, requested force, residual and calculated/sent
 angles. Preview only computes without sending corrections. The former PID,
-Alpha and adaptive-limit settings have been removed from GUI005.
+XY Alpha and adaptive-limit settings have been removed from GUI005; the new
+PID gains have physical force units and configurable cadence/filtering.
 See [POSITION_CONTROL.md](POSITION_CONTROL.md) for the algorithm and diagnostics.
 In Commands, load a file from `experimental/xy_sequences`:
 

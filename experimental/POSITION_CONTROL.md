@@ -1,10 +1,65 @@
-# Commands: equilibrium force compensation
+# Commands: continuous force PID and equilibrium compensation
 
-GUI005 Control now uses stationary force estimation and constrained cosine-space
-allocation. Incremental XY/PID control, Alpha and adaptive-limit options are no
-longer used by this GUI. Manual mode and saved XY offsets remain separate.
+GUI005 defaults to **Continuous PID**, initially PD because Ki=0. It combines
+continuous force allocation during motion with a stationary disturbance observer.
+Uncheck Continuous PID before starting a run to use the previous stationary-only
+compensation. The old incremental XY/Alpha controller is not used. Manual mode
+and saved XY offsets remain separate. Control itself still defaults off.
 
-## Automatic cycle and defaults
+## Continuous force PID (default)
+
+The magnetic force requested at the latest measured position is:
+
+F_request = Kp * deadband(error) + integral_force - Kv * filtered_velocity - d_hat
+
+The position deadband is continuous: remove the arrival-tolerance radius from
+the error vector, or use zero inside that radius. Velocity damping remains
+active inside arrival tolerance when the robot is moving above the stationary
+threshold. It does not wait for settling or arrival before braking.
+The allocation matches TOTAL force A(p_measured)c to F_request, not an extra
+force added to the baseline. Baseline stiffness is still preserved at p_desired.
+
+The stationary observer updates d_hat only after a fixed-command hold below
+the configured 0.5 mm/s threshold. During motion d_hat is held; -F_magnetic is
+never treated as a moving disturbance estimate. The averaged stationary position
+and last sent magnet inputs are used. A held motor pose below the motor deadband
+does not reset settling, allowing the stationary observer to collect samples.
+
+GUI gain units and starting settings:
+- Kp: 0.01 micro-newtons/mm
+- Ki: 0 micro-newtons/(mm*s); positive values enable residual integral correction
+- Kv: 0.01 micro-newtons*s/mm, damping from measured velocity (no setpoint derivative)
+- Period: 0.25 s, a maximum request rate of 4 Hz, not a guaranteed send rate
+- Velocity filter: 0.15 s
+- Angle rate: 20 degrees/s, also bounded by Max angle step (10 degrees)
+- Integral force maximum: 0.5 micro-newtons per component
+- Motor deadband: 0.1 degrees, suppressing repeated tiny angle changes
+
+Core calculations use SI. These are starting settings, NOT experimentally
+tuned gains or a stability guarantee. Velocity uses actual timestamps and fresh
+position differences, with first-order filtering. Repeated frames do not generate
+extra PID updates. Lost tracking pauses control and requires velocity reacquisition;
+the integral is frozen rather than catching up over the observation gap.
+
+Integral updates are committed only for an accepted allocation, never for a
+preview/discarded calculation. Conditional anti-windup blocks integration into
+unachievable force components; it permits unwinding. A held pose uses its actual
+model force for this test, not the force of the unsent candidate. With Ki>0, a
+new disturbance estimate rebases integral bias to avoid a feedforward jump,
+subject to the integral bound. Ki=0 disables integral accumulation completely.
+
+Only one solve/transmission runs at a time. While busy, newer camera observations
+replace older observations in the gate; there is no growing control queue. The
+next update uses the latest available frame. A result older than min(1 s,
+2*Period), tracking loss, Next becoming due, Stop or a mode change vetoes sending.
+Angle-rate limits use elapsed time since the last completed transmission.
+
+The row Wait now gates NEXT-point navigation only in continuous mode. PID starts
+immediately after the initial pose transmission, even during that wait. A queued
+Next waits for the row deadline while PID remains active; it does not disable
+braking for the rest of the wait. Other modes retain their original wait behavior.
+
+## Stationary-only cycle (Continuous PID unchecked)
 
 1. Send the normal point pose, optionally using its saved manual XY offset.
 2. Keep all eight commands fixed while one robot settles.
@@ -34,17 +89,20 @@ must be positive. An angle-limited update may cancel only part of the force.
 A failed, non-improving or infeasible solve holds the last pose and reports
 its reason. It is consumed once for that fixed-command stationary epoch,
 rather than retried every camera frame. New motion, a send or a Control toggle
-allows a new estimate. There is no error integrator or during-motion braking.
+allows a new estimate. This optional mode has no error integrator or during-motion braking.
 
-**Preview only** calculates one result per stationary epoch without sending it.
+**Preview only** calculates without sending corrections (once per stationary
+epoch in stationary mode; per fresh eligible sample in continuous mode).
 Initial path and manual commands still move normally.
 
 ## Functions and ownership
 
 - functions_main.py: estimate_equilibrium_disturbance and
-  find_force_compensated_inputs contain the magnetic math and constrained solve.
+  find_force_compensated_inputs contain the magnetic math and constrained solve;
+  MagneticForcePID contains velocity filtering, force PID and anti-windup.
 - control_workflow.py: calculate_equilibrium_force_control constructs the case
-  model. EquilibriumForceFeedback contains the reusable control state machine.
+  model; calculate_force_pid_control allocates total force during motion.
+  EquilibriumForceFeedback contains the reusable state machine for both modes.
 - experimental/point_control.py: serializes calculation and transmission.
 - experimental/command_tab.py: widgets, display and service connections only.
 
@@ -88,6 +146,11 @@ The CSV stores forces in N: disturbance_n, requested_force_n,
 predicted_force_n, force_residual_n, magnet_cosine_inputs,
 stiffness_eigenvalues_n_m, control_calculation_time_s, force_compensated,
 plus positions, settling data and calculated/sent angles.
+Continuous-mode CSV fields additionally include velocity_xy_mm_s,
+position_error_mm, pid_force_n, integral_force_n, held_disturbance_n,
+observation_age_s, control_cycle_time_s and force gains in SI. Cycle time
+includes calculation/transmission; observation age is software frame-receipt
+age, not verified camera-exposure-to-physical-actuation latency.
 
 The force scale uses nominal case magnetic properties. Micro-newtons are
 model estimates, not independently calibrated measurements. The disturbance
@@ -98,8 +161,19 @@ curvature does not prove total stability if unknown force gradients matter.
 Automatic force compensation requires one tracked robot; it does not infer
 individual forces from a swarm centroid. Multi-robot tracking, ordinary path
 execution and Manual remain available. Transmission completion is not motor
-position confirmation. The sequential motor protocol, including explicit
-sleeps, is unchanged. This compensates final offsets, not delayed braking.
+position confirmation. Motor commands are sequential. The shared **Repeat**
+checkbox in the main Commands page and pop-out Control group selects one send
+when unchecked, or exactly 2/3 identical packets per motor when checked.
+Default is checked with 3, matching the former hard-coded triple transmission.
+There is 10 ms between copies of a motor packet: for eight motors this adds
+0/80/160 ms at 1/2/3 sends, excluding serial and physical motor delay.
+The setting also applies to Calibration axis moves through the shared commander.
+It can change during a run; a transmission snapshots its count before sending,
+and settling starts only after the complete transmission finishes. The optimizer
+does not run again for duplicate packets. Other GUIs keep their legacy default.
+Continuous force PID adds during-motion damping. Its attainable bandwidth is
+still limited by these delays and physical actuator response; it is not a hard
+real-time system or predictive controller. Verify response experimentally.
 
 ## Circular recording export
 

@@ -24,10 +24,17 @@ class ArrivalGate:
         self.positions = None
         self.loss_generation = 0
         self.settling = None
+        self.next_not_before = 0.
+
+    @property
+    def advance_due(self):
+        with self.condition:
+            return self.next_requested and self.clock() >= self.next_not_before
 
     def prepare_point(self, *, preserve_next=False):
         with self.condition:
             self.target = None
+            self.next_not_before = 0.
             self.observed_at = self.inside_since = self.error_mm = None
             self.positions = None
             self.waiting_for_next = not self.require_arrival
@@ -35,10 +42,13 @@ class ArrivalGate:
                 self.next_requested = False
             self.condition.notify_all()
 
-    def arm(self, target_xy_m, *, preserve_next=False):
+    def arm(self, target_xy_m, *, preserve_next=False, minimum_wait_s=0.):
+        if not np.isfinite(minimum_wait_s) or minimum_wait_s < 0:
+            raise ValueError('Minimum point wait must be finite and nonnegative.')
         with self.condition:
             self.target = np.asarray(target_xy_m, dtype=float)
             self.armed_at = self.clock()
+            self.next_not_before = self.armed_at+minimum_wait_s
             if self.settling is not None:
                 self.settling.reset(self.armed_at)
             self.observed_at = self.inside_since = self.error_mm = None
@@ -128,7 +138,7 @@ class ArrivalGate:
     def wait_for_next(self, active):
         with self.condition:
             while active():
-                if self.next_requested and (not self.require_arrival or self._ready()):
+                if self.advance_due and (not self.require_arrival or self._ready()):
                     self.next_requested = self.waiting_for_next = False
                     return True
                 if self.require_arrival and not self._ready():
