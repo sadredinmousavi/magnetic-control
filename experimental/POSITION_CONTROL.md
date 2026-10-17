@@ -3,7 +3,8 @@
 Automatic control uses position feedback, filtered-velocity damping and an
 optional slow integral. **Disturbance learning and the stationary-only mode are
 removed**, including their settings and stored estimates. Control defaults off;
-Ki defaults to zero, so the first test uses PD. Manual XY, the open-loop optimizer
+Ki defaults to 0.0005 micro-newtons/(mm*s), a conservative integral starting value.
+Set Ki to zero for PD only. Manual XY, the open-loop optimizer
 and saved XY offsets are unchanged.
 
 ## Algorithm
@@ -49,8 +50,10 @@ command; Control off/on or temporary loss retains bias but resets velocity histo
 Starting gains are not experimentally tuned or a stability guarantee:
 
 - Kp: 0.01 micro-newtons/mm.
-- Ki: 0 micro-newtons/(mm*s). Start with PD; introduce a small positive Ki only
-  after braking is satisfactory.
+- Ki: 0.0005 micro-newtons/(mm*s), equivalent to a 20 s integral time at the
+  default Kp. A constant 10 mm error adds 0.005 micro-newtons per second before
+  anti-windup or saturation. These are starting settings, not hardware-validated
+  tuning; test a fixed point and inspect overshoot before running a path.
 - Kv: 0.01 micro-newtons*s/mm.
 - Period: 0.25 s, a maximum request rate of 4 Hz, not guaranteed send timing.
 - Velocity filter: 0.15 s.

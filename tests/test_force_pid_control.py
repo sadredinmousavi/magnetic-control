@@ -17,6 +17,17 @@ from point_control import PointCommander
 
 
 class ForcePIDMathTests(unittest.TestCase):
+    def test_default_integral_has_twenty_second_time_and_gradual_force_growth(self):
+        pid = MagneticForcePID()
+        self.assertAlmostEqual(pid.kp / pid.ki, 20.)
+        pid.observe([-.01, 0], 0.)
+        pid.observe([-.01, 0], .25)
+        proposal = pid.propose([0, 0])
+        pid.commit(proposal, proposal['pid_force_n'], proposal['pid_force_n'])
+        pid.observe([-.01, 0], .5)
+        proposal = pid.propose([0, 0])
+        np.testing.assert_allclose(proposal['integral_force_n'], [1.25e-9, 0], atol=1e-20)
+
     def test_velocity_braking_remains_active_inside_position_tolerance(self):
         pid = MagneticForcePID(kp=2, ki=0, kv=3, velocity_tau_s=0)
         pid.observe([0, 0], 0.)
@@ -79,7 +90,7 @@ class ContinuousRuntimeTests(unittest.TestCase):
     def fixture(self, *, speed=.001, start=-.01):
         now = [0.]
         monitor = SettlingMonitor()
-        pid = MagneticForcePID(period_s=.1, velocity_tau_s=0)
+        pid = MagneticForcePID(ki=0, period_s=.1, velocity_tau_s=0)
         feedback = ForcePIDFeedback(pid=pid, clock=lambda: now[0])
         gate = ArrivalGate(require_arrival=False, clock=lambda: now[0])
         gate.settling = monitor

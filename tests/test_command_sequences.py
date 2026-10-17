@@ -460,7 +460,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.force_preview_var = Mock(get=Mock(return_value=False))
         app.control_requested = True
         app.force_pid_settings = {key: Mock(get=Mock(return_value=value)) for key, value in (
-            ('Kp', '.01'), ('Ki', '0'), ('Kv', '.02'), ('Period s', '.25'),
+            ('Kp', '.01'), ('Ki', '.0005'), ('Kv', '.02'), ('Period s', '.25'),
             ('Velocity filter s', '.15'), ('Rate deg/s', '20'), ('I max µN', '.5'), ('Deadband deg', '.1'))}
         app.force_hold_speed_var = Mock(get=Mock(return_value='.5'))
         with patch('command_tab.threading.Thread'), patch('command_tab.load_hardware_case', return_value={}):
@@ -469,7 +469,7 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertFalse(hasattr(app.feedback, 'disturbance_estimate_n'))
         self.assertTrue(app.feedback.enabled.is_set())
         self.assertAlmostEqual(app.feedback.pid.kp, 1e-5)
-        self.assertEqual(app.feedback.pid.ki, 0)
+        self.assertAlmostEqual(app.feedback.pid.ki, 5e-7)
         self.assertAlmostEqual(app.feedback.pid.kv, 2e-5)
         self.assertAlmostEqual(app.feedback.pid.integral_limit, 5e-7)
 

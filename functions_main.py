@@ -664,7 +664,7 @@ class MagneticForcePID:
     Observation and proposal are separate: velocity uses every new frame, while
     integral updates commit only for an accepted/applied allocation. No motor IO.
     """
-    def __init__(self, kp=1e-5, ki=0., kv=1e-5, velocity_tau_s=.15,
+    def __init__(self, kp=1e-5, ki=5e-7, kv=1e-5, velocity_tau_s=.15,
                  integral_limit_n=5e-7, period_s=.25):
         values = np.asarray([kp, ki, kv, velocity_tau_s, integral_limit_n, period_s], float)
         if not np.isfinite(values).all() or np.any(values[:4] < 0) or np.any(values[4:] <= 0):

@@ -112,7 +112,8 @@ zero settings apply in either mode.
 The Commands pop-out uses grouped controls: First, Selected, Next/Finish, Manual, Control,
 Stop. First starts the sequence at point 1, then waits for your Next
 press at each step; it is disabled during execution/precalculation. Control is
-an opt-in force PID controller, disabled by default. Ki=0 starts with PD:
+an opt-in force PID controller, disabled by default. Default Kp/Ki/Kv are
+0.01/0.0005/0.01 in the GUI's micro-newton/mm/second units (Ki=0 selects PD):
 position feedback and filtered-velocity damping allocate total magnetic force
 during motion at the measured position. Disturbance learning and the stationary-only
 controller have been removed. Positive Ki enables bounded integral correction

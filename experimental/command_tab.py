@@ -62,7 +62,7 @@ class CommandTab:
         self.force_step_var = tk.StringVar(value='10')
         self.force_preview_var = tk.BooleanVar(value=False)
         self.force_pid_settings = {key: tk.StringVar(value=value) for key, value in (
-            ('Kp', '.01'), ('Ki', '0'), ('Kv', '.01'), ('Period s', '.25'),
+            ('Kp', '.01'), ('Ki', '.0005'), ('Kv', '.01'), ('Period s', '.25'),
             ('Velocity filter s', '.15'), ('Rate deg/s', '20'), ('I max µN', '.5'), ('Deadband deg', '.1'))}
         self.force_hold_speed_var = tk.StringVar(value='.5')
         self.precalculating = False
@@ -281,7 +281,7 @@ class CommandTab:
                   'The solver preserves baseline stiffness and holds on an invalid or infeasible solve.')
         HoverHint(preview, 'Calculate and display force corrections without sending them. '
                   'Initial path and manual commands still move normally.')
-        pid_bar = tk.LabelFrame(parent, text='Force PID — gains in µN, mm and seconds (Ki=0 starts with PD)')
+        pid_bar = tk.LabelFrame(parent, text='Force PID — gains in µN, mm and seconds (Ki=0 disables integral)')
         pid_bar.pack(fill='x', padx=8, pady=2)
         for key, variable in self.force_pid_settings.items():
             tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
