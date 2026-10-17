@@ -226,3 +226,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GUI005 runtime diagnostic sessions
+experimental/diagnostics/

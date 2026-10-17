@@ -24,6 +24,7 @@ from point_control import hardware_case_name, load_hardware_case
 from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay, video_crop_circle
+from control_diagnostics import ControlDiagnostics
 from camera_popout import CameraPopout, show_view_dialog
 from control_workflow import EquilibriumForceFeedback
 from functions_main import MagneticForcePID
@@ -82,6 +83,8 @@ class CommandTab:
         self.render_revision = 0
         self.camera_popout = None
         self.recording = None
+        self.diagnostics = None
+        self.diagnostic_frame = 0
         self.recording_fps_var = tk.StringVar(value='5')
         self.crop_enabled_var = tk.BooleanVar(value=False)
         self.crop_fit_var = tk.BooleanVar(value=True)
@@ -114,6 +117,9 @@ class CommandTab:
                                        background='#195da8', foreground='white', activebackground='#12477e',
                                        activeforeground='white', font=('Segoe UI', 10, 'bold'), padx=12)
         self.popout_button.pack(side='left', padx=8, pady=4)
+        self.diagnostics_button = tk.Button(camera_view_bar, text='Start diagnostics', command=self.toggle_diagnostics)
+        self.diagnostics_button.pack(side='left', padx=4)
+        HoverHint(self.diagnostics_button, 'Record each received Commands frame and motor calculation/send events. No video encoding. Stop diagnostics saves files in experimental/diagnostics.')
         tk.Label(camera_view_bar, text='Live processing FPS', background='#edf4ff', foreground='#173c68').pack(side='left')
         tk.Spinbox(camera_view_bar, from_=1, to=15, textvariable=self.calibration.live_fps_var, width=3).pack(side='left', padx=4)
         tk.Label(camera_view_bar, text='Opens the larger camera window; all controls remain here.',
@@ -536,6 +542,8 @@ class CommandTab:
         first_row = len(self.tracking_rows)
         if getattr(self, "tracking_tracker", None) is not None:
             self.process_tracking_frame()
+        if getattr(self, 'diagnostics', None) is not None:
+            self.record_diagnostic_frame(self.tracking_rows[first_row:])
         if getattr(self, 'recording', None) is not None:
             try:
                 options = dict(show_path=self.show_path_var.get(), show_roi=self.show_roi_var.get(),
@@ -793,6 +801,116 @@ class CommandTab:
             except OSError as error:
                 show_view_dialog(self, messagebox.showerror, "Tracking export", str(error))
 
+    def diagnostic_settings(self):
+        names = ('tracking_count_var', 'tracking_radius_var', 'tracking_area_var',
+                 'tracking_contrast_var', 'arrival_tolerance_var', 'arrival_hold_var',
+                 'force_step_var', 'force_preview_var', 'force_continuous_var',
+                 'manual_mode_var', 'repeat_motors_var', 'motor_repeat_count_var',
+                 'allow_extrapolation_var', 'use_learned_var')
+        values = {name: getattr(self, name).get() for name in names if hasattr(self, name)}
+        values['pid_display_units'] = {key: var.get() for key, var in self.force_pid_settings.items()}
+        values['settling'] = {key: var.get() for key, var in self.settling_vars.items()}
+        values['camera_source'] = getattr(self.calibration, 'camera_source_key', None)
+        values['processing_fps'] = self.calibration.live_fps_var.get()
+        return values
+
+    def diagnostic_metadata(self):
+        setup = self.setup
+        if setup is None:
+            try:
+                setup = self.calibration.setup_data(require_capture=False)
+            except (ValueError, TypeError, AttributeError):
+                setup = None
+        metadata = dict(settings=self.diagnostic_settings(), calibration=setup,
+                        sequence_path=self.sequence_path, input_units=self.input_units,
+                        steps=self.steps, displayed_corrections=self.display_corrections,
+                        software=dict(numpy=np.__version__, opencv=cv2.__version__))
+        if setup and setup.get('control_case'):
+            try:
+                metadata['hardware_model'] = load_hardware_case(setup['control_case'])
+            except Exception as error:
+                metadata['hardware_model_error'] = str(error)
+        return metadata
+
+    def toggle_diagnostics(self):
+        if self.diagnostics is not None:
+            self.stop_diagnostics()
+            return
+        try:
+            recorder = ControlDiagnostics(Path(__file__).resolve().parent / 'diagnostics',
+                                          self.diagnostic_metadata())
+        except (OSError, ValueError, TypeError) as error:
+            self.status.config(text=f'Cannot start diagnostics: {error}')
+            return
+        self.diagnostics = recorder
+        self.diagnostic_frame = 0
+        self.diagnostic_previous_receipt = None
+        self.commander.diagnostic_sink = recorder.record
+        self.diagnostics_button.config(text='Stop diagnostics')
+        self.status.config(text=f'Diagnostics recording: {recorder.path}. Stop diagnostics to save; no video included.')
+        self.poll_diagnostics()
+
+    def poll_diagnostics(self):
+        self.diagnostics_after = None
+        recorder = self.diagnostics
+        if recorder is None:
+            return
+        # Heartbeats show stream outages and control-state changes even with no frames.
+        recorder.record('heartbeat', dict(settings=self.diagnostic_settings(), running=self.running,
+            camera_running=self.camera_running(), frame_age_s=None if self.frame_received_at is None else time.monotonic()-self.frame_received_at,
+            active_index=self.active_index, status=self.status.cget('text'),
+            tracking_status=self.tracking_status.cget('text'),
+            control={} if self.feedback is None else self.feedback.snapshot()))
+        if recorder.error:
+            self.status.config(text=f'{recorder.error} Partial diagnostics: {recorder.path}')
+            self.diagnostics_button.config(text='Stop diagnostics (!)')
+        self.diagnostics_after = self.parent.after(500, self.poll_diagnostics)
+
+    def record_diagnostic_frame(self, rows):
+        recorder = self.diagnostics
+        now = time.monotonic()
+        index = self.active_index
+        active_step = self.steps[index] if index is not None and 0 <= index < len(self.steps) else None
+        recorder.record('frame', dict(diagnostic_frame=self.diagnostic_frame,
+            receipt_monotonic_s=self.frame_received_at, elapsed_s=now-recorder.started_monotonic,
+            inter_frame_s=None if self.diagnostic_previous_receipt is None else self.frame_received_at-self.diagnostic_previous_receipt,
+            width_px=self.frame.shape[1], height_px=self.frame.shape[0],
+            processing_s=now-self.frame_received_at, tracking_active=self.tracking_tracker is not None,
+            tracking_status=self.tracking_status.cget('text'), status=self.status.cget('text'),
+            settings=self.diagnostic_settings(), calibration=self.setup,
+            active_index=index, active_step=active_step, running=self.running,
+            active_target_px=None if index is None or self.pixels is None else self.pixels[index],
+            control_enabled=self.feedback is not None and self.feedback.enabled.is_set(),
+            robot_selection_error=getattr(self.tracking_tracker, 'selection_error', None),
+            command_roi=self.command_roi, detections=self.tracking_detections,
+            group_xy_cm=self.tracking_group_xy, tracking_rows=rows,
+            control={} if self.feedback is None else self.feedback.snapshot()))
+        self.diagnostic_previous_receipt = self.frame_received_at
+        self.diagnostic_frame += 1
+
+    def stop_diagnostics(self):
+        recorder, self.diagnostics = self.diagnostics, None
+        if recorder is None:
+            return
+        self.commander.diagnostic_sink = None
+        if getattr(self, 'diagnostics_after', None) is not None:
+            self.parent.after_cancel(self.diagnostics_after)
+            self.diagnostics_after = None
+        try:
+            final_metadata = self.diagnostic_metadata()
+        except Exception as error:
+            # Always drain/close the writer, even with incomplete GUI settings.
+            final_metadata = dict(metadata_error=str(error))
+        try:
+            recorder.close(final_metadata)
+            message = f'Saved diagnostics: {recorder.path} ({recorder.frames} frames).'
+            if recorder.error:
+                message += f' INCOMPLETE: {recorder.error}'
+        except (OSError, ValueError, TypeError) as error:
+            message = f'Diagnostic finalization failed: {error}. Partial files: {recorder.path}'
+        self.diagnostics_button.config(text='Start diagnostics')
+        self.status.config(text=message)
+
     def start_recording(self):
         if self.recording is not None:
             return
@@ -921,10 +1039,12 @@ class CommandTab:
                      ('Stop', self.stop, self.stop_button),
                      ('Control off', self.toggle_control, self.control_button),
                      ('Save u', self.save_learned, self.save_u_button),
-                     ('Crop', self.begin_crop_placement, None)),
+                     ('Crop', self.begin_crop_placement, None),
+                     ('Start diagnostics', self.toggle_diagnostics, self.diagnostics_button)),
             action_groups={'Place ROI': 'ROI', 'Clear ROI': 'ROI', 'First': 'Path',
                            'Selected': 'Path', 'Next': 'Path', 'Stop': 'Path',
-                           'Control off': 'Control', 'Save u': 'Control', 'Crop': 'View'},
+                           'Control off': 'Control', 'Save u': 'Control', 'Crop': 'View',
+                           'Start diagnostics': 'Data'},
             group_builders={'Control': self.build_popout_control_mode},
             action_captions={'Run all': 'First', 'Run selected point': 'Selected', 'Next point': 'Next'},
             status_builder=self.build_popout_control_details, status_refresh=self.refresh_popout_control_details,
@@ -1697,6 +1817,8 @@ class CommandTab:
             canvas.create_text(x + 4, y + 4, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 7), anchor="nw")
 
     def close(self):
+        if getattr(self, 'diagnostics', None) is not None:
+            self.stop_diagnostics()
         if hasattr(self, 'help_hint'):
             self.help_hint.hide()
         if hasattr(self, 'preparation_stop'):

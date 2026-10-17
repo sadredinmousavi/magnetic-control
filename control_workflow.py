@@ -304,7 +304,8 @@ class EquilibriumForceFeedback:
                     self.publish(velocity_xy_mm_s=(self.pid.velocity*1000).tolist())
                 else:
                     self.pid.reset(keep_integral=True)
-            self.publish(measured_xy_mm=None if not fresh else (positions.mean(axis=0)*1000).tolist(),
+            self.publish(measurement_monotonic_s=sample, measurement_fresh=bool(fresh),
+                         measured_xy_mm=None if not fresh else (positions.mean(axis=0)*1000).tolist(),
                          robot_speed_mm_s=(float(np.linalg.norm(self.pid.velocity)*1000)
                                           if self.continuous and self.pid.velocity_ready else motion['speed_mm_s']),
                          settling_state=motion['state'],
@@ -431,7 +432,8 @@ class EquilibriumForceFeedback:
                          **{key: np.asarray(result[key]).tolist() for key in (
                              'disturbance_n', 'requested_force_n', 'predicted_force_n', 'force_residual_n',
                              'stiffness_eigenvalues', 'calculation_time_s')})
-        self.publish(state='Calculating force PID', observation_age_s=self.clock()-sample,
+        self.publish(state='Calculating force PID', force_observation_monotonic_s=sample,
+                     observation_age_s=self.clock()-sample,
                      force_kp_n_m=float(self.pid.kp), force_ki_n_m_s=float(self.pid.ki), force_kv_n_s_m=float(self.pid.kv))
         try:
             commander.move_force_pid(

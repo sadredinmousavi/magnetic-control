@@ -175,6 +175,32 @@ Continuous force PID adds during-motion damping. Its attainable bandwidth is
 still limited by these delays and physical actuator response; it is not a hard
 real-time system or predictive controller. Verify response experimentally.
 
+## Diagnostic data collection
+
+Use **Start diagnostics** beside Pop-out camera in Commands, or in the pop-out
+**Data** group. Start before running the experiment; press **Stop diagnostics**
+after reproducing the problem. It also saves on application close. Files go to
+`experimental/diagnostics/YYYY-MM-DD_HH-MM-SS_microseconds/` automatically:
+
+- `frames.csv`: one row per detected robot per GUI-accepted camera frame, including
+  empty/failed-detection frames. Desired/measured XY, error, filtered velocity,
+  force estimates, PID output, stiffness, calculated/sent angles, ROI, states and timing.
+- `records.jsonl`: full frame snapshots, independent calculation/send/hold/error
+  events and half-second heartbeats (including camera outages).
+- `session.json`: initial/final calibration, sequence, settings, hardware model,
+  units, software versions, record counts and completeness/error status.
+
+Send the **whole folder**, not just the CSV, for diagnosis. The JSONL includes
+controller snapshots even where failed detection leaves CSV tracking fields empty.
+Motor events distinguish a proposed calculation from completed serial writes;
+they do not confirm actual motor rotation. Timestamps use a shared monotonic
+clock; camera receipt time is not sensor exposure time. Controller telemetry is
+the latest available snapshot and may lag the frame. This logs received/processed
+Commands frames, not every sensor exposure. It does not change gains or issue
+motor commands. Background writing avoids video encoding; bounded-queue overflow
+or disk errors are explicitly reported as incomplete recordings. Videos remain
+an independent recording option. No image data or connection credentials are saved.
+
 ## Circular recording export
 
 Circle crop and Fit workspace use a fixed native-pixel circular crop for all

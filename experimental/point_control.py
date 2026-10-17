@@ -40,6 +40,16 @@ class PointCommander:
         self.prepared_axes = {}
         self.prepared_points = {}
         self.motor_repetitions = 3
+        self.diagnostic_sink = None
+
+    def diagnostic_event(self, kind, **data):
+        sink = self.diagnostic_sink
+        if sink is not None:
+            try:
+                sink(kind, data)
+            except Exception:
+                # Diagnostic failures must never interrupt a hardware command.
+                pass
 
     def set_motor_repetitions(self, repetitions):
         if repetitions not in (1, 2, 3) or int(repetitions) != repetitions:
@@ -136,7 +146,17 @@ class PointCommander:
                             stationary_position_m=stationary_position_m, max_angle_step_deg=max_angle_step_deg,
                             ratio=ratio, angle_deg=angle_deg, rebase_integral=rebase_integral))
 
-    def move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
+    def move(self, case_name, target_xy_m, **options):
+        self.diagnostic_event('move_requested', case=case_name, target_xy_m=target_xy_m,
+                              options={key: value for key, value in options.items() if not callable(value)})
+        try:
+            return self._move(case_name, target_xy_m, **options)
+        except Exception as error:
+            self.diagnostic_event('move_failed', case=case_name, target_xy_m=target_xy_m,
+                                  error=repr(error))
+            raise
+
+    def _move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
              settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False, prepared_point=False,
              on_calculated=None, force_request=None, preview_only=False, on_held=None,
              unchanged_angles_deg=None, motor_deadband_deg=0.):
@@ -155,10 +175,12 @@ class PointCommander:
             raise ValueError("Motor zero angle must be between 0 and 360 degrees.")
         with self.lock:
             if not active():
+                self.diagnostic_event('move_cancelled', case=case_name, target_xy_m=target_xy_m)
                 return None
             port = self.port_provider()
             if port is None or not getattr(port, "is_open", False):
                 raise RuntimeError("Connect the serial controller in Connections first.")
+            self.diagnostic_event('calculation_started', case=case_name, target_xy_m=target_xy_m)
             if force_request is not None:
                 solver = calculate_force_pid_control if 'pid_force_n' in force_request else calculate_equilibrium_force_control
                 result = solver(load_hardware_case(case_name), target_xy_m, **force_request)
@@ -179,11 +201,14 @@ class PointCommander:
                 result = cached[1][tuple(target_xy_m)]
             else:
                 result = self.calculate(case_name, target_xy_m, ratio=ratio, angle_deg=angle_deg)
+            self.diagnostic_event('calculation_finished', case=case_name, target_xy_m=target_xy_m,
+                                  result=result, preview_only=preview_only)
             if on_calculated is not None:
                 on_calculated(result)
             if preview_only:
                 return result
             if not active():
+                self.diagnostic_event('move_cancelled', case=case_name, target_xy_m=target_xy_m)
                 return None
             if self.port_provider() is not port or not getattr(port, "is_open", False):
                 raise RuntimeError("The controller disconnected before the move.")
@@ -192,13 +217,25 @@ class PointCommander:
                 raise ValueError("Calculation did not produce valid motor angles.")
             if (unchanged_angles_deg is not None
                     and np.max(np.abs(angles-np.asarray(unchanged_angles_deg))) <= motor_deadband_deg):
+                self.diagnostic_event('motor_pose_held', case=case_name, target_xy_m=target_xy_m,
+                                      angles_deg=unchanged_angles_deg,
+                                      proposed_angles_deg=angles, deadband_deg=motor_deadband_deg)
                 if on_held is not None:
                     # Use the ACTUAL held pose for anti-windup, not the proposed angles.
                     held = dict(result, predicted_force_n=result['applied_force_n'],
                                 force_residual_n=result['applied_force_residual_n'])
                     on_held(held)
                 return result
-            moveArray(port, angles, 0, zero_angle_deg, repetitions=self.motor_repetitions)
+            repetitions = self.motor_repetitions
+            self.diagnostic_event('motor_send_started', case=case_name, target_xy_m=target_xy_m,
+                                  angles_deg=angles, zero_angle_deg=zero_angle_deg,
+                                  serial_target_angles_deg=angles+zero_angle_deg,
+                                  repetitions=repetitions)
+            moveArray(port, angles, 0, zero_angle_deg, repetitions=repetitions)
+            self.diagnostic_event('motor_send_completed', case=case_name, target_xy_m=target_xy_m,
+                                  angles_deg=angles, zero_angle_deg=zero_angle_deg,
+                                  serial_target_angles_deg=angles+zero_angle_deg,
+                                  repetitions=repetitions)
             if on_sent is not None:
                 on_sent(result)
             deadline = time.monotonic() + settle_seconds
