@@ -115,7 +115,7 @@ class ControlDiagnostics:
                     target = step.get('target_xy_m')
                     if target is not None:
                         missing.update(desired_x_mm=target[0]*1000, desired_y_mm=target[1]*1000)
-                    for key in ('disturbance_n', 'requested_force_n', 'predicted_force_n',
+                    for key in ('requested_force_n', 'predicted_force_n',
                                 'velocity_xy_mm_s', 'pid_force_n', 'integral_force_n'):
                         missing[key] = json.dumps(control.get(key))
                     missing['calculated_motor_angles_deg'] = json.dumps(control.get('calculated_angles'))

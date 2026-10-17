@@ -132,7 +132,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
             arrival_gate.prepare_point(preserve_next=index == 0)
         report("calculating", index, None)
         correction = np.zeros(2) if initial_corrections is None else np.asarray(initial_corrections[index], float)
-        continuous = feedback is not None and bool(getattr(feedback, 'continuous', False))
+        continuous = feedback is not None and bool(getattr(feedback, 'realtime', False))
         command = tuple(np.asarray(step.target_xy_m) + correction / 1000)
         if feedback is not None:
             command = feedback.begin_point(step, correction,

@@ -42,13 +42,13 @@ class MotorTransmissionTests(unittest.TestCase):
             commander.set_motor_repetitions(count)
             with patch.object(commander, 'calculate', return_value=result) as calculate, \
                  patch('point_control.load_hardware_case', return_value={}), \
-                 patch('point_control.calculate_equilibrium_force_control', return_value=result) as force, \
+                 patch('point_control.calculate_force_pid_control', return_value=result) as force, \
                  patch('helpers.moveArray') as send:
                 commander.move('case', (0, 0))
                 calculate.assert_called_once()
                 self.assertEqual(send.call_args.kwargs, {'repetitions': count})
                 np.testing.assert_allclose(send.call_args.args[1], [60.]*8)
-                commander.move_equilibrium_compensation('case', (0, 0), (.004, 0), [60.]*8, [.5]*8)
+                commander.move_force_pid('case', (0, 0), (.004, 0), [61.]*8, [.5]*8, [1e-8, 0])
                 force.assert_called_once()
                 self.assertEqual(send.call_args.kwargs, {'repetitions': count})
                 self.assertEqual(send.call_count, 2)

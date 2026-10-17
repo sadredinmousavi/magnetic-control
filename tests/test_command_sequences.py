@@ -390,7 +390,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.force_step_var = Mock(get=Mock(return_value='10'))
         app.force_preview_var = Mock(get=Mock(return_value=False))
         app.control_requested = True
-        app.settling_vars = {key: Mock(get=Mock(return_value='.5')) for key in ('speed', 'window', 'hold', 'wait')}
+        app.force_hold_speed_var = Mock(get=Mock(return_value='.5'))
         with patch('command_tab.load_hardware_case', return_value={}), \
              patch.object(app.commander, 'hardware_signature', return_value='hardware'), \
              patch('command_tab.messagebox.askyesno', return_value=True), \
@@ -458,15 +458,15 @@ class CommandSequenceTests(unittest.TestCase):
         app = self.run_app()
         app.force_step_var = Mock(get=Mock(return_value='10'))
         app.force_preview_var = Mock(get=Mock(return_value=False))
-        app.force_continuous_var = Mock(get=Mock(return_value=True))
         app.control_requested = True
         app.force_pid_settings = {key: Mock(get=Mock(return_value=value)) for key, value in (
             ('Kp', '.01'), ('Ki', '0'), ('Kv', '.02'), ('Period s', '.25'),
             ('Velocity filter s', '.15'), ('Rate deg/s', '20'), ('I max µN', '.5'), ('Deadband deg', '.1'))}
-        app.settling_vars = {key: Mock(get=Mock(return_value='.5')) for key in ('speed', 'window', 'hold', 'wait')}
+        app.force_hold_speed_var = Mock(get=Mock(return_value='.5'))
         with patch('command_tab.threading.Thread'), patch('command_tab.load_hardware_case', return_value={}):
             app.run_selected()
-        self.assertTrue(app.feedback.continuous)
+        self.assertTrue(app.feedback.realtime)
+        self.assertFalse(hasattr(app.feedback, 'disturbance_estimate_n'))
         self.assertTrue(app.feedback.enabled.is_set())
         self.assertAlmostEqual(app.feedback.pid.kp, 1e-5)
         self.assertEqual(app.feedback.pid.ki, 0)

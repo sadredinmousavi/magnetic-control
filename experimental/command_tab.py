@@ -26,9 +26,8 @@ from arrival_control import ArrivalGate
 from command_recording import CommandRecording, draw_command_overlay, video_crop_circle
 from control_diagnostics import ControlDiagnostics
 from camera_popout import CameraPopout, show_view_dialog
-from control_workflow import EquilibriumForceFeedback
+from control_workflow import ForcePIDFeedback
 from functions_main import MagneticForcePID
-from settling_control import SettlingMonitor
 from hover_hint import HoverHint
 from learned_corrections import LearnedCorrections, correction_context
 from axis_calibration import RobotAxes
@@ -62,12 +61,10 @@ class CommandTab:
         self.use_learned_var = tk.BooleanVar(value=True)
         self.force_step_var = tk.StringVar(value='10')
         self.force_preview_var = tk.BooleanVar(value=False)
-        self.force_continuous_var = tk.BooleanVar(value=True)
         self.force_pid_settings = {key: tk.StringVar(value=value) for key, value in (
             ('Kp', '.01'), ('Ki', '0'), ('Kv', '.01'), ('Period s', '.25'),
             ('Velocity filter s', '.15'), ('Rate deg/s', '20'), ('I max µN', '.5'), ('Deadband deg', '.1'))}
-        self.settling_vars = {key: tk.StringVar(value='.5') for key in
-                              ('Speed mm/s', 'Window s', 'Hold s', 'Min wait s')}
+        self.force_hold_speed_var = tk.StringVar(value='.5')
         self.precalculating = False
         self.precalculated_signature = None
         self.preparation_stop = threading.Event()
@@ -265,36 +262,27 @@ class CommandTab:
         HoverHint(learned_check, 'Start each point at desired + its saved manual XY u. '
                   'Force control changes magnet angles separately, not XY u. Memory matches sequence, calibration, hardware and robot count. '
                   'Export points + u for later sessions.')
-        settling_bar = tk.LabelFrame(parent, text='Disturbance learning — stationary threshold (one robot)')
-        settling_bar.pack(fill='x', padx=8, pady=3)
+        force_bar = tk.LabelFrame(parent, text='Force control — one robot')
+        force_bar.pack(fill='x', padx=8, pady=3)
         self.force_entries = []
-        for key, variable in self.settling_vars.items():
-            tk.Label(settling_bar, text=key).pack(side='left', padx=(6,2))
-            entry = tk.Entry(settling_bar, textvariable=variable, width=4)
-            entry.pack(side='left')
-            self.force_entries.append(entry)
-            HoverHint(entry, 'Every robot must stay below the speed threshold for Hold s. Window s smooths velocity '
-                      'over at least three frames. Min wait s starts after each sent command. Then one correction uses '
-                      'the average settled position and last sent magnet angles to estimate disturbance. '
-                      'Default speed is 0.5 mm/s. In continuous PID this gates disturbance learning only; '
-                      'braking remains active during motion. Locked during a run.')
-        tk.Label(settling_bar, text='Max angle step (deg)').pack(side='left', padx=(6, 2))
-        force_step = tk.Entry(settling_bar, textvariable=self.force_step_var, width=4)
+        tk.Label(force_bar, text='Hold speed (mm/s)').pack(side='left', padx=(6, 2))
+        hold_speed = tk.Entry(force_bar, textvariable=self.force_hold_speed_var, width=4)
+        hold_speed.pack(side='left')
+        self.force_entries.append(hold_speed)
+        HoverHint(hold_speed, 'Hold the motor pose only when inside arrival tolerance AND below this speed. '
+                  'Above this speed, velocity damping continues. This does not estimate disturbances or delay corrections.')
+        tk.Label(force_bar, text='Max angle step (deg)').pack(side='left', padx=(6, 2))
+        force_step = tk.Entry(force_bar, textvariable=self.force_step_var, width=4)
         force_step.pack(side='left')
-        preview = tk.Checkbutton(settling_bar, text='Preview only', variable=self.force_preview_var)
+        preview = tk.Checkbutton(force_bar, text='Preview only', variable=self.force_preview_var)
         preview.pack(side='left')
         self.force_entries.extend([force_step, preview])
-        HoverHint(force_step, 'Maximum model-angle change per stationary correction; default 10 degrees. '
-                  'The solver preserves baseline stiffness and holds if no feasible improvement exists.')
+        HoverHint(force_step, 'Maximum model-angle change per PID update; default 10 degrees, also angle-rate limited. '
+                  'The solver preserves baseline stiffness and holds on an invalid or infeasible solve.')
         HoverHint(preview, 'Calculate and display force corrections without sending them. '
                   'Initial path and manual commands still move normally.')
         pid_bar = tk.LabelFrame(parent, text='Force PID — gains in µN, mm and seconds (Ki=0 starts with PD)')
         pid_bar.pack(fill='x', padx=8, pady=2)
-        self.continuous_control_check = tk.Checkbutton(pid_bar, text='Continuous PID', variable=self.force_continuous_var)
-        self.continuous_control_check.pack(side='left')
-        self.force_entries.append(self.continuous_control_check)
-        HoverHint(self.continuous_control_check, 'Checked: PID force allocation during motion, plus a held disturbance estimate. '
-                  'Unchecked: the earlier stationary-only force compensation. Mode/settings are selected before a run.')
         for key, variable in self.force_pid_settings.items():
             tk.Label(pid_bar, text=key).pack(side='left', padx=(6, 2))
             entry = tk.Entry(pid_bar, textvariable=variable, width=5)
@@ -722,11 +710,6 @@ class CommandTab:
                 'control_state': control_data.get('state', 'Off'),
                 'control_mode': control_data.get('mode', ''),
                 'robot_speed_mm_s': control_data.get('robot_speed_mm_s', ''),
-                'settling_state': control_data.get('settling_state', ''),
-                'settle_hold_elapsed_s': control_data.get('settle_hold_elapsed_s', ''),
-                'settled_xy_mm': json.dumps(control_data.get('settled_xy_mm')),
-                'settled': control_data.get('settled', 0),
-                'disturbance_n': json.dumps(control_data.get('disturbance_n')),
                 'requested_force_n': json.dumps(control_data.get('requested_force_n')),
                 'predicted_force_n': json.dumps(control_data.get('predicted_force_n')),
                 'force_residual_n': control_data.get('force_residual_n', ''),
@@ -738,7 +721,7 @@ class CommandTab:
                 'position_error_mm': json.dumps(control_data.get('position_error_mm')),
                 'pid_force_n': json.dumps(control_data.get('pid_force_n')),
                 'integral_force_n': json.dumps(control_data.get('integral_force_n')),
-                'held_disturbance_n': json.dumps(control_data.get('held_disturbance_n')),
+                'hold_speed_mm_s': control_data.get('hold_speed_mm_s', ''),
                 'observation_age_s': control_data.get('observation_age_s', ''),
                 'control_cycle_time_s': control_data.get('control_cycle_time_s', ''),
                 'force_kp_n_m': control_data.get('force_kp_n_m', ''),
@@ -804,12 +787,12 @@ class CommandTab:
     def diagnostic_settings(self):
         names = ('tracking_count_var', 'tracking_radius_var', 'tracking_area_var',
                  'tracking_contrast_var', 'arrival_tolerance_var', 'arrival_hold_var',
-                 'force_step_var', 'force_preview_var', 'force_continuous_var',
+                 'force_step_var', 'force_preview_var', 'force_hold_speed_var',
                  'manual_mode_var', 'repeat_motors_var', 'motor_repeat_count_var',
                  'allow_extrapolation_var', 'use_learned_var')
         values = {name: getattr(self, name).get() for name in names if hasattr(self, name)}
         values['pid_display_units'] = {key: var.get() for key, var in self.force_pid_settings.items()}
-        values['settling'] = {key: var.get() for key, var in self.settling_vars.items()}
+        values['controller'] = 'force_pid_without_disturbance_learning'
         values['camera_source'] = getattr(self.calibration, 'camera_source_key', None)
         values['processing_fps'] = self.calibration.live_fps_var.get()
         return values
@@ -1076,9 +1059,6 @@ class CommandTab:
         HoverHint(self.popout_manual_check, 'Manual: click to set commanded XY, use Selected to send, then Save u to keep it. '
                   'During a run, clicks send updates to the active point. Modes can change while running.')
         self.build_motor_repeat_controls(parent)
-        self.popout_continuous_check = tk.Checkbutton(parent, text='PID', variable=self.force_continuous_var,
-                                                      state=self.continuous_control_check.cget('state'))
-        self.popout_continuous_check.pack(side='left', padx=2)
 
     def build_motor_repeat_controls(self, parent):
         repeat = tk.Checkbutton(parent, text='Repeat', variable=self.repeat_motors_var,
@@ -1112,7 +1092,7 @@ class CommandTab:
                 ('Tolerance (mm)', self.arrival_tolerance_var, self.arrival_tolerance_entry,
                  'Maximum distance from the desired point for arrival; shared with the main tab.'),
                 ('In-range hold (s)', self.arrival_hold_var, self.arrival_hold_entry,
-                 'Continuous time inside arrival tolerance. Speed-based settling is checked separately.')):
+                 'Continuous time inside arrival tolerance for arrival indication; Next remains manual.')):
             tk.Label(options, text=label).pack(side='left', padx=(8,2))
             entry = tk.Entry(options, textvariable=variable, width=4, state=source.cget('state'))
             entry.pack(side='left')
@@ -1122,7 +1102,6 @@ class CommandTab:
 
     def refresh_popout_control_details(self, label):
         self.popout_manual_check.config(state='disabled' if self.precalculating else 'normal')
-        self.popout_continuous_check.config(state=self.continuous_control_check.cget('state'))
         for entry, source in self.popout_arrival_entries:
             entry.config(state=source.cget('state'))
         self.refresh_control_details(label)
@@ -1158,9 +1137,9 @@ class CommandTab:
         rows = (
             (('desired', 'Desired'), ('measured', 'Measured'), ('u', 'u'), ('commanded', 'Commanded')),
             (('ratio', 'Ratio'), ('angle', 'Angle'), ('speed', 'Speed mm/s'),
-             ('hold', 'Hold'), ('state', 'State')),
-            (('disturbance', 'Disturbance µN'), ('feedback_force', 'PID µN'),
-             ('requested_force', 'Requested µN'), ('residual', 'Residual µN')),
+             ('error', 'Error mm'), ('state', 'State')),
+            (('integral', 'Integral µN'), ('feedback_force', 'Requested µN'),
+             ('allocated_force', 'Allocated µN'), ('residual', 'Residual µN')),
             (('calculated', 'Calculated motors'), ('sent', 'Last sent motors')),
         )
         for row in rows:
@@ -1192,15 +1171,16 @@ class CommandTab:
             value = data.get(key)
             return '—' if value is None else ', '.join(f'{v*1e6:.3g}' for v in np.atleast_1d(value))
         speed = '—' if data.get('robot_speed_mm_s') is None else f"{data['robot_speed_mm_s']:.2f}"
-        hold = f"{data.get('settle_hold_elapsed_s', 0):.1f}/{data.get('settle_hold_s', 0):.1f} s"
+        error = data.get('position_error_mm')
+        error = '—' if error is None else f'{np.linalg.norm(error):.2f}'
         values = dict(
             desired=f"({xy('desired_xy_mm')})", measured=f"({xy('measured_xy_mm')})",
             u=f"({xy('correction_mm')})", commanded=f"({xy('commanded_xy_mm')})",
             ratio=str(data.get('ratio', '—')), angle=str(data.get('angle_deg', 'Auto')),
-            speed=f"{speed} ({data.get('settle_speed_limit_mm_s', '—')})",
-            hold=hold, state=data.get('state', 'Control off'),
-            disturbance=force('disturbance_n'), feedback_force=force('pid_force_n'),
-            requested_force=force('requested_force_n'), residual=force('force_residual_n'),
+            speed=f"{speed} ({data.get('hold_speed_mm_s', '—')})",
+            error=error, state=data.get('state', 'Control off'),
+            integral=force('integral_force_n'), feedback_force=force('requested_force_n'),
+            allocated_force=force('predicted_force_n'), residual=force('force_residual_n'),
             calculated=calculated, sent=sent)
         for key, text in values.items():
             widget, hint = fields[key]
@@ -1490,10 +1470,7 @@ class CommandTab:
             if hasattr(self, 'force_step_var'):
                 def validate_correction(target):
                     self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
-                settling = SettlingMonitor(*[float(variable.get()) for variable in self.settling_vars.values()])
-                arrival_gate.settling = settling
                 pid = None
-                continuous = getattr(self, 'force_continuous_var', None) is not None and self.force_continuous_var.get()
                 angle_rate, deadband = 20., .1
                 if hasattr(self, 'force_pid_settings'):
                     values = {key: float(variable.get()) for key, variable in self.force_pid_settings.items()}
@@ -1501,9 +1478,10 @@ class CommandTab:
                         velocity_tau_s=values['Velocity filter s'], integral_limit_n=values['I max µN']*1e-6,
                         period_s=values['Period s'])
                     angle_rate, deadband = values['Rate deg/s'], values['Deadband deg']
-                feedback = EquilibriumForceFeedback(validate=validate_correction, settling=settling, manual=manual,
+                feedback = ForcePIDFeedback(validate=validate_correction, manual=manual,
                     max_angle_step_deg=float(self.force_step_var.get()), preview_only=self.force_preview_var.get(),
-                    continuous=continuous, pid=pid, angle_rate_deg_s=angle_rate, motor_deadband_deg=deadband)
+                    pid=pid, angle_rate_deg_s=angle_rate, motor_deadband_deg=deadband,
+                    hold_speed_mm_s=float(self.force_hold_speed_var.get()) if hasattr(self, 'force_hold_speed_var') else .5)
                 if self.control_requested and not manual:
                     feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)

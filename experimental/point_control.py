@@ -14,7 +14,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from case_loader import load_case, normalize_case_name
-from control_workflow import calculate_point_control, calculate_equilibrium_force_control, calculate_force_pid_control
+from control_workflow import calculate_point_control, calculate_force_pid_control
 
 
 def hardware_case_name(case_name):
@@ -121,20 +121,9 @@ class PointCommander:
         return calculate_point_control(load_hardware_case(case_name), target_xy_m,
                                        ratio=ratio, angle_deg=angle_deg)
 
-    def move_equilibrium_compensation(self, case_name, target_xy_m, measured_xy_m, applied_angles_deg,
-                                      reference_inputs, *, max_angle_step_deg=10., zero_angle_deg=None,
-                                      active=lambda: True, on_sent=None, on_calculated=None, preview_only=False,
-                                      ratio=1., angle_deg=None):
-        return self.move(case_name, target_xy_m, zero_angle_deg=zero_angle_deg,
-                         active=active, on_sent=on_sent, on_calculated=on_calculated,
-                         force_request=dict(measured_xy_m=measured_xy_m, applied_angles_deg=applied_angles_deg,
-                                            reference_inputs=reference_inputs, max_angle_step_deg=max_angle_step_deg,
-                                            ratio=ratio, angle_deg=angle_deg),
-                         preview_only=preview_only)
-
     def move_force_pid(self, case_name, target_xy_m, measured_xy_m, applied_angles_deg,
-                       reference_inputs, pid_force_n, disturbance_n, *, stationary_position_m=None,
-                       max_angle_step_deg=10., ratio=1., angle_deg=None, rebase_integral=False,
+                       reference_inputs, pid_force_n, *,
+                       max_angle_step_deg=10., ratio=1., angle_deg=None,
                        zero_angle_deg=None, active=lambda: True, on_sent=None, on_calculated=None,
                        on_held=None, preview_only=False, motor_deadband_deg=.1):
         return self.move(case_name, target_xy_m, zero_angle_deg=zero_angle_deg, active=active,
@@ -142,9 +131,8 @@ class PointCommander:
                          on_held=on_held, unchanged_angles_deg=applied_angles_deg,
                          motor_deadband_deg=motor_deadband_deg,
                          force_request=dict(measured_xy_m=measured_xy_m, applied_angles_deg=applied_angles_deg,
-                            reference_inputs=reference_inputs, pid_force_n=pid_force_n, disturbance_n=disturbance_n,
-                            stationary_position_m=stationary_position_m, max_angle_step_deg=max_angle_step_deg,
-                            ratio=ratio, angle_deg=angle_deg, rebase_integral=rebase_integral))
+                            reference_inputs=reference_inputs, pid_force_n=pid_force_n,
+                            max_angle_step_deg=max_angle_step_deg, ratio=ratio, angle_deg=angle_deg))
 
     def move(self, case_name, target_xy_m, **options):
         self.diagnostic_event('move_requested', case=case_name, target_xy_m=target_xy_m,
@@ -182,8 +170,7 @@ class PointCommander:
                 raise RuntimeError("Connect the serial controller in Connections first.")
             self.diagnostic_event('calculation_started', case=case_name, target_xy_m=target_xy_m)
             if force_request is not None:
-                solver = calculate_force_pid_control if 'pid_force_n' in force_request else calculate_equilibrium_force_control
-                result = solver(load_hardware_case(case_name), target_xy_m, **force_request)
+                result = calculate_force_pid_control(load_hardware_case(case_name), target_xy_m, **force_request)
             elif prepared_point:
                 name = hardware_case_name(case_name)
                 cached = self.prepared_points.get(name)

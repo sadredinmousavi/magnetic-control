@@ -16,8 +16,7 @@ from functions_main import (
     find_two_equilibrium_with_center_repulsion_inputs,
     find_two_stable_equilibrium_inputs,
     generate_circular_source_positions,
-    estimate_equilibrium_disturbance,
-    find_force_compensated_inputs,
+    allocate_force_inputs,
     MagneticForcePID,
     build_actuation_matrix,
 )
@@ -79,42 +78,10 @@ def calculate_point_control(params, target_xy_m, *, ratio=1.0, angle_deg=None):
     return result.opt_infos[0]
 
 
-def calculate_equilibrium_force_control(params, target_xy_m, measured_xy_m, applied_angles_deg,
-                                        reference_inputs, *, max_angle_step_deg=10., ratio=1., angle_deg=None):
-    """Pure synthesis: stationary force estimate and constrained cosine allocation.
-
-    No camera, Tk, serial IO, or motor-zero offset is used here. Inputs are SI
-    positions and model angles. Force outputs are model-relative newtons.
-    """
-    started = time.monotonic()
-    point_params = dict(params, TARGET_SCHEDULE=[(0., np.asarray(target_xy_m), 1., None)],
-                        INITIAL_ROBOT_POSITIONS=np.zeros((1, 2)))
-    cfg = build_common_config(point_params)
-    sources = generate_circular_source_positions(cfg.NUM_SOURCES, cfg.RADIUS)
-    angles = np.asarray(applied_angles_deg, float)
-    if angles.shape != (cfg.NUM_SOURCES,) or not np.isfinite(angles).all() or np.any(angles < 0) or np.any(angles > 90):
-        raise ValueError('Force estimation needs the last sent model angles in [0, 90] degrees.')
-    applied = np.cos(np.deg2rad(angles))
-    if reference_inputs is None:
-        reference_inputs = calculate_point_control(params, target_xy_m, ratio=ratio, angle_deg=angle_deg)['u_values']
-    disturbance = estimate_equilibrium_disturbance(measured_xy_m, sources, cfg.C_F, applied)
-    controls, diagnostics = find_force_compensated_inputs(
-        target_xy_m, sources, cfg.C_F, disturbance, applied, reference_inputs,
-        max_angle_step_deg=max_angle_step_deg)
-    return dict(diagnostics, angles_deg=np.rad2deg(np.arccos(controls)), u_values=controls,
-                reference_inputs=np.asarray(reference_inputs, float),
-                force_compensated=True, calculation_time_s=time.monotonic()-started)
-
-
 def calculate_force_pid_control(params, target_xy_m, measured_xy_m, applied_angles_deg,
-                                reference_inputs, pid_force_n, disturbance_n, *,
-                                stationary_position_m=None, max_angle_step_deg=10.,
-                                ratio=1., angle_deg=None, rebase_integral=False):
-    """Allocate TOTAL PID/feedforward force at measured position, not at target.
-
-    The equilibrium observer is evaluated only with an explicitly supplied
-    stationary measurement. During motion its previous estimate is held.
-    """
+                                reference_inputs, pid_force_n, *, max_angle_step_deg=10.,
+                                ratio=1., angle_deg=None):
+    """Allocate only the PID force at measured XY; no disturbance/feedforward."""
     started = time.monotonic()
     point_params = dict(params, TARGET_SCHEDULE=[(0., np.asarray(target_xy_m), 1., None)],
                         INITIAL_ROBOT_POSITIONS=np.zeros((1, 2)))
@@ -126,18 +93,12 @@ def calculate_force_pid_control(params, target_xy_m, measured_xy_m, applied_angl
     applied = np.cos(np.deg2rad(angles))
     if reference_inputs is None:
         reference_inputs = calculate_point_control(params, target_xy_m, ratio=ratio, angle_deg=angle_deg)['u_values']
-    old = np.asarray(disturbance_n, float)
-    disturbance = (old.copy() if stationary_position_m is None else
-                   estimate_equilibrium_disturbance(stationary_position_m, sources, cfg.C_F, applied))
-    rebase = disturbance-old if rebase_integral and stationary_position_m is not None else np.zeros(2)
-    requested = np.asarray(pid_force_n, float)+rebase-disturbance
-    controls, diagnostics = find_force_compensated_inputs(
-        target_xy_m, sources, cfg.C_F, -requested, applied, reference_inputs,
+    requested = np.asarray(pid_force_n, float)
+    controls, diagnostics = allocate_force_inputs(
+        target_xy_m, sources, cfg.C_F, requested, applied, reference_inputs,
         max_angle_step_deg=max_angle_step_deg, allocation_position_m=measured_xy_m,
         allow_no_improvement=True)
-    diagnostics.update(disturbance_n=disturbance, requested_force_n=requested,
-                       integral_rebase_n=rebase, disturbance_learned=stationary_position_m is not None,
-                       applied_force_residual_n=float(np.linalg.norm(
+    diagnostics.update(applied_force_residual_n=float(np.linalg.norm(
                            build_actuation_matrix(measured_xy_m, sources, cfg.C_F) @ applied-requested)))
     return dict(diagnostics, angles_deg=np.rad2deg(np.arccos(np.clip(controls, 0, 1))),
                 u_values=controls, reference_inputs=np.asarray(reference_inputs, float),
@@ -145,34 +106,32 @@ def calculate_force_pid_control(params, target_xy_m, measured_xy_m, applied_angl
                 force_compensated=True, calculation_time_s=time.monotonic()-started)
 
 
-class EquilibriumForceFeedback:
-    """Camera-independent stationary-control state machine, shared by any UI.
+class ForcePIDFeedback:
+    """Camera-independent continuous force PID; manual XY remains separate."""
+    realtime = True
 
-    A settling monitor supplies fresh, averaged positions in mm. Each successful
-    send starts a new settling epoch. Failed/preview solves are consumed once per
-    epoch, never retried in a tight loop. Manual XY moves remain a separate path.
-    """
-    def __init__(self, *, validate=lambda target: None, settling, manual=False,
+    def __init__(self, *, validate=lambda target: None, manual=False,
                  max_angle_step_deg=10., preview_only=False, clock=time.monotonic,
-                 continuous=False, pid=None, angle_rate_deg_s=20., motor_deadband_deg=.1):
+                 pid=None, angle_rate_deg_s=20., motor_deadband_deg=.1, hold_speed_mm_s=.5):
         if not np.isfinite(max_angle_step_deg) or not 0 < max_angle_step_deg <= 90:
             raise ValueError('Maximum angle step must be in (0, 90] degrees.')
-        self.validate, self.settling, self.manual = validate, settling, bool(manual)
+        self.validate, self.manual = validate, bool(manual)
         self.max_angle_step_deg, self.preview_only, self.clock = float(max_angle_step_deg), bool(preview_only), clock
         self.enabled, self.lock = threading.Event(), threading.RLock()
         self.telemetry, self.current_step = {}, None
-        self.command_revision, self.send_generation = 0, 0
+        self.command_revision = 0
         self.pending_manual = None
         self.last_sent_u = np.zeros(2)
         self.last_sent_at, self.last_result, self.reference_inputs = None, None, None
         self.on_applied = lambda correction: None
         if (not np.isfinite(angle_rate_deg_s) or angle_rate_deg_s <= 0
-                or not np.isfinite(motor_deadband_deg) or motor_deadband_deg < 0):
-            raise ValueError('Angle rate must be positive; motor deadband nonnegative.')
-        self.continuous, self.pid = bool(continuous), pid or MagneticForcePID()
+                or not np.isfinite(motor_deadband_deg) or motor_deadband_deg < 0
+                or not np.isfinite(hold_speed_mm_s) or hold_speed_mm_s <= 0):
+            raise ValueError('Angle rate/hold speed must be positive; motor deadband nonnegative.')
+        self.pid = pid or MagneticForcePID()
+        self.hold_speed_mm_s = float(hold_speed_mm_s)
         self.angle_rate, self.motor_deadband = float(angle_rate_deg_s), float(motor_deadband_deg)
-        self.disturbance_estimate_n = np.zeros(2)
-        self.disturbance_epoch, self.last_control_at = None, None
+        self.last_control_at = None
         self.last_control_sample = None
 
     def publish(self, **values):
@@ -187,7 +146,6 @@ class EquilibriumForceFeedback:
         with self.lock:
             self.command_revision += 1
             (self.enabled.set if enabled else self.enabled.clear)()
-        self.settling.reset(self.last_sent_at)
         self.pid.reset(keep_integral=True)
 
     def set_manual_mode(self, manual):
@@ -197,7 +155,6 @@ class EquilibriumForceFeedback:
             self.pending_manual = None
             if manual:
                 self.enabled.clear()
-        self.settling.reset(self.last_sent_at)
         self.pid.reset(keep_integral=True)
 
     def request_manual(self, step, correction):
@@ -220,15 +177,13 @@ class EquilibriumForceFeedback:
             self.last_sent_u, self.last_sent_at = np.asarray(correction, float).copy(), None
             self.on_applied = on_applied
             self.telemetry = {}
-            self.disturbance_estimate_n = np.zeros(2)
-            self.disturbance_epoch, self.last_control_at = None, None
+            self.last_control_at = None
             self.last_control_sample = None
             self.pid.reset()
         return command
 
     def initial_sent(self, result=None):
         self.last_sent_at = self.clock()
-        self.send_generation += 1
         if result is not None:
             self.last_result = dict(result)
             angles = np.asarray(result['angles_deg'], float)
@@ -240,9 +195,6 @@ class EquilibriumForceFeedback:
                     self.reference_inputs = np.cos(np.deg2rad(angles))
             self.publish(sent_angles=angles.tolist(), magnet_inputs=np.cos(np.deg2rad(angles)).tolist(),
                          sent_time_s=self.last_sent_at, force_compensated=bool(result.get('force_compensated', False)))
-        self.settling.reset(self.last_sent_at)
-        self.publish(robot_speed_mm_s=None, settling_state='Minimum wait', settle_hold_elapsed_s=0.,
-                     settled=0, settled_xy_mm=None)
 
     def wait_at_target(self, step, commander, case_name, gate, active, report, initial_result=None):
         if self.last_result is None and initial_result is not None:
@@ -250,7 +202,6 @@ class EquilibriumForceFeedback:
         target_mm = np.asarray(step.target_xy_m)*1000
         self.publish(desired_xy_mm=target_mm.tolist(), commanded_xy_mm=(target_mm+self.last_sent_u).tolist(),
                      correction_mm=self.last_sent_u.tolist(), ratio=step.ratio, angle_deg=step.angle_deg)
-        attempted, enabled_before = None, self.enabled.is_set()
         while active():
             with gate.condition:
                 if gate.advance_due and (not gate.require_arrival or gate._ready()):
@@ -261,10 +212,7 @@ class EquilibriumForceFeedback:
             with self.lock:
                 pending, revision = self.pending_manual, self.command_revision
             enabled = self.enabled.is_set() and not self.manual
-            if enabled != enabled_before:
-                attempted, enabled_before = None, enabled
-                self.settling.reset(self.last_sent_at)
-            self.publish(mode='manual' if self.manual else ('force_pid' if self.continuous else 'equilibrium_force'))
+            self.publish(mode='manual' if self.manual else 'force_pid')
             def request_active():
                 with gate.condition:
                     return active() and not gate.advance_due and self.command_revision == revision
@@ -280,10 +228,9 @@ class EquilibriumForceFeedback:
                         self.last_sent_u = correction.copy()
                         self.initial_sent(result)
                         self.pid.reset()
-                        self.disturbance_estimate_n = np.zeros(2)
                         self.on_applied(correction.tolist())
                         self.publish(commanded_xy_mm=(command*1000).tolist(), correction_mm=correction.tolist(),
-                                     state='Manual command sent', disturbance_n=None, requested_force_n=None, force_residual_n=None)
+                                     state='Manual command sent', requested_force_n=None, force_residual_n=None)
                         report(result)
                     commander.move(case_name, command, ratio=step.ratio, angle_deg=step.angle_deg,
                                    settle_seconds=0, zero_angle_deg=step.zero_angle_deg,
@@ -296,85 +243,34 @@ class EquilibriumForceFeedback:
                         if self.command_revision == request_revision:
                             self.pending_manual = None
                 continue
-            motion = self.settling.snapshot(self.clock())
             fresh = positions is not None and sample is not None and self.clock()-sample <= 1.
-            if self.continuous:
-                if fresh and len(positions) == 1:
-                    self.pid.observe(positions[0], sample)
-                    self.publish(velocity_xy_mm_s=(self.pid.velocity*1000).tolist())
-                else:
-                    self.pid.reset(keep_integral=True)
+            if fresh and len(positions) == 1:
+                self.pid.observe(positions[0], sample)
+                self.publish(velocity_xy_mm_s=(self.pid.velocity*1000).tolist())
+            else:
+                self.pid.reset(keep_integral=True)
             self.publish(measurement_monotonic_s=sample, measurement_fresh=bool(fresh),
                          measured_xy_mm=None if not fresh else (positions.mean(axis=0)*1000).tolist(),
                          robot_speed_mm_s=(float(np.linalg.norm(self.pid.velocity)*1000)
-                                          if self.continuous and self.pid.velocity_ready else motion['speed_mm_s']),
-                         settling_state=motion['state'],
-                         settle_hold_elapsed_s=motion['hold_elapsed_s'], settle_hold_s=float(self.settling.hold),
-                         settle_speed_limit_mm_s=float(self.settling.speed_limit), settled=int(motion['ready']),
-                         settled_xy_mm=None if not motion['ready'] else motion['positions_mm'].mean(axis=0).tolist())
-            epoch = (self.send_generation, revision)
+                                          if self.pid.velocity_ready else None),
+                         hold_speed_mm_s=self.hold_speed_mm_s)
             if not fresh:
-                attempted = None
                 self.publish(state='Tracking lost — holding last motor pose')
             elif not enabled:
                 self.publish(state='Manual — holding' if self.manual else 'Control off — holding')
             elif len(positions) != 1:
-                self.publish(state='Force compensation requires one tracked robot')
-            elif self.continuous:
+                self.publish(state='Force PID requires one tracked robot')
+            else:
                 self._continuous_update(step, commander, case_name, gate, active, report,
-                                        positions[0], sample, loss_generation, revision, motion)
-            elif not motion['ready']:
-                attempted = None
-                self.publish(state=f"{motion['state']} — waiting for stationary position")
-            elif np.linalg.norm(target_mm-motion['positions_mm'][0]) <= gate.tolerance_mm:
-                self.publish(state='Reached — waiting for Next')
-            elif attempted != epoch:
-                attempted = epoch
-                measured = motion['positions_mm'][0]/1000
-                anchor = motion['positions_mm'].copy()
-                def force_active():
-                    with gate.condition:
-                        current_motion = self.settling.snapshot(self.clock())
-                        return (request_active() and self.enabled.is_set() and not self.manual
-                                and gate.loss_generation == loss_generation and gate.positions is not None
-                                and len(gate.positions) == 1
-                                and current_motion['ready'] and self.clock()-sample <= 1.
-                                and np.linalg.norm(current_motion['positions_mm']-anchor) <= gate.tolerance_mm)
-                try:
-                    if self.last_result is None:
-                        raise ValueError('No applied magnet angles are available for force estimation.')
-                    self.publish(state='Estimating equilibrium disturbance / calculating', proposed_xy_mm=None)
-                    def calculated(result):
-                        if result.get('reference_inputs') is not None:
-                            self.reference_inputs = np.asarray(result['reference_inputs'], float)
-                        self.publish(calculated_angles=list(result['angles_deg']),
-                                     **{key: np.asarray(result[key]).tolist() for key in (
-                                         'disturbance_n', 'requested_force_n', 'predicted_force_n',
-                                         'force_residual_n', 'stiffness_eigenvalues', 'calculation_time_s')})
-                    def force_sent(result):
-                        self.initial_sent(result)
-                        self.publish(commanded_xy_mm=None, state='Force correction sent — waiting for settling')
-                        report(result)
-                    result = commander.move_equilibrium_compensation(
-                        case_name, step.target_xy_m, measured, self.last_result['angles_deg'], self.reference_inputs,
-                        ratio=step.ratio, angle_deg=step.angle_deg,
-                        max_angle_step_deg=self.max_angle_step_deg, zero_angle_deg=step.zero_angle_deg,
-                        active=force_active, on_calculated=calculated, on_sent=force_sent, preview_only=self.preview_only)
-                    if self.preview_only:
-                        self.publish(state='Preview only — correction calculated, no motors sent')
-                    elif result is None:
-                        attempted = None
-                        self.publish(state='Force calculation discarded — tracking, motion or mode changed')
-                except ValueError as error:
-                    self.publish(state=f'Force compensation held: {error}')
+                                        positions[0], sample, loss_generation, revision)
             with gate.condition:
                 # Fresh camera samples notify the condition immediately; bound
                 # idle polling even if an unrealistically short period is set.
-                gate.condition.wait(max(.005, min(.05, self.pid.period)) if self.continuous else .1)
+                gate.condition.wait(max(.005, min(.05, self.pid.period)))
         return False
 
     def _continuous_update(self, step, commander, case_name, gate, active, report,
-                           measured, sample, loss_generation, revision, motion):
+                           measured, sample, loss_generation, revision):
         if not self.pid.velocity_ready:
             self.publish(state='Measuring velocity — holding')
             return
@@ -387,9 +283,8 @@ class EquilibriumForceFeedback:
             return
         error = np.asarray(step.target_xy_m)-measured
         speed = float(np.linalg.norm(self.pid.velocity)*1000)
-        learn = bool(motion['ready'] and self.disturbance_epoch != self.send_generation)
         self.publish(position_error_mm=(error*1000).tolist(), velocity_xy_mm_s=(self.pid.velocity*1000).tolist())
-        if np.linalg.norm(error)*1000 <= gate.tolerance_mm and speed <= self.settling.speed_limit and not learn:
+        if np.linalg.norm(error)*1000 <= gate.tolerance_mm and speed <= self.hold_speed_mm_s:
             self.publish(state='Reached — holding; damping remains active if moving')
             return
         self.last_control_at = self.clock()
@@ -397,7 +292,6 @@ class EquilibriumForceFeedback:
         proposal = self.pid.propose(step.target_xy_m, tolerance_m=gate.tolerance_mm/1000)
         elapsed = self.pid.period if self.last_sent_at is None else max(.001, self.clock()-self.last_sent_at)
         max_step = min(self.max_angle_step_deg, self.angle_rate*elapsed)
-        stationary = motion['positions_mm'][0]/1000 if learn else None
         def valid():
             with gate.condition:
                 return (active() and self.enabled.is_set() and not self.manual
@@ -409,12 +303,7 @@ class EquilibriumForceFeedback:
             accepted[0] = True
             if self.preview_only:
                 return
-            self.pid.commit(proposal, result['requested_force_n'], result['predicted_force_n'],
-                            integral_rebase_n=result.get('integral_rebase_n'))
-            self.disturbance_estimate_n = np.asarray(result['disturbance_n'], float)
-            if result.get('disturbance_learned'):
-                # Learning refers to the previous fixed-command epoch, not a newly sent pose.
-                self.disturbance_epoch = self.send_generation
+            self.pid.commit(proposal, result['requested_force_n'], result['predicted_force_n'])
             if sent:
                 self.initial_sent(result)
                 self.publish(commanded_xy_mm=None, state='Force PID sent', observation_age_s=self.clock()-sample)
@@ -422,7 +311,6 @@ class EquilibriumForceFeedback:
             else:
                 self.publish(state='Force PID holding — below motor deadband')
             self.publish(integral_force_n=self.pid.integral_force.tolist(),
-                         held_disturbance_n=self.disturbance_estimate_n.tolist(),
                          predicted_force_n=np.asarray(result['predicted_force_n']).tolist(),
                          force_residual_n=float(result['force_residual_n']))
         def calculated(result):
@@ -430,7 +318,7 @@ class EquilibriumForceFeedback:
                 self.reference_inputs = np.asarray(result['reference_inputs'], float)
             self.publish(calculated_angles=list(result['angles_deg']), pid_force_n=proposal['pid_force_n'].tolist(),
                          **{key: np.asarray(result[key]).tolist() for key in (
-                             'disturbance_n', 'requested_force_n', 'predicted_force_n', 'force_residual_n',
+                             'requested_force_n', 'predicted_force_n', 'force_residual_n',
                              'stiffness_eigenvalues', 'calculation_time_s')})
         self.publish(state='Calculating force PID', force_observation_monotonic_s=sample,
                      observation_age_s=self.clock()-sample,
@@ -438,8 +326,7 @@ class EquilibriumForceFeedback:
         try:
             commander.move_force_pid(
                 case_name, step.target_xy_m, measured, self.last_result['angles_deg'], self.reference_inputs,
-                proposal['pid_force_n'], self.disturbance_estimate_n,
-                stationary_position_m=stationary, rebase_integral=self.pid.ki > 0,
+                proposal['pid_force_n'],
                 max_angle_step_deg=max_step, ratio=step.ratio, angle_deg=step.angle_deg,
                 zero_angle_deg=step.zero_angle_deg, active=valid, on_calculated=calculated,
                 on_sent=lambda result: commit(result, sent=True),

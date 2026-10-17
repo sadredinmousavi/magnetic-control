@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'experimental'))
 from functions_main import MagneticForcePID, build_actuation_matrix, generate_circular_source_positions
-from control_workflow import EquilibriumForceFeedback, calculate_force_pid_control
+from control_workflow import ForcePIDFeedback, calculate_force_pid_control
 from case_loader import load_case, build_common_config
 from arrival_control import ArrivalGate
 from settling_control import SettlingMonitor
@@ -54,14 +54,14 @@ class ForcePIDMathTests(unittest.TestCase):
         pid.observe([.1, 0], 2.1)
         self.assertEqual(pid.propose([0, 0])['dt_s'], 0.)
 
-    def test_allocation_matches_total_force_at_measured_position_without_moving_observer(self):
+    def test_allocation_matches_only_pid_force_at_measured_position(self):
         params = load_case('case_100.case')
         measured = np.array([.002, -.001])
-        with patch('control_workflow.estimate_equilibrium_disturbance') as observer:
-            result = calculate_force_pid_control(params, (0, 0), measured, [60.]*8, [.5]*8,
-                                                  [-1e-8, 2e-9], [3e-9, -2e-9], max_angle_step_deg=30)
-        observer.assert_not_called()
-        requested = np.array([-1.3e-8, 4e-9])
+        requested = np.array([-1e-8, 2e-9])
+        result = calculate_force_pid_control(params, (0, 0), measured, [60.]*8, [.5]*8,
+                                              requested, max_angle_step_deg=30)
+        self.assertNotIn('disturbance_n', result)
+        self.assertNotIn('integral_rebase_n', result)
         np.testing.assert_allclose(result['requested_force_n'], requested)
         cfg = build_common_config(dict(params, TARGET_SCHEDULE=[(0., np.zeros(2), 1., None)],
                                        INITIAL_ROBOT_POSITIONS=np.zeros((1, 2))))
@@ -80,7 +80,7 @@ class ContinuousRuntimeTests(unittest.TestCase):
         now = [0.]
         monitor = SettlingMonitor()
         pid = MagneticForcePID(period_s=.1, velocity_tau_s=0)
-        feedback = EquilibriumForceFeedback(settling=monitor, continuous=True, pid=pid, clock=lambda: now[0])
+        feedback = ForcePIDFeedback(pid=pid, clock=lambda: now[0])
         gate = ArrivalGate(require_arrival=False, clock=lambda: now[0])
         gate.settling = monitor
         step = XYStep((0, 0), 0, 180)
@@ -94,20 +94,18 @@ class ContinuousRuntimeTests(unittest.TestCase):
         gate.condition.wait = advance
         return feedback, gate, monitor, step, now
 
-    def result(self, requested, stationary=None):
+    def result(self, requested):
         return dict(angles_deg=[59.]*8, reference_inputs=np.full(8, .5), force_compensated=True,
-                    disturbance_n=[1e-9, 0] if stationary is not None else [0., 0.],
                     requested_force_n=np.asarray(requested), predicted_force_n=np.asarray(requested),
-                    integral_rebase_n=[0., 0.], disturbance_learned=stationary is not None,
                     force_residual_n=0., stiffness_eigenvalues=[1e-5, 1e-5], calculation_time_s=.001)
 
     def test_sends_while_moving_without_stationary_learning_or_integral(self):
         feedback, gate, monitor, step, now = self.fixture()
         calls, report = [], Mock()
-        def move(case, target, measured, angles, reference, pid_force, disturbance, **kwargs):
+        def move(case, target, measured, angles, reference, pid_force, **kwargs):
             self.assertTrue(kwargs['active']())
             self.assertFalse(monitor.snapshot(now[0])['ready'])
-            self.assertIsNone(kwargs['stationary_position_m'])
+            self.assertNotIn('stationary_position_m', kwargs)
             self.assertLessEqual(kwargs['max_angle_step_deg'], feedback.angle_rate*(now[0]-feedback.last_sent_at)+1e-6)
             result = self.result(pid_force)
             kwargs['on_calculated'](result)
@@ -134,24 +132,23 @@ class ContinuousRuntimeTests(unittest.TestCase):
                                 lambda: now[0] < .5 and not calls, Mock())
         self.assertEqual(len(calls), 1)
 
-    def test_stationary_estimate_only_after_unchanged_command_hold(self):
+    def test_stationary_hold_cannot_learn_or_double_pid_force(self):
         feedback, gate, monitor, step, now = self.fixture(speed=0)
-        learned = []
+        forces = []
         def move(*args, **kwargs):
-            if kwargs['stationary_position_m'] is not None:
-                self.assertTrue(monitor.snapshot(now[0])['ready'])
-                learned.append(now[0])
-            result = self.result(args[5], kwargs['stationary_position_m'])
-            if kwargs['stationary_position_m'] is None:
-                result['disturbance_n'] = args[6]
+            self.assertNotIn('stationary_position_m', kwargs)
+            self.assertNotIn('rebase_integral', kwargs)
+            self.assertEqual(len(args), 6)
+            forces.append(np.asarray(args[5]).copy())
+            result = self.result(args[5])
             kwargs['on_calculated'](result)
             kwargs['on_held'](result)
             return result
         feedback.wait_at_target(step, Mock(move_force_pid=move), 'case', gate,
                                 lambda: now[0] < 2, Mock())
-        self.assertEqual(len(learned), 1)
-        self.assertGreaterEqual(learned[0], 1.)
-        np.testing.assert_allclose(feedback.disturbance_estimate_n, [1e-9, 0])
+        self.assertGreater(len(forces), 8)
+        np.testing.assert_allclose(forces, np.tile(forces[0], (len(forces), 1)))
+        self.assertFalse(hasattr(feedback, 'disturbance_estimate_n'))
 
     def test_mode_change_discards_solution_without_integral_commit(self):
         feedback, gate, monitor, step, now = self.fixture()
@@ -165,6 +162,45 @@ class ContinuousRuntimeTests(unittest.TestCase):
         feedback.wait_at_target(step, Mock(move_force_pid=move), 'case', gate,
                                 lambda: running[0] and now[0] < .5, Mock())
         self.assertIsNone(feedback.pid.committed_at)
+
+    def test_optional_integral_builds_gradually_without_stationary_force_jump(self):
+        feedback, gate, monitor, step, now = self.fixture(speed=0)
+        feedback.pid.ki = 1e-6
+        forces = []
+        def move(*args, **kwargs):
+            forces.append(np.asarray(args[5]).copy())
+            kwargs['on_held'](self.result(args[5]))
+        feedback.wait_at_target(step, Mock(move_force_pid=move), 'case', gate,
+                                lambda: now[0] < 2, Mock())
+        increments = np.diff(np.asarray(forces)[:, 0])
+        self.assertGreater(feedback.pid.integral_force[0], 0)
+        self.assertTrue(np.all(increments >= -1e-20))
+        self.assertLessEqual(float(increments.max()), feedback.pid.ki*.01*2*feedback.pid.period+1e-20)
+        self.assertLess(feedback.pid.integral_force[0], feedback.pid.integral_limit)
+
+    def test_loss_off_next_and_stale_frame_veto_inflight_pid_allocation(self):
+        for change in ('loss', 'off', 'next', 'stale', 'stop'):
+            with self.subTest(change=change):
+                feedback, gate, monitor, step, now = self.fixture()
+                running = [True]
+                def move(*args, **kwargs):
+                    self.assertTrue(kwargs['active']())
+                    if change == 'loss':
+                        gate.observe(None)
+                    elif change == 'off':
+                        feedback.set_enabled(False)
+                    elif change == 'next':
+                        gate.request_next()
+                    elif change == 'stale':
+                        now[0] += 1.
+                    else:
+                        running[0] = False
+                    self.assertFalse(kwargs['active']())
+                    running[0] = False
+                    return None
+                feedback.wait_at_target(step, Mock(move_force_pid=move), 'case', gate,
+                                        lambda: running[0] and now[0] < 2, Mock())
+                self.assertIsNone(feedback.pid.committed_at)
 
     def test_repeated_camera_frame_cannot_produce_multiple_control_commands(self):
         feedback, gate, monitor, step, now = self.fixture()
@@ -229,7 +265,7 @@ class ContinuousRuntimeTests(unittest.TestCase):
         with patch('point_control.load_hardware_case', return_value={}), \
              patch('point_control.calculate_force_pid_control', return_value=result), \
              patch('helpers.moveArray') as write:
-            commander.move_force_pid('case', (0, 0), (.001, 0), [60.]*8, [.5]*8, [0, 0], [0, 0],
+            commander.move_force_pid('case', (0, 0), (.001, 0), [60.]*8, [.5]*8, [0, 0],
                                      motor_deadband_deg=.1, on_held=held, on_sent=sent)
         write.assert_not_called()
         sent.assert_not_called()

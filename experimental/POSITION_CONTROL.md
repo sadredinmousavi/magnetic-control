@@ -1,213 +1,133 @@
-# Commands: continuous force PID and equilibrium compensation
+# Commands: force PD/PID control
 
-GUI005 defaults to **Continuous PID**, initially PD because Ki=0. It combines
-continuous force allocation during motion with a stationary disturbance observer.
-Uncheck Continuous PID before starting a run to use the previous stationary-only
-compensation. The old incremental XY/Alpha controller is not used. Manual mode
-and saved XY offsets remain separate. Control itself still defaults off.
+Automatic control uses position feedback, filtered-velocity damping and an
+optional slow integral. **Disturbance learning and the stationary-only mode are
+removed**, including their settings and stored estimates. Control defaults off;
+Ki defaults to zero, so the first test uses PD. Manual XY, the open-loop optimizer
+and saved XY offsets are unchanged.
 
-## Continuous force PID (default)
+## Algorithm
 
-The magnetic force requested at the latest measured position is:
+Core calculations use metres, seconds and newtons:
 
-F_request = Kp * deadband(error) + integral_force - Kv * filtered_velocity - d_hat
+```text
+error = desired_position - measured_position
+F_request = Kp * deadband(error) - Kv * filtered_velocity + integral_force
+integral_candidate = clamp(integral_force + Ki * error * dt)
+```
 
-The position deadband is continuous: remove the arrival-tolerance radius from
-the error vector, or use zero inside that radius. Velocity damping remains
-active inside arrival tolerance when the robot is moving above the stationary
-threshold. It does not wait for settling or arrival before braking.
-The allocation matches TOTAL force A(p_measured)c to F_request, not an extra
-force added to the baseline. Baseline stiffness is still preserved at p_desired.
+The continuous radial position deadband subtracts the arrival-tolerance radius
+from the error magnitude, using zero inside that radius. Integral accumulates
+only outside tolerance. Damping uses measured velocity rather than a derivative
+of the setpoint, avoiding derivative kick on target changes.
 
-The stationary observer updates d_hat only after a fixed-command hold below
-the configured 0.5 mm/s threshold. During motion d_hat is held; -F_magnetic is
-never treated as a moving disturbance estimate. The averaged stationary position
-and last sent magnet inputs are used. A held motor pose below the motor deadband
-does not reset settling, allowing the stationary observer to collect samples.
+The allocator matches TOTAL force `A(p_measured) c` to `F_request` in cosine space.
+It does not add force to an already counted baseline force. The nominal optimizer
+establishes the reference trap at the original desired point. All three independent
+entries of its potential Hessian are preserved, retaining model stiffness, ratio
+and orientation. Cosines stay in [0,1]; model angles are `acos(c)` in degrees,
+without the hardware motor-zero offset.
 
-GUI gain units and starting settings:
-- Kp: 0.01 micro-newtons/mm
-- Ki: 0 micro-newtons/(mm*s); positive values enable residual integral correction
-- Kv: 0.01 micro-newtons*s/mm, damping from measured velocity (no setpoint derivative)
-- Period: 0.25 s, a maximum request rate of 4 Hz, not a guaranteed send rate
-- Velocity filter: 0.15 s
-- Angle rate: 20 degrees/s, also bounded by Max angle step (10 degrees)
-- Integral force maximum: 0.5 micro-newtons per component
-- Motor deadband: 0.1 degrees, suppressing repeated tiny angle changes
+The objective minimizes force mismatch with small movement/baseline penalties.
+Actual angle-step bounds and positive restoring stiffness are validated. Invalid
+or infeasible solves hold the last pose. Partial allocation is allowed and its
+residual is displayed.
 
-Core calculations use SI. These are starting settings, NOT experimentally
-tuned gains or a stability guarantee. Velocity uses actual timestamps and fresh
-position differences, with first-order filtering. Repeated frames do not generate
-extra PID updates. Lost tracking pauses control and requires velocity reacquisition;
-the integral is frozen rather than catching up over the observation gap.
+Integral commits only for an accepted allocation. It is bounded per component;
+conditional anti-windup prevents accumulating into unachievable force and permits
+unwinding. If the motor deadband holds a pose, anti-windup uses the force of the
+ACTUALLY held angles, not the proposed angles. No estimated disturbance or integral
+rebasing is applied, so becoming stationary cannot trigger a learned-force jump.
 
-Integral updates are committed only for an accepted allocation, never for a
-preview/discarded calculation. Conditional anti-windup blocks integration into
-unachievable force components; it permits unwinding. A held pose uses its actual
-model force for this test, not the force of the unsent candidate. With Ki>0, a
-new disturbance estimate rebases integral bias to avoid a feedforward jump,
-subject to the integral bound. Ki=0 disables integral accumulation completely.
+Velocity uses fresh observations and actual timestamps with first-order filtering.
+After loss/staleness, two fresh samples are required again. Repeated timestamps
+cannot produce duplicate updates. Integral resets for each new point/manual
+command; Control off/on or temporary loss retains bias but resets velocity history.
 
-Only one solve/transmission runs at a time. While busy, newer camera observations
-replace older observations in the gate; there is no growing control queue. The
-next update uses the latest available frame. A result older than min(1 s,
-2*Period), tracking loss, Next becoming due, Stop or a mode change vetoes sending.
-Angle-rate limits use elapsed time since the last completed transmission.
+## Settings and use
 
-The row Wait now gates NEXT-point navigation only in continuous mode. PID starts
-immediately after the initial pose transmission, even during that wait. A queued
-Next waits for the row deadline while PID remains active; it does not disable
-braking for the rest of the wait. Other modes retain their original wait behavior.
+Starting gains are not experimentally tuned or a stability guarantee:
 
-## Stationary-only cycle (Continuous PID unchecked)
+- Kp: 0.01 micro-newtons/mm.
+- Ki: 0 micro-newtons/(mm*s). Start with PD; introduce a small positive Ki only
+  after braking is satisfactory.
+- Kv: 0.01 micro-newtons*s/mm.
+- Period: 0.25 s, a maximum request rate of 4 Hz, not guaranteed send timing.
+- Velocity filter: 0.15 s.
+- Angle rate: 20 degrees/s; Max angle step also bounds each update (10 degrees).
+- Integral maximum: 0.5 micro-newtons per component.
+- Motor deadband: 0.1 degrees.
+- Hold speed: 0.5 mm/s. A pose holds only when ALSO inside arrival tolerance
+  (default 1 mm). Outside tolerance, low speed never pauses PID. Inside tolerance,
+  motion above this threshold continues to receive damping.
 
-1. Send the normal point pose, optionally using its saved manual XY offset.
-2. Keep all eight commands fixed while one robot settles.
-3. Require fresh tracking, a full speed window with at least three frames,
-   and low speed/residual motion continuously for the hold interval.
-4. Estimate d_hat = -A(p_measured) cos(theta_LAST_SENT), using the averaged
-   settled position. Positions are metres for the magnetic model.
-5. Allocate c_new so A(p_desired) c_new approximately equals -d_hat at the
-   ORIGINAL desired point. Preserve the baseline potential Hessian and
-   respect cosine bounds [0,1] and the maximum actual angle change.
-6. Recheck freshness, motion, tracking loss, mode and Next/Stop before sending.
-7. Reset settling after transmission. The next estimate uses the NEW angles.
+Settings lock during a run. Manual and Control on/off stay live in both views.
+Preview only calculates automatic corrections without sending; initial point
+and manual commands still move. Automatic feedback requires one robot;
+multi-robot tracking, ordinary execution and Manual remain available.
 
-Default speed threshold is **0.5 mm/s**. Window, Hold and Min wait are each
-0.5 s. Maximum angle step is 10 degrees per stationary correction.
-Control defaults off. Preview only defaults off.
-Settings are configurable and locked during a run. Arrival tolerance (1 mm
-by default) stops further correction once the settled position is close enough.
-A slow frame, duplicate observation or tracking loss cannot complete the hold.
-The monitor checks residual motion as well as regression velocity to reject
-oscillations that return to their starting position.
+PID starts after the initial transmission, including during the row Wait. Wait
+gates Next navigation, not feedback. Next can be queued without requiring arrival;
+there is no automatic path progression. Arrival hold is only an arrival indicator,
+not a stationary-force estimator or controller delay.
 
-The allocator uses a normalized quadratic force-error objective and small
-movement/baseline penalties. All three independent entries of the baseline
-potential Hessian are constrained and checked after solving; its eigenvalues
-must be positive. An angle-limited update may cancel only part of the force.
-A failed, non-improving or infeasible solve holds the last pose and reports
-its reason. It is consumed once for that fixed-command stationary epoch,
-rather than retried every camera frame. New motion, a send or a Control toggle
-allows a new estimate. This optional mode has no error integrator or during-motion braking.
-
-**Preview only** calculates without sending corrections (once per stationary
-epoch in stationary mode; per fresh eligible sample in continuous mode).
-Initial path and manual commands still move normally.
+Before sending, recheck tracking, active point/mode, Stop/Next and observation age
+(`min(1 s, 2*Period)`). Angle-rate limits use elapsed time since transmission end.
 
 ## Functions and ownership
 
-- functions_main.py: estimate_equilibrium_disturbance and
-  find_force_compensated_inputs contain the magnetic math and constrained solve;
-  MagneticForcePID contains velocity filtering, force PID and anti-windup.
-- control_workflow.py: calculate_equilibrium_force_control constructs the case
-  model; calculate_force_pid_control allocates total force during motion.
-  EquilibriumForceFeedback contains the reusable state machine for both modes.
-- experimental/point_control.py: serializes calculation and transmission.
-- experimental/command_tab.py: widgets, display and service connections only.
+- `functions_main.py`: `MagneticForcePID` filters velocity, calculates PID and
+  anti-windup; `allocate_force_inputs` handles constrained magnetic allocation.
+- `control_workflow.py`: `calculate_force_pid_control` builds the model and
+  allocates only PID force; `ForcePIDFeedback` manages runtime state.
+- `experimental/point_control.py`: serialized calculation and transmission.
+- `experimental/command_tab.py`: widgets, display and service connections.
 
-The old position_control.py remains a legacy reusable module for compatibility;
-GUI005 does not import it or expose its PID/adaptive controls.
+When the initial pose uses saved/manual XY u, nominal stiffness is calculated once
+at the ORIGINAL desired point with its ratio/orientation and cached. A non-positive
+reference is rejected. Automatic angle corrections have no unique equivalent XY
+offset: they do not overwrite saved u or draw a fictitious commanded XY marker.
+Save u keeps successfully sent manual/initial XY offsets in memory/table; Export
+points + u exports these separately. Drafts and PID integral are not exported.
+The legacy `position_control.py` is not used by GUI005.
 
-The reference Hessian is evaluated at the desired point from its nominal
-optimizer inputs and retained across corrections. If the initial point used a
-shifted XY command, the nominal optimizer runs once at the original desired
-point to establish the reference with its requested ratio/orientation; that
-reference is cached. A non-positive reference is rejected.
+## Display, diagnostics and timing
 
-## Manual XY, saved u and navigation
+Both views use fixed cells for desired/measured XY, u, commanded XY, speed (hold
+threshold), position error, integral, requested/allocated force, residual and
+calculated/sent angles. Hover reveals clipped values. Force values are model
+micro-newtons, not independently measured forces.
 
-Manual mode and mouse editing stay live during execution. A click requests an
-active-point update through the existing worker; newer unsent clicks supersede
-older ones. While stopped, clicking drafts commanded XY and Run selected sends.
-Save u accepts the latest actually sent manual/initial XY correction in memory
-and the table. Export points + u writes all accepted XY offsets to JSON;
-Load/Clear restore/reset them. Drafts are not exported.
+Use **Start diagnostics** beside Pop-out camera or in its Data group, reproduce
+the problem, then **Stop diagnostics**. Sessions auto-save under
+`experimental/diagnostics/YYYY-MM-DD_HH-MM-SS_microseconds/`, also on app close:
 
-Automatic force compensation directly changes eight magnet inputs. It has no
-unique equivalent XY offset, does not overwrite saved u, and leaves Commanded
-XY/C marker blank or hidden after application. Save u explains this distinction
-instead of storing an old XY value as the force correction. Force corrections
-are relearned on each visit; the XY-u JSON does not store them.
+- `frames.csv`: per-robot rows for GUI-accepted frames, including failed/empty
+  detections, desired/measured XY, speed/error, integral/PID force, allocation,
+  stiffness, calculated/sent angles, ROI, states and timing.
+- `records.jsonl`: full snapshots, independent calculation/send/hold/error events
+  and half-second heartbeats, including camera outages.
+- `session.json`: initial/final calibration, sequence, settings, model, units,
+  versions, counts and completeness/error status.
 
-Control on exits Manual and enables force compensation. Control off holds the
-last transmitted pose. Entering Manual cancels unsent automatic work.
-Next can queue one advance during calculation without requiring arrival;
-the row minimum wait still applies. While idle it runs the following row
-(First point at the end). There are no routine hardware confirmation dialogs.
-Actual camera/controller, calibration and target-validity checks remain.
+Send the whole folder. CSV forces use N, positions mm. Measurement and force-source
+timestamps identify source samples; telemetry may lag the current camera frame.
+Monotonic receipt age is not sensor-exposure-to-actuation latency. It logs accepted
+GUI frames, not every sensor exposure. Background writing avoids video encoding;
+overflow/disk errors mark sessions incomplete. No images or connection credentials
+are recorded. Old diagnostic files remain unchanged.
 
-## Display, logging and interpretation
+Motor commands are sequential. Repeat unchecked sends once; checked selects 2/3
+identical packets per motor (default 3), without repeating optimization. Ten
+milliseconds between copies adds 0/80/160 ms per eight motors, excluding serial
+and physical response. Completed writes do not confirm physical rotation.
+These delays limit bandwidth. Positive model stiffness does not prove physical
+closed-loop stability. Hardware testing is required.
 
-Main/pop-out fixed cells show desired/measured XY, speed (threshold), hold,
-disturbance and requested cancelling force in model micro-newtons, predicted
-force residual, and calculated/sent angles. Hover reveals clipped content.
-The CSV stores forces in N: disturbance_n, requested_force_n,
-predicted_force_n, force_residual_n, magnet_cosine_inputs,
-stiffness_eigenvalues_n_m, control_calculation_time_s, force_compensated,
-plus positions, settling data and calculated/sent angles.
-Continuous-mode CSV fields additionally include velocity_xy_mm_s,
-position_error_mm, pid_force_n, integral_force_n, held_disturbance_n,
-observation_age_s, control_cycle_time_s and force gains in SI. Cycle time
-includes calculation/transmission; observation age is software frame-receipt
-age, not verified camera-exposure-to-physical-actuation latency.
+## Video export
 
-The force scale uses nominal case magnetic properties. Micro-newtons are
-model estimates, not independently calibrated measurements. The disturbance
-includes magnetic-model error and contact reactions; transfer from measured
-to desired position assumes locally similar disturbance. Positive magnetic
-curvature does not prove total stability if unknown force gradients matter.
-
-Automatic force compensation requires one tracked robot; it does not infer
-individual forces from a swarm centroid. Multi-robot tracking, ordinary path
-execution and Manual remain available. Transmission completion is not motor
-position confirmation. Motor commands are sequential. The shared **Repeat**
-checkbox in the main Commands page and pop-out Control group selects one send
-when unchecked, or exactly 2/3 identical packets per motor when checked.
-Default is checked with 3, matching the former hard-coded triple transmission.
-There is 10 ms between copies of a motor packet: for eight motors this adds
-0/80/160 ms at 1/2/3 sends, excluding serial and physical motor delay.
-The setting also applies to Calibration axis moves through the shared commander.
-It can change during a run; a transmission snapshots its count before sending,
-and settling starts only after the complete transmission finishes. The optimizer
-does not run again for duplicate packets. Other GUIs keep their legacy default.
-Continuous force PID adds during-motion damping. Its attainable bandwidth is
-still limited by these delays and physical actuator response; it is not a hard
-real-time system or predictive controller. Verify response experimentally.
-
-## Diagnostic data collection
-
-Use **Start diagnostics** beside Pop-out camera in Commands, or in the pop-out
-**Data** group. Start before running the experiment; press **Stop diagnostics**
-after reproducing the problem. It also saves on application close. Files go to
-`experimental/diagnostics/YYYY-MM-DD_HH-MM-SS_microseconds/` automatically:
-
-- `frames.csv`: one row per detected robot per GUI-accepted camera frame, including
-  empty/failed-detection frames. Desired/measured XY, error, filtered velocity,
-  force estimates, PID output, stiffness, calculated/sent angles, ROI, states and timing.
-- `records.jsonl`: full frame snapshots, independent calculation/send/hold/error
-  events and half-second heartbeats (including camera outages).
-- `session.json`: initial/final calibration, sequence, settings, hardware model,
-  units, software versions, record counts and completeness/error status.
-
-Send the **whole folder**, not just the CSV, for diagnosis. The JSONL includes
-controller snapshots even where failed detection leaves CSV tracking fields empty.
-Motor events distinguish a proposed calculation from completed serial writes;
-they do not confirm actual motor rotation. Timestamps use a shared monotonic
-clock; camera receipt time is not sensor exposure time. Controller telemetry is
-the latest available snapshot and may lag the frame. This logs received/processed
-Commands frames, not every sensor exposure. It does not change gains or issue
-motor commands. Background writing avoids video encoding; bounded-queue overflow
-or disk errors are explicitly reported as incomplete recordings. Videos remain
-an independent recording option. No image data or connection credentials are saved.
-
-## Circular recording export
-
-Circle crop and Fit workspace use a fixed native-pixel circular crop for all
-three exported videos. Set Radius px and Place crop for a manual centre.
-Outside pixels are black (blue in chroma-key overlay), with out-of-frame areas
-padded. Crop is applied after overlays and does not change tracking/control
-coordinates. Settings freeze while recording; CSV remains in native camera
-pixels and calibrated physical coordinates. Show commanded point adds the C
-marker for XY/manual commands; no fictitious XY marker is drawn for a direct
-force correction.
+Video recording is independent. Circle crop and Fit workspace use a fixed
+native-pixel circle for all three videos; manual Radius px/Place crop remain.
+Outside pixels are black (blue for chroma-key overlay). Crop follows overlays
+and does not change tracking coordinates. Crop settings freeze during recording;
+CSV remains in native camera/physical coordinates.

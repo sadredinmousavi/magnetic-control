@@ -585,27 +585,12 @@ def calculate_potential_hessian(target_pos, source_positions, C_F, u):
 
 
 
-def estimate_equilibrium_disturbance(position_m, source_positions, C_F, applied_inputs):
-    """Model-relative disturbance in N at a stationary, fixed-command position.
-
-    Inputs are cos(model angle), never servo angles including the motor zero.
-    The caller must establish stationary motion and use the actually sent inputs.
-    """
-    position = np.asarray(position_m, float)
-    inputs = np.asarray(applied_inputs, float)
-    if (position.shape != (2,) or inputs.shape != (len(source_positions),)
-            or not np.isfinite(position).all() or not np.isfinite(inputs).all()
-            or np.any(inputs < 0) or np.any(inputs > 1)):
-        raise ValueError('Equilibrium estimate needs finite XY metres and cosine inputs in [0, 1].')
-    return -build_actuation_matrix(position, source_positions, C_F) @ inputs
-
-
-def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_n,
+def allocate_force_inputs(desired_m, source_positions, C_F, requested_force_n,
                                   applied_inputs, reference_inputs, *, max_angle_step_deg=10.,
                                   allocation_position_m=None, allow_no_improvement=False):
-    """Allocate a stationary disturbance correction without changing trap shape.
+    """Allocate a requested force without changing the baseline trap stiffness.
 
-    The normalized quadratic objective matches A(desired)c = -disturbance,
+    The normalized quadratic objective matches A(allocation_position)c = requested,
     with small tie-breaking penalties on movement and departure from baseline.
     All three entries of the baseline potential Hessian are preserved exactly.
     Bounds enforce the existing [0,1] cosine branch and an actual angle-step limit.
@@ -613,16 +598,16 @@ def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_
     angles may be sent. Partial force cancellation is allowed when angle-limited.
     """
     desired = np.asarray(desired_m, float)
-    disturbance = np.asarray(disturbance_n, float)
+    requested = np.asarray(requested_force_n, float)
     current, reference = np.asarray(applied_inputs, float), np.asarray(reference_inputs, float)
     n = len(source_positions)
-    if (desired.shape != (2,) or disturbance.shape != (2,)
+    if (desired.shape != (2,) or requested.shape != (2,)
             or current.shape != (n,) or reference.shape != (n,)
-            or not all(np.isfinite(x).all() for x in (desired, disturbance, current, reference))
+            or not all(np.isfinite(x).all() for x in (desired, requested, current, reference))
             or np.any(current < 0) or np.any(current > 1)
             or np.any(reference < 0) or np.any(reference > 1)
             or not np.isfinite(max_angle_step_deg) or not 0 < max_angle_step_deg <= 90):
-        raise ValueError('Invalid force compensation inputs or maximum angle step (0, 90] degrees.')
+        raise ValueError('Invalid force allocation inputs or maximum angle step (0, 90] degrees.')
     allocation_position = desired if allocation_position_m is None else np.asarray(allocation_position_m, float)
     if allocation_position.shape != (2,) or not np.isfinite(allocation_position).all():
         raise ValueError('Allocation position must be finite XY metres.')
@@ -635,8 +620,8 @@ def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_
     if eigenvalues[0] <= 0:
         raise ValueError('The baseline trap has no positive restoring stiffness at the desired point.')
     hscale = max(float(np.linalg.norm(H0)), 1e-30)
-    fscale = max(float(np.linalg.norm(A)), float(np.linalg.norm(disturbance)), 1e-30)
-    M, d = A / fscale, disturbance / fscale
+    fscale = max(float(np.linalg.norm(A)), float(np.linalg.norm(requested)), 1e-30)
+    M, d = A / fscale, requested / fscale
     # SVD removes redundant Hessian equalities without dropping physical constraints.
     U, s, Vt = np.linalg.svd(B / hscale, full_matrices=False)
     rank = int(np.sum(s > max(s[0], 1e-30)*1e-10))
@@ -648,10 +633,10 @@ def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_
     upper = np.cos(np.maximum(0, theta-step))
     lower = np.maximum(0., lower)
     def objective(c):
-        return float(np.sum((M @ c+d)**2) + 1e-8*np.sum((c-current)**2)
+        return float(np.sum((M @ c-d)**2) + 1e-8*np.sum((c-current)**2)
                      + 1e-9*np.sum((c-reference)**2))
     def gradient(c):
-        return 2*M.T @ (M @ c+d) + 2e-8*(c-current) + 2e-9*(c-reference)
+        return 2*M.T @ (M @ c-d) + 2e-8*(c-current) + 2e-9*(c-reference)
     result = minimize(objective, np.clip(current, lower, upper), jac=gradient,
                       method='SLSQP', bounds=list(zip(lower, upper)),
                       constraints=[LinearConstraint(E, goal, goal)],
@@ -663,11 +648,11 @@ def find_force_compensated_inputs(desired_m, source_positions, C_F, disturbance_
             or np.linalg.norm(H-H0) > hscale*1e-5
             or np.linalg.eigvalsh(H)[0] <= 0):
         raise ValueError(f'Force allocation infeasible or failed validation: {result.message}')
-    residual = float(np.linalg.norm(A @ c+disturbance))
-    before = float(np.linalg.norm(A @ current+disturbance))
+    residual = float(np.linalg.norm(A @ c-requested))
+    before = float(np.linalg.norm(A @ current-requested))
     if not allow_no_improvement and (before <= fscale*1e-10 or residual >= before*(1-1e-5)):
         raise ValueError('No useful force improvement within the angle-step and stiffness constraints.')
-    return c, dict(disturbance_n=disturbance, requested_force_n=-disturbance,
+    return c, dict(requested_force_n=requested,
                    predicted_force_n=A @ c, force_residual_n=residual,
                    initial_force_residual_n=before, stiffness_eigenvalues=np.linalg.eigvalsh(H),
                    H=H, allocation_iterations=int(result.nit))
@@ -725,13 +710,11 @@ class MagneticForcePID:
                     integral_force_n=integral, pid_force_n=self.kp*control_error+integral-self.kv*self.velocity,
                     timestamp=self.observed_at, dt_s=dt)
 
-    def commit(self, proposal, requested_force_n, achieved_force_n, *, integral_rebase_n=None):
+    def commit(self, proposal, requested_force_n, achieved_force_n):
         if self.ki == 0:
             self.integral_force[:] = 0.
         else:
-            rebase = np.zeros(2) if integral_rebase_n is None else np.asarray(integral_rebase_n)
-            self.integral_force = np.clip(self.integral_force+rebase, -self.integral_limit, self.integral_limit)
-            candidate = np.clip(proposal['integral_force_n']+rebase, -self.integral_limit, self.integral_limit)
+            candidate = np.clip(proposal['integral_force_n'], -self.integral_limit, self.integral_limit)
             increment = candidate-self.integral_force
             unmet = np.asarray(requested_force_n)-np.asarray(achieved_force_n)
             # Do not integrate further into any force/angle/stiffness saturation.

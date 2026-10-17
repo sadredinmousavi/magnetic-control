@@ -34,7 +34,7 @@ class CameraPopoutTests(unittest.TestCase):
         app.feedback = Mock()
         app.feedback.snapshot.return_value = dict(
             desired_xy_mm=[-100.12, 99.5], correction_mm=[1, -2],
-            robot_speed_mm_s=.12, settle_speed_limit_mm_s=.5,
+            robot_speed_mm_s=.12, hold_speed_mm_s=.5,
             state='Waiting for settled response', calculated_angles=[123.4] * 8)
         original_widgets = {key: pair[0] for key, pair in fields.items()}
         app.refresh_control_details(fields)
