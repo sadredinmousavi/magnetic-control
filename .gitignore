@@ -1,5 +1,10 @@
 *.gif
-# outputs/*.mp4
+# Saved video recordings
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
 # outputs/*.txt
 # outputs/temp_plots/*.png
 outputs/*
