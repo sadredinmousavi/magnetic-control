@@ -188,6 +188,25 @@ class CameraPopoutTests(unittest.TestCase):
         app.click_target(Mock(x=300, y=300), screen_points=popup_canvas.screen_points)
         app.table.selection_set.assert_called_once_with('1')
 
+    def test_command_circle_crop_masks_preview_and_preserves_native_mouse_coordinates(self):
+        app = CommandTab.__new__(CommandTab)
+        app.frame = np.full((400, 600, 3), 220, np.uint8)
+        original = app.frame.copy()
+        app.canvas = canvas(300, 300)
+        app.setup, app.pixels = {'corners_px': []}, None
+        app.workspace_circle = Mock(return_value=(200, 150, 100))
+        images = []
+        with patch('command_tab.ImageTk.PhotoImage', side_effect=lambda image: images.append(image.copy()) or Mock()):
+            app.render()
+        self.assertEqual(images[0].size, (300, 300))
+        self.assertEqual(images[0].getpixel((0, 0)), (0, 0, 0))
+        self.assertEqual(images[0].getpixel((150, 150)), (220, 220, 220))
+        self.assertEqual(images[1].getpixel((0, 0)), (0, 0, 0, 255))
+        self.assertEqual(images[1].getpixel((150, 150)), (0, 0, 0, 0))
+        ox, oy, scale = app.canvas.camera_transform
+        np.testing.assert_allclose((np.array([150, 150]) - [ox, oy]) / scale, [200, 150])
+        np.testing.assert_array_equal(app.frame, original)
+
     def test_embedded_views_do_not_draw_images_while_popout_is_open(self):
         for cls in (CalibrationTab, CommandTab):
             app = cls.__new__(cls)

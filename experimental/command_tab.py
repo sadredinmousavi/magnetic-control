@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 
 from command_sequences import (
     XY_SEQUENCE_DIR, read_xy_sequence, resolve_xy_units, project_sequence, execute_xy_sequence,
@@ -23,7 +23,7 @@ from command_sequences import (
 from point_control import hardware_case_name, load_hardware_case
 from closed_loop_calibration import MovingROICalibration, default_setup_name
 from arrival_control import ArrivalGate
-from command_recording import CommandRecording, draw_command_overlay, video_crop_circle
+from command_recording import CommandRecording, CircularVideoCrop, draw_command_overlay, video_crop_circle
 from control_diagnostics import ControlDiagnostics
 from camera_popout import CameraPopout, show_view_dialog
 from control_workflow import ForcePIDFeedback
@@ -62,9 +62,10 @@ class CommandTab:
         self.force_step_var = tk.StringVar(value='10')
         self.force_preview_var = tk.BooleanVar(value=False)
         self.force_pid_settings = {key: tk.StringVar(value=value) for key, value in (
-            ('Kp', '.01'), ('Ki', '.0005'), ('Kv', '.01'), ('Period s', '.25'),
+            ('Kp', '.015'), ('Ki', '.00015'), ('Kv', '.015'), ('Period s', '.25'),
             ('Velocity filter s', '.15'), ('Rate deg/s', '20'), ('I max µN', '.5'), ('Deadband deg', '.1'))}
         self.force_hold_speed_var = tk.StringVar(value='.5')
+        self.slow_assist_var = tk.BooleanVar(value=False)
         self.precalculating = False
         self.precalculated_signature = None
         self.preparation_stop = threading.Event()
@@ -84,7 +85,6 @@ class CommandTab:
         self.diagnostic_frame = 0
         self.recording_fps_var = tk.StringVar(value='5')
         self.crop_enabled_var = tk.BooleanVar(value=False)
-        self.crop_fit_var = tk.BooleanVar(value=True)
         self.crop_radius_var = tk.StringVar(value='300')
         self.crop_center = None
         self.crop_placing = False
@@ -277,10 +277,22 @@ class CommandTab:
         preview = tk.Checkbutton(force_bar, text='Preview only', variable=self.force_preview_var)
         preview.pack(side='left')
         self.force_entries.extend([force_step, preview])
+        slow_assist = tk.Checkbutton(force_bar, text='Slow-motion assist (trial)', variable=self.slow_assist_var)
+        slow_assist.pack(side='left', padx=4)
+        self.force_entries.append(slow_assist)
+        HoverHint(slow_assist, 'After 3 seconds below 0.3 mm/s and error above max(3 mm, twice tolerance), '
+                  'ramp proportional correction up to 1.5 times over 3 seconds. Normal gains return immediately '
+                  'when moving or nearer the target. Ki, Kv, integral memory and motor limits stay unchanged. '
+                  'Experimental: check motion direction before enabling. Set before starting a run.')
         HoverHint(force_step, 'Maximum model-angle change per PID update; default 10 degrees, also angle-rate limited. '
                   'The solver preserves baseline stiffness and holds on an invalid or infeasible solve.')
         HoverHint(preview, 'Calculate and display force corrections without sending them. '
                   'Initial path and manual commands still move normally.')
+        self.reset_pid_button = tk.Button(force_bar, text='Reset PID memory', command=self.reset_pid_memory)
+        self.reset_pid_button.pack(side='left', padx=6)
+        self.force_entries.append(self.reset_pid_button)
+        HoverHint(self.reset_pid_button, 'While stopped, clear the cumulative force bias for the next run. '
+                  'Does not move motors. Control on carries bounded integral correction between matching points/runs.')
         pid_bar = tk.LabelFrame(parent, text='Force PID — gains in µN, mm and seconds (Ki=0 disables integral)')
         pid_bar.pack(fill='x', padx=8, pady=2)
         for key, variable in self.force_pid_settings.items():
@@ -305,19 +317,19 @@ class CommandTab:
         crop_bar = tk.Frame(parent)
         crop_bar.pack(fill='x', padx=8, pady=2)
         self.crop_controls = []
-        for label, variable in [('Circle crop', self.crop_enabled_var), ('Fit workspace (4 pins)', self.crop_fit_var)]:
+        for label, variable in [('Circle crop (auto-fit 4 pins)', self.crop_enabled_var)]:
             check = tk.Checkbutton(crop_bar, text=label, variable=variable, command=self.render)
             check.pack(side='left')
             self.crop_controls.append(check)
-        tk.Label(crop_bar, text='Radius px').pack(side='left')
+        tk.Label(crop_bar, text='Without pins: radius px').pack(side='left')
         crop_radius = tk.Entry(crop_bar, textvariable=self.crop_radius_var, width=5)
         crop_radius.pack(side='left')
         crop_radius.bind('<Return>', lambda event: self.render())
         crop_place = tk.Button(crop_bar, text='Place crop', command=self.begin_crop_placement)
         crop_place.pack(side='left', padx=4)
         self.crop_controls.extend([crop_radius, crop_place])
-        HoverHint(crop_place, 'Unchecks Fit workspace. Click the main/pop-out camera to position the export circle. '
-                  'Crop is frozen during recording; tracking and CSV stay in native camera coordinates.')
+        HoverHint(crop_place, 'With four calibrated pins, the circle always fits them automatically. '
+                  'Without pins, click the camera to place a manual circle. CSV uses native coordinates.')
         tk.Label(parent, text="Green: tracked robots    Cyan: desired points    Orange: active target    Red: beyond pins. Select a row or click a target.",
                  anchor="w").pack(fill="x", padx=10)
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
@@ -656,6 +668,7 @@ class CommandTab:
             if (not np.isfinite([tracker.minimum_area, tracker.contrast_threshold, tracker.radius]).all()
                     or tracker.minimum_area <= 0 or tracker.radius <= 0 or not 1 <= tracker.contrast_threshold <= 255):
                 raise ValueError("Min area and ROI radius must be positive; contrast must be 1–255.")
+            tracker.workspace_circle = self.workspace_circle()
             self.tracking_detections, center, self.tracking_group_xy = tracker.process(self.frame)
             if getattr(self, 'command_roi', None) is not None and center is not None:
                 self.command_roi = (*tracker.center, tracker.radius)
@@ -721,12 +734,15 @@ class CommandTab:
                 'position_error_mm': json.dumps(control_data.get('position_error_mm')),
                 'pid_force_n': json.dumps(control_data.get('pid_force_n')),
                 'integral_force_n': json.dumps(control_data.get('integral_force_n')),
+                'inherited_integral_force_n': json.dumps(control_data.get('inherited_integral_force_n')),
                 'hold_speed_mm_s': control_data.get('hold_speed_mm_s', ''),
                 'observation_age_s': control_data.get('observation_age_s', ''),
                 'control_cycle_time_s': control_data.get('control_cycle_time_s', ''),
                 'force_kp_n_m': control_data.get('force_kp_n_m', ''),
                 'force_ki_n_m_s': control_data.get('force_ki_n_m_s', ''),
                 'force_kv_n_s_m': control_data.get('force_kv_n_s_m', ''),
+                'slow_assist_active': control_data.get('slow_assist_active', False),
+                'slow_assist_scale': control_data.get('slow_assist_scale', 1.),
                 'correction_x_mm': (control_data.get('correction_mm') or ['', ''])[0],
                 'correction_y_mm': (control_data.get('correction_mm') or ['', ''])[1],
                 'commanded_x_mm': (control_data.get('commanded_xy_mm') or ['', ''])[0],
@@ -789,10 +805,11 @@ class CommandTab:
                  'tracking_contrast_var', 'arrival_tolerance_var', 'arrival_hold_var',
                  'force_step_var', 'force_preview_var', 'force_hold_speed_var',
                  'manual_mode_var', 'repeat_motors_var', 'motor_repeat_count_var',
-                 'allow_extrapolation_var', 'use_learned_var')
+                 'allow_extrapolation_var', 'use_learned_var', 'slow_assist_var')
         values = {name: getattr(self, name).get() for name in names if hasattr(self, name)}
         values['pid_display_units'] = {key: var.get() for key, var in self.force_pid_settings.items()}
-        values['controller'] = 'force_pid_without_disturbance_learning'
+        values['controller'] = 'force_pid_cumulative_integral'
+        values['integral_carry_between_points'] = True
         values['camera_source'] = getattr(self.calibration, 'camera_source_key', None)
         values['processing_fps'] = self.calibration.live_fps_var.get()
         return values
@@ -1021,12 +1038,13 @@ class CommandTab:
                      ('Next', self.next_point, self.next_button),
                      ('Stop', self.stop, self.stop_button),
                      ('Control off', self.toggle_control, self.control_button),
+                     ('Reset PID memory', self.reset_pid_memory, self.reset_pid_button),
                      ('Save u', self.save_learned, self.save_u_button),
                      ('Crop', self.begin_crop_placement, None),
                      ('Start diagnostics', self.toggle_diagnostics, self.diagnostics_button)),
             action_groups={'Place ROI': 'ROI', 'Clear ROI': 'ROI', 'First': 'Path',
                            'Selected': 'Path', 'Next': 'Path', 'Stop': 'Path',
-                           'Control off': 'Control', 'Save u': 'Control', 'Crop': 'View',
+                           'Control off': 'Control', 'Reset PID memory': 'Control', 'Save u': 'Control', 'Crop': 'View',
                            'Start diagnostics': 'Data'},
             group_builders={'Control': self.build_popout_control_mode},
             action_captions={'Run all': 'First', 'Run selected point': 'Selected', 'Next point': 'Next'},
@@ -1129,6 +1147,16 @@ class CommandTab:
         self.control_button.config(text='Control on' if enabled else 'Control off')
         if self.feedback is not None:
             self.feedback.set_enabled(enabled)
+
+    def reset_pid_memory(self):
+        if self.running or self.precalculating:
+            self.status.config(text='Stop before resetting PID memory.')
+            return
+        if self.feedback is not None:
+            self.feedback.pid.reset()
+            self.feedback.publish(integral_force_n=[0., 0.], inherited_integral_force_n=[0., 0.])
+        self.force_memory_context = None
+        self.status.config(text='PID memory cleared. No motor command sent; the next run starts without a carried force bias.')
 
     def build_control_details(self, parent):
         panel = tk.LabelFrame(parent, text='Control details (XY mm; model force µN)')
@@ -1373,16 +1401,32 @@ class CommandTab:
             self.recording_status.config(text='Stop recording before changing the crop.')
             return
         self.crop_enabled_var.set(True)
-        self.crop_fit_var.set(False)
+        if self.setup is not None and len(self.setup['corners_px']) == 4:
+            self.crop_placing = False
+            self.recording_status.config(text='Workspace circle automatically fits all four pins, with a margin.')
+            self.render()
+            return
         self.crop_placing = True
-        self.recording_status.config(text='Click the camera for the export circle center; radius uses native pixels.')
+        self.recording_status.config(text='Click the camera for the workspace circle center; radius uses native pixels.')
+
+    def workspace_circle(self):
+        recording = getattr(self, 'recording', None)
+        crop = recording.crop if recording is not None else None
+        if crop is not None:
+            return crop.x, crop.y, crop.radius
+        if not hasattr(self, 'crop_enabled_var'):
+            return None
+        return self.recording_circle()
 
     def recording_circle(self):
         if not self.crop_enabled_var.get() or self.frame is None:
             return None
+        corners = None if self.setup is None else self.setup['corners_px']
+        if corners is not None and len(corners) == 4:
+            # Never let a leftover manual radius shrink a calibrated workspace.
+            return video_crop_circle(self.frame.shape[1::-1], corners=corners, fit=True)
         return video_crop_circle(self.frame.shape[1::-1], center=self.crop_center,
-                                 radius=float(self.crop_radius_var.get()), fit=self.crop_fit_var.get(),
-                                 corners=None if self.setup is None else self.setup['corners_px'])
+                                 radius=float(self.crop_radius_var.get()))
 
     def precalculate_all(self):
         if self.running or self.precalculating:
@@ -1481,7 +1525,8 @@ class CommandTab:
                 feedback = ForcePIDFeedback(validate=validate_correction, manual=manual,
                     max_angle_step_deg=float(self.force_step_var.get()), preview_only=self.force_preview_var.get(),
                     pid=pid, angle_rate_deg_s=angle_rate, motor_deadband_deg=deadband,
-                    hold_speed_mm_s=float(self.force_hold_speed_var.get()) if hasattr(self, 'force_hold_speed_var') else .5)
+                    hold_speed_mm_s=float(self.force_hold_speed_var.get()) if hasattr(self, 'force_hold_speed_var') else .5,
+                    slow_motion_assist=self.slow_assist_var.get() if hasattr(self, 'slow_assist_var') else False)
                 if self.control_requested and not manual:
                     feedback.enabled.set()
             setup, pixels = self.prepare(validate=False)
@@ -1512,6 +1557,20 @@ class CommandTab:
             if hasattr(self, 'command_roi') and (self.command_roi is None or self.tracking_group_xy is None
                     or len(self.tracking_detections) != int(self.tracking_count_var.get())):
                 raise ValueError('Wait for a fresh, complete robot group inside the Phase 3 ROI before running.')
+            force_context = None
+            if feedback is not None:
+                signature = self.commander.hardware_signature(load_hardware_case(setup['control_case']))
+                count = self.tracking_count_var.get() if hasattr(self, 'tracking_count_var') else 1
+                revision = getattr(self.calibration, 'setup_revision', 0)
+                revision = revision if isinstance(revision, int) else 0
+                force_context = (correction_context(setup, self.steps, signature, count), revision, port)
+                previous = getattr(self, 'feedback', None)
+                if (self.control_requested and not manual and not feedback.preview_only
+                        and isinstance(previous, ForcePIDFeedback) and not previous.manual
+                        and previous.last_result is not None
+                        and previous.last_result.get('force_compensated', False)
+                        and getattr(self, 'force_memory_context', None) == force_context):
+                    feedback.pid.seed_integral(previous.pid.integral_force)
         except (ValueError, TypeError, KeyError, ImportError) as error:
             show_view_dialog(self, messagebox.showerror, "Cannot run sequence", str(error))
             return
@@ -1526,6 +1585,7 @@ class CommandTab:
         self.run_indices = indices
         self.arrival_gate = arrival_gate
         self.feedback = feedback
+        self.force_memory_context = force_context
         self.run_correction_context = learned_context
         for index, correction in enumerate(corrections):
             self.show_point_correction(index, correction)
@@ -1714,17 +1774,34 @@ class CommandTab:
         h, w = self.frame.shape[:2]
         cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
         low, high = np.array([0., 0.]), np.array([float(w), float(h)])
-        if self.pixels is not None:
+        circle = None
+        try:
+            circle = self.workspace_circle()
+        except (ValueError, TypeError):
+            pass  # Keep the camera visible while the crop fields are being edited.
+        if getattr(self, 'crop_placing', False):
+            circle = None  # Use the full image while choosing a new circle center.
+        display_frame = self.frame
+        if circle is not None:
+            key = (w, h, *circle)
+            if getattr(self, '_live_crop_key', None) != key:
+                self._live_crop = CircularVideoCrop((w, h), circle)
+                self._live_crop_key = key
+            display_frame = self._live_crop.apply(self.frame)
+            low = np.array([self._live_crop.left, self._live_crop.top], float)
+            high = low + self._live_crop.size
+        elif self.pixels is not None:
             low = np.minimum(low, self.pixels.min(axis=0) - [15, 15])
             high = np.maximum(high, self.pixels.max(axis=0) + [15, 15])
         extent = high - low
         scale = min(cw / extent[0], ch / extent[1])
-        dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
+        dw, dh = max(1, round(display_frame.shape[1] * scale)), max(1, round(display_frame.shape[0] * scale))
         ox, oy = (np.array([cw, ch]) - extent * scale) / 2 - low * scale
-        canvas.camera_photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)).resize((dw, dh)))
+        image_x, image_y = (low * scale + [ox, oy]) if circle is not None else (ox, oy)
+        canvas.camera_photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)).resize((dw, dh)))
         if main_view:
             self.photo = canvas.camera_photo
-        canvas.create_image(ox + dw / 2, oy + dh / 2, image=canvas.camera_photo, anchor="center")
+        canvas.create_image(image_x + dw / 2, image_y + dh / 2, image=canvas.camera_photo, anchor="center")
         canvas.camera_transform = (ox, oy, scale)
         if hasattr(self, 'crop_enabled_var'):
             try:
@@ -1755,7 +1832,7 @@ class CommandTab:
                 canvas.create_line(*points.ravel(), fill="#338888", width=1, dash=(2, 8))
             outside, _ = point_limits(self.pixels, self.setup)
             for index, (x, y) in enumerate(points):
-                canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill="", outline="#ff4444" if outside[index] else "#00cccc", width=1)
+                canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill="", outline="#ff4444" if outside[index] else "#008b8b", width=1)
             if self.active_index is not None and self.active_index < len(points):
                 x, y = points[self.active_index]
                 canvas.create_oval(x - 3, y - 3, x + 3, y + 3, outline="#ff9900", width=1)
@@ -1793,6 +1870,18 @@ class CommandTab:
             canvas.create_line(x - 2, y, x + 2, y, fill="#00ff66", width=1)
             canvas.create_line(x, y - 2, x, y + 2, fill="#00ff66", width=1)
             canvas.create_text(x + 4, y + 4, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 7), anchor="nw")
+
+        if circle is not None:
+            # Cover overlays outside the workspace too, at display resolution only.
+            x, y = np.asarray(circle[:2]) * scale + [ox, oy]
+            radius = circle[2] * scale
+            key = (cw, ch, x, y, radius)
+            if getattr(canvas, 'workspace_mask_key', None) != key:
+                mask = Image.new('RGBA', (cw, ch), (0, 0, 0, 255))
+                ImageDraw.Draw(mask).ellipse((x-radius, y-radius, x+radius, y+radius), fill=(0, 0, 0, 0))
+                canvas.workspace_mask_photo = ImageTk.PhotoImage(mask)
+                canvas.workspace_mask_key = key
+            canvas.create_image(0, 0, image=canvas.workspace_mask_photo, anchor='nw')
 
     def close(self):
         if getattr(self, 'diagnostics', None) is not None:

@@ -473,6 +473,64 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertAlmostEqual(app.feedback.pid.kv, 2e-5)
         self.assertAlmostEqual(app.feedback.pid.integral_limit, 5e-7)
 
+    def test_selected_runs_retain_force_bias_only_for_matching_context(self):
+        app = self.run_app()
+        app.force_step_var = Mock(get=Mock(return_value='10'))
+        app.force_preview_var = Mock(get=Mock(return_value=False))
+        app.control_requested = True
+        with patch('command_tab.threading.Thread'), patch('command_tab.load_hardware_case', return_value={}):
+            app.run_selected()
+            app.feedback.pid.seed_integral([2e-8, -1e-8])
+            app.feedback.last_result = {'force_compensated': True}
+            app.running = False  # Selected point has finished; next selected run has a new worker.
+            app.run_selected()
+            np.testing.assert_allclose(app.feedback.pid.integral_force, [2e-8, -1e-8])
+            app.feedback.last_result = {'force_compensated': True}
+            app.running = False
+            app.calibration.setup_revision = 1  # Reload/recalibration invalidates the old bias.
+            app.run_selected()
+            np.testing.assert_array_equal(app.feedback.pid.integral_force, [0, 0])
+
+    def test_reset_pid_memory_does_not_send_or_change_an_active_run(self):
+        from control_workflow import ForcePIDFeedback
+        app = self.run_app()
+        app.precalculating = False
+        app.feedback = ForcePIDFeedback()
+        app.feedback.pid.seed_integral([2e-8, 0])
+        app.force_memory_context = ('old',)
+        with patch.object(app.commander, 'move') as move:
+            app.running = True
+            app.reset_pid_memory()
+            np.testing.assert_allclose(app.feedback.pid.integral_force, [2e-8, 0])
+            app.running = False
+            app.reset_pid_memory()
+            np.testing.assert_array_equal(app.feedback.pid.integral_force, [0, 0])
+            self.assertIsNone(app.force_memory_context)
+            move.assert_not_called()
+
+    def test_selected_run_does_not_reuse_bias_after_hardware_reconnect_or_control_off(self):
+        for change in ('hardware', 'reconnect', 'off'):
+            with self.subTest(change=change):
+                app = self.run_app()
+                app.force_step_var = Mock(get=Mock(return_value='10'))
+                app.force_preview_var = Mock(get=Mock(return_value=False))
+                app.control_requested = True
+                hardware = {'RADIUS': .18}
+                with patch('command_tab.threading.Thread'), \
+                     patch('command_tab.load_hardware_case', return_value=hardware):
+                    app.run_selected()
+                    app.feedback.pid.seed_integral([2e-8, 0])
+                    app.feedback.last_result = {'force_compensated': True}
+                    app.running = False
+                    if change == 'hardware':
+                        hardware['RADIUS'] = .2
+                    elif change == 'reconnect':
+                        app.port = Mock(is_open=True)
+                    else:
+                        app.control_requested = False
+                    app.run_selected()
+                    np.testing.assert_array_equal(app.feedback.pid.integral_force, [0, 0])
+
     def test_show_all_fits_entire_image_and_even_off_frame_targets(self):
         app = CommandTab.__new__(CommandTab)
         app.frame = np.full((400, 400, 3), 240, np.uint8)

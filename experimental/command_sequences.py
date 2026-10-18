@@ -150,13 +150,20 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
                 feedback.publish(commanded_xy_mm=(np.asarray(command) * 1000).tolist(), correction_mm=correction.tolist(),
                                  sent_angles=[float(v) for v in result['angles_deg']], sent_time_s=feedback.clock(), state='Sent')
 
+        initial_options = feedback.initial_move_options() if continuous else {}
+        revision = feedback.command_revision if continuous else None
+        def initial_active():
+            return (active() and (not initial_options or (
+                feedback.command_revision == revision and feedback.enabled.is_set() and not feedback.manual)))
+
         result = commander.move(
             case_name, command, ratio=step.ratio, angle_deg=step.angle_deg,
             settle_seconds=0 if continuous else step.wait_seconds, zero_angle_deg=step.zero_angle_deg,
-            active=active, on_sent=sent,
+            active=initial_active, on_sent=sent,
             **({'prepared_point': True} if prepared else {}),
             **({'on_calculated': lambda result: feedback.publish(calculated_angles=[float(v) for v in result['angles_deg']])}
                if feedback is not None else {}),
+            **initial_options,
         )
         if result is None or not active():
             return "stopped"

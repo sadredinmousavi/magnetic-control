@@ -106,13 +106,29 @@ def calculate_force_pid_control(params, target_xy_m, measured_xy_m, applied_angl
                 force_compensated=True, calculation_time_s=time.monotonic()-started)
 
 
+def apply_integral_to_baseline(params, target_xy_m, baseline, integral_force_n):
+    """Include carried bias in the first pose, without sending an uncorrected pose."""
+    bias = np.asarray(integral_force_n, float)
+    if bias.shape != (2,) or not np.isfinite(bias).all():
+        raise ValueError('Carried integral must be a finite X,Y force.')
+    reference = np.cos(np.deg2rad(np.asarray(baseline['angles_deg'], float)))
+    allocated = calculate_force_pid_control(
+        params, target_xy_m, target_xy_m, baseline['angles_deg'], reference, bias,
+        max_angle_step_deg=90.)
+    if allocated['force_residual_n'] > max(1e-12, np.linalg.norm(bias)*.01):
+        raise ValueError('Carried PID bias is infeasible at the next target. Stop and reset PID memory.')
+    return dict(allocated, desired_pos=np.asarray(target_xy_m, float),
+                baseline=baseline, inherited_integral_force_n=bias.copy())
+
+
 class ForcePIDFeedback:
     """Camera-independent continuous force PID; manual XY remains separate."""
     realtime = True
 
     def __init__(self, *, validate=lambda target: None, manual=False,
                  max_angle_step_deg=10., preview_only=False, clock=time.monotonic,
-                 pid=None, angle_rate_deg_s=20., motor_deadband_deg=.1, hold_speed_mm_s=.5):
+                 pid=None, angle_rate_deg_s=20., motor_deadband_deg=.1, hold_speed_mm_s=.5,
+                 slow_motion_assist=False):
         if not np.isfinite(max_angle_step_deg) or not 0 < max_angle_step_deg <= 90:
             raise ValueError('Maximum angle step must be in (0, 90] degrees.')
         self.validate, self.manual = validate, bool(manual)
@@ -133,6 +149,26 @@ class ForcePIDFeedback:
         self.angle_rate, self.motor_deadband = float(angle_rate_deg_s), float(motor_deadband_deg)
         self.last_control_at = None
         self.last_control_sample = None
+        self.slow_motion_assist = bool(slow_motion_assist)
+        self._reset_slow_assist()
+
+    def _reset_slow_assist(self):
+        self.slow_since = self.slow_sample = None
+        self.publish(slow_assist_active=False, slow_assist_scale=1.)
+
+    def _slow_motion_scale(self, error_mm, speed_mm_s, sample, tolerance_mm):
+        # Use successive camera observations, never repeated idle-loop polls.
+        # No integral boost is retained after motion resumes or at the next point.
+        if (not self.slow_motion_assist or speed_mm_s >= .3
+                or error_mm <= max(3., 2*tolerance_mm)):
+            self._reset_slow_assist()
+            return 1.
+        if self.slow_sample is None or not 0 <= sample-self.slow_sample <= 1.:
+            self.slow_since = sample
+        self.slow_sample = sample
+        scale = 1. + min(.5, max(0., (sample-self.slow_since-3.)/6.))
+        self.publish(slow_assist_active=scale > 1., slow_assist_scale=scale)
+        return scale
 
     def publish(self, **values):
         with self.lock:
@@ -147,6 +183,7 @@ class ForcePIDFeedback:
             self.command_revision += 1
             (self.enabled.set if enabled else self.enabled.clear)()
         self.pid.reset(keep_integral=True)
+        self._reset_slow_assist()
 
     def set_manual_mode(self, manual):
         with self.lock:
@@ -156,6 +193,7 @@ class ForcePIDFeedback:
             if manual:
                 self.enabled.clear()
         self.pid.reset(keep_integral=True)
+        self._reset_slow_assist()
 
     def request_manual(self, step, correction):
         vector = np.asarray(correction, float)
@@ -177,10 +215,20 @@ class ForcePIDFeedback:
             self.last_sent_u, self.last_sent_at = np.asarray(correction, float).copy(), None
             self.on_applied = on_applied
             self.telemetry = {}
+            self._reset_slow_assist()
             self.last_control_at = None
             self.last_control_sample = None
-            self.pid.reset()
+            self.pid.reset(keep_integral=self.enabled.is_set() and not self.manual)
+            self.publish(integral_force_n=self.pid.integral_force.tolist(),
+                         inherited_integral_force_n=self.pid.integral_force.tolist())
         return command
+
+    def initial_move_options(self):
+        with self.lock:
+            if (not self.enabled.is_set() or self.manual or self.preview_only
+                    or not np.any(self.pid.integral_force)):
+                return {}
+            return dict(initial_force_bias_n=self.pid.integral_force.copy())
 
     def initial_sent(self, result=None):
         self.last_sent_at = self.clock()
@@ -255,10 +303,13 @@ class ForcePIDFeedback:
                                           if self.pid.velocity_ready else None),
                          hold_speed_mm_s=self.hold_speed_mm_s)
             if not fresh:
+                self._reset_slow_assist()
                 self.publish(state='Tracking lost — holding last motor pose')
             elif not enabled:
+                self._reset_slow_assist()
                 self.publish(state='Manual — holding' if self.manual else 'Control off — holding')
             elif len(positions) != 1:
+                self._reset_slow_assist()
                 self.publish(state='Force PID requires one tracked robot')
             else:
                 self._continuous_update(step, commander, case_name, gate, active, report,
@@ -285,11 +336,15 @@ class ForcePIDFeedback:
         speed = float(np.linalg.norm(self.pid.velocity)*1000)
         self.publish(position_error_mm=(error*1000).tolist(), velocity_xy_mm_s=(self.pid.velocity*1000).tolist())
         if np.linalg.norm(error)*1000 <= gate.tolerance_mm and speed <= self.hold_speed_mm_s:
+            self._reset_slow_assist()
             self.publish(state='Reached — holding; damping remains active if moving')
             return
         self.last_control_at = self.clock()
         self.last_control_sample = sample
         proposal = self.pid.propose(step.target_xy_m, tolerance_m=gate.tolerance_mm/1000)
+        scale = self._slow_motion_scale(float(np.linalg.norm(error)*1000), speed, sample, gate.tolerance_mm)
+        control_error = error*max(0., 1-gate.tolerance_mm/max(float(np.linalg.norm(error)*1000), 1e-30))
+        proposal['pid_force_n'] = proposal['pid_force_n'] + (scale-1.)*self.pid.kp*control_error
         elapsed = self.pid.period if self.last_sent_at is None else max(.001, self.clock()-self.last_sent_at)
         max_step = min(self.max_angle_step_deg, self.angle_rate*elapsed)
         def valid():
@@ -306,7 +361,8 @@ class ForcePIDFeedback:
             self.pid.commit(proposal, result['requested_force_n'], result['predicted_force_n'])
             if sent:
                 self.initial_sent(result)
-                self.publish(commanded_xy_mm=None, state='Force PID sent', observation_age_s=self.clock()-sample)
+                state = 'Force PID sent' if scale == 1. else f'Force PID sent; slow-motion assist ×{scale:.2f}'
+                self.publish(commanded_xy_mm=None, state=state, observation_age_s=self.clock()-sample)
                 report(result)
             else:
                 self.publish(state='Force PID holding — below motor deadband')
@@ -322,7 +378,7 @@ class ForcePIDFeedback:
                              'stiffness_eigenvalues', 'calculation_time_s')})
         self.publish(state='Calculating force PID', force_observation_monotonic_s=sample,
                      observation_age_s=self.clock()-sample,
-                     force_kp_n_m=float(self.pid.kp), force_ki_n_m_s=float(self.pid.ki), force_kv_n_s_m=float(self.pid.kv))
+                     force_kp_n_m=float(self.pid.kp*scale), force_ki_n_m_s=float(self.pid.ki), force_kv_n_s_m=float(self.pid.kv))
         try:
             commander.move_force_pid(
                 case_name, step.target_xy_m, measured, self.last_result['angles_deg'], self.reference_inputs,

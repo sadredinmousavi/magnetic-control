@@ -3,7 +3,7 @@
 Automatic control uses position feedback, filtered-velocity damping and an
 optional slow integral. **Disturbance learning and the stationary-only mode are
 removed**, including their settings and stored estimates. Control defaults off;
-Ki defaults to 0.0005 micro-newtons/(mm*s), a conservative integral starting value.
+Ki defaults to 0.00015 micro-newtons/(mm*s), a slow integral starting value.
 Set Ki to zero for PD only. Manual XY, the open-loop optimizer
 and saved XY offsets are unchanged.
 
@@ -42,19 +42,40 @@ rebasing is applied, so becoming stationary cannot trigger a learned-force jump.
 
 Velocity uses fresh observations and actual timestamps with first-order filtering.
 After loss/staleness, two fresh samples are required again. Repeated timestamps
-cannot produce duplicate updates. Integral resets for each new point/manual
-command; Control off/on or temporary loss retains bias but resets velocity history.
+cannot produce duplicate updates. With Control on, bounded integral force carries
+to each new point; velocity and integration timing reset, so a target change does
+not introduce derivative kick or an integral catch-up step. Manual commands reset
+integral. Control off/on or temporary loss retains bias but resets velocity history.
+
+The next point's FIRST pose includes the inherited integral force. Its nominal
+baseline is freshly synthesized or fetched from the validated precalculation cache,
+then force is allocated at that target to include the carried bias while preserving
+the new baseline Hessian and cosine bounds. Only the corrected pose is transmitted;
+the nominal cache stays unchanged. This initial point transition uses the usual
+initial-pose behavior, not the per-update PID angle-rate limit. Infeasible bias
+allocation stops before transmission rather than sending a zero-bias fallback.
+Later feedback allocates total P+I-D force at measured XY as before, so inherited
+integral is counted once. Preview, Manual and Control off do not apply an inherited
+force to the initial pose; Ki=0 clears integral memory.
+
+Matching selected runs also inherit the last accepted integral, scoped to path,
+calibration geometry/revision, camera identity, hardware model, robot count and
+serial connection. New contexts or application restarts start fresh. **Reset PID
+memory**, available in the main and camera views while stopped, clears memory
+without moving motors. This is bounded force memory, not cumulative motor angles
+or saved XY offsets. Integral remains adaptive and can unwind at the next point;
+the bias needed at different physical positions may differ.
 
 ## Settings and use
 
 Starting gains are not experimentally tuned or a stability guarantee:
 
-- Kp: 0.01 micro-newtons/mm.
-- Ki: 0.0005 micro-newtons/(mm*s), equivalent to a 20 s integral time at the
-  default Kp. A constant 10 mm error adds 0.005 micro-newtons per second before
+- Kp: 0.015 micro-newtons/mm.
+- Ki: 0.00015 micro-newtons/(mm*s), equivalent to a 100 s integral time at the
+  default Kp. A constant 10 mm error adds 0.0015 micro-newtons per second before
   anti-windup or saturation. These are starting settings, not hardware-validated
   tuning; test a fixed point and inspect overshoot before running a path.
-- Kv: 0.01 micro-newtons*s/mm.
+- Kv: 0.015 micro-newtons*s/mm.
 - Period: 0.25 s, a maximum request rate of 4 Hz, not guaranteed send timing.
 - Velocity filter: 0.15 s.
 - Angle rate: 20 degrees/s; Max angle step also bounds each update (10 degrees).
@@ -96,6 +117,16 @@ The legacy `position_control.py` is not used by GUI005.
 
 ## Display, diagnostics and timing
 
+Optional **Slow-motion assist (trial)** is off by default. Select it before a run
+to increase proportional correction only after speed stays below 0.3 mm/s for
+3 seconds, with error above max(3 mm, twice arrival tolerance). The proportional
+multiplier ramps from 1 to 1.5 over another 3 seconds. Normal proportional gain
+returns immediately when those conditions stop applying. Ki, Kv, accumulated
+integral and all motor limits remain unchanged. Tracking loss, Control off,
+manual mode and new points reset the dwell. Diagnostics log `slow_assist_active`,
+`slow_assist_scale` and effective `force_kp_n_m`. This experimental setting does
+not establish physical force direction or guarantee a settling time.
+
 Both views use fixed cells for desired/measured XY, u, commanded XY, speed (hold
 threshold), position error, integral, requested/allocated force, residual and
 calculated/sent angles. Hover reveals clipped values. Force values are model
@@ -129,8 +160,14 @@ closed-loop stability. Hardware testing is required.
 
 ## Video export
 
-Video recording is independent. Circle crop and Fit workspace use a fixed
-native-pixel circle for all three videos; manual Radius px/Place crop remain.
+Circle crop masks and enlarges the workspace in both live camera views and
+limits robot detection to that circle. With four calibrated pins it automatically
+encloses them with a 35-pixel margin, ignoring manual radius/center settings.
+Without pins, Radius px/Place crop select a manual circle. Detection keeps its moving ROI
+and real-image blur halo, with no artificial black edge fed to the detector.
+Only the cropped image is converted for display; native tracking/CSV coordinates
+and calibration remain unchanged. Turn Circle crop off for the full view.
+Video recording uses the same fixed native-pixel circle for all three videos.
 Outside pixels are black (blue for chroma-key overlay). Crop follows overlays
 and does not change tracking coordinates. Crop settings freeze during recording;
 CSV remains in native camera/physical coordinates.

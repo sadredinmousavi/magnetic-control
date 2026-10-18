@@ -113,11 +113,19 @@ The Commands pop-out uses grouped controls: First, Selected, Next/Finish, Manual
 Stop. First starts the sequence at point 1, then waits for your Next
 press at each step; it is disabled during execution/precalculation. Control is
 an opt-in force PID controller, disabled by default. Default Kp/Ki/Kv are
-0.01/0.0005/0.01 in the GUI's micro-newton/mm/second units (Ki=0 selects PD):
+0.015/0.00015/0.015 in the GUI's micro-newton/mm/second units (Ki=0 selects PD):
 position feedback and filtered-velocity damping allocate total magnetic force
 during motion at the measured position. Disturbance learning and the stationary-only
 controller have been removed. Positive Ki enables bounded integral correction
-with anti-windup. Hold speed (0.5 mm/s) only holds the motor pose when also inside
+with anti-windup. The bounded integral force now carries between successive
+points and matching selected runs. The first pose for the next point already
+includes that force bias, allocated using the new baseline's stiffness; no
+uncorrected baseline is sent first. P/D transients and old motor angles are not
+accumulated. Reset PID memory (while stopped) starts fresh without moving motors.
+Changing calibration, hardware, source, robot count, path or serial connection
+invalidates memory. Memory is not persisted across application restarts. At the
+new defaults, Kp/Ki is 100 seconds: first-time bias learning is deliberately slow.
+Hold speed (0.5 mm/s) only holds the motor pose when also inside
 arrival tolerance; it never triggers a learned-force update. Row Wait delays Next
 navigation, not feedback or braking.
 It preserves baseline trap stiffness and bounds angle changes. Main/pop-out

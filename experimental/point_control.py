@@ -14,7 +14,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from case_loader import load_case, normalize_case_name
-from control_workflow import calculate_point_control, calculate_force_pid_control
+from control_workflow import calculate_point_control, calculate_force_pid_control, apply_integral_to_baseline
 
 
 def hardware_case_name(case_name):
@@ -147,7 +147,7 @@ class PointCommander:
     def _move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
              settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False, prepared_point=False,
              on_calculated=None, force_request=None, preview_only=False, on_held=None,
-             unchanged_angles_deg=None, motor_deadband_deg=0.):
+             unchanged_angles_deg=None, motor_deadband_deg=0., initial_force_bias_n=None):
         """Calculate fresh motor angles, send them, then wait interruptibly.
 
         Cancellation skips unsent commands; it cannot undo an already sent pose.
@@ -188,6 +188,9 @@ class PointCommander:
                 result = cached[1][tuple(target_xy_m)]
             else:
                 result = self.calculate(case_name, target_xy_m, ratio=ratio, angle_deg=angle_deg)
+            if initial_force_bias_n is not None:
+                result = apply_integral_to_baseline(
+                    load_hardware_case(case_name), target_xy_m, result, initial_force_bias_n)
             self.diagnostic_event('calculation_finished', case=case_name, target_xy_m=target_xy_m,
                                   result=result, preview_only=preview_only)
             if on_calculated is not None:

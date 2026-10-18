@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'experimental'))
 from functions_main import MagneticForcePID, build_actuation_matrix, generate_circular_source_positions
-from control_workflow import ForcePIDFeedback, calculate_force_pid_control
+from control_workflow import ForcePIDFeedback, calculate_force_pid_control, apply_integral_to_baseline
 from case_loader import load_case, build_common_config
 from arrival_control import ArrivalGate
 from settling_control import SettlingMonitor
@@ -17,16 +17,124 @@ from point_control import PointCommander
 
 
 class ForcePIDMathTests(unittest.TestCase):
-    def test_default_integral_has_twenty_second_time_and_gradual_force_growth(self):
+    def test_default_integral_has_hundred_second_time_and_gradual_force_growth(self):
         pid = MagneticForcePID()
-        self.assertAlmostEqual(pid.kp / pid.ki, 20.)
+        self.assertAlmostEqual(pid.kp, 1.5e-5)
+        self.assertAlmostEqual(pid.ki, 1.5e-7)
+        self.assertAlmostEqual(pid.kv, 1.5e-5)
+        self.assertAlmostEqual(pid.kp / pid.ki, 100.)
         pid.observe([-.01, 0], 0.)
         pid.observe([-.01, 0], .25)
         proposal = pid.propose([0, 0])
         pid.commit(proposal, proposal['pid_force_n'], proposal['pid_force_n'])
         pid.observe([-.01, 0], .5)
         proposal = pid.propose([0, 0])
-        np.testing.assert_allclose(proposal['integral_force_n'], [1.25e-9, 0], atol=1e-20)
+        np.testing.assert_allclose(proposal['integral_force_n'], [3.75e-10, 0], atol=1e-20)
+
+    def test_carried_bias_is_bounded_and_disabled_by_zero_ki(self):
+        pid = MagneticForcePID(integral_limit_n=1e-7)
+        pid.seed_integral([2e-7, -3e-7])
+        np.testing.assert_allclose(pid.integral_force, [1e-7, -1e-7])
+        pid.ki = 0
+        pid.reset(keep_integral=True)
+        np.testing.assert_array_equal(pid.integral_force, [0, 0])
+        with self.assertRaisesRegex(ValueError, 'finite'):
+            pid.seed_integral([np.nan, 0])
+
+    def test_next_point_retains_integral_but_reacquires_velocity_without_catchup(self):
+        feedback = ForcePIDFeedback()
+        feedback.enabled.set()
+        feedback.begin_point(XYStep((0, 0), 0, 180), [0, 0])
+        feedback.pid.seed_integral([2e-8, -1e-8])
+        feedback.pid.observe([0, 0], 1.)
+        feedback.pid.observe([.001, 0], 1.25)
+        feedback.pid.committed_at = 1.25
+        feedback.begin_point(XYStep((.01, 0), 0, 180), [0, 0])
+        np.testing.assert_allclose(feedback.pid.integral_force, [2e-8, -1e-8])
+        self.assertFalse(feedback.pid.velocity_ready)
+        feedback.pid.observe([.001, 0], 100.)
+        feedback.pid.observe([.001, 0], 100.25)
+        proposal = feedback.pid.propose([.01, 0])
+        self.assertEqual(proposal['dt_s'], 0.)
+        np.testing.assert_allclose(proposal['integral_force_n'], [2e-8, -1e-8])
+
+    def test_off_manual_and_preview_do_not_send_a_carried_initial_bias(self):
+        for mode in ('off', 'manual', 'preview'):
+            with self.subTest(mode=mode):
+                feedback = ForcePIDFeedback(manual=mode == 'manual', preview_only=mode == 'preview')
+                if mode != 'off':
+                    feedback.enabled.set()
+                feedback.pid.seed_integral([2e-8, 0])
+                feedback.begin_point(XYStep((.01, 0), 0, 180), [0, 0])
+                self.assertEqual(feedback.initial_move_options(), {})
+
+    def test_infeasible_carried_force_fails_before_any_motor_write(self):
+        port = Mock(is_open=True)
+        commander = PointCommander(lambda: port)
+        with patch.object(commander, 'calculate', return_value={'angles_deg': [60.]*8}), \
+             patch('point_control.load_hardware_case', return_value={}), \
+             patch('control_workflow.calculate_force_pid_control', return_value={'force_residual_n': 1.}), \
+             patch('helpers.moveArray') as write:
+            with self.assertRaisesRegex(ValueError, 'infeasible'):
+                commander.move('case_100', (.01, 0), initial_force_bias_n=[1e-8, 0])
+        write.assert_not_called()
+
+    def test_two_point_sequence_sends_only_the_bias_corrected_second_baseline(self):
+        params = load_case('case_100.case')
+        port = Mock(is_open=True)
+        commander = PointCommander(lambda: port)
+        feedback = ForcePIDFeedback()
+        feedback.enabled.set()
+        steps = [XYStep((0., 0.), 0, 180), XYStep((.01, 0.), 0, 180)]
+        bias = np.array([2e-8, -1e-8])
+        completed = []
+        def wait(step, *args, **kwargs):
+            completed.append(step)
+            if len(completed) == 1:
+                feedback.pid.seed_integral(bias)
+            else:
+                np.testing.assert_allclose(feedback.last_result['predicted_force_n'], bias, atol=1e-12)
+                self.assertTrue(feedback.last_result['force_compensated'])
+                np.testing.assert_allclose(feedback.pid.integral_force, bias)
+            return True
+        feedback.wait_at_target = wait
+        with patch('helpers.moveArray') as write:
+            commander.prepare_points('case_100', steps)
+            baseline = commander.prepared_points['case_100'][1][commander.point_key((.01, 0.), 1., None)]
+            cached_angles = baseline['angles_deg'].copy()
+            outcome = execute_xy_sequence(steps, commander, 'case_100', active=lambda: True,
+                                          report=Mock(), arrival_gate=ArrivalGate(require_arrival=False),
+                                          feedback=feedback, prepared=True)
+        self.assertEqual(outcome, 'finished')
+        self.assertEqual(write.call_count, 2)  # No extra uncorrected transition command.
+        sent_angles = np.asarray(write.call_args_list[1].args[1])
+        self.assertGreater(np.max(abs(sent_angles - cached_angles)), .01)
+        np.testing.assert_array_equal(baseline['angles_deg'], cached_angles)  # Cache remains nominal.
+        cfg = build_common_config(dict(params, TARGET_SCHEDULE=[(0., np.array([.01, 0.]), 1., None)],
+                                       INITIAL_ROBOT_POSITIONS=np.zeros((1, 2))))
+        sources = generate_circular_source_positions(8, cfg.RADIUS)
+        force = build_actuation_matrix((.01, 0.), sources, cfg.C_F) @ np.cos(np.deg2rad(sent_angles))
+        np.testing.assert_allclose(force, bias, atol=1e-12)
+
+    def test_switching_control_off_during_initial_bias_solve_vetoes_transmission(self):
+        feedback = ForcePIDFeedback()
+        feedback.enabled.set()
+        feedback.pid.seed_integral([2e-8, 0])
+        commander = PointCommander(lambda: Mock(is_open=True))
+        # Keep the port identity stable across pre-send validation.
+        port = Mock(is_open=True)
+        commander.port_provider = lambda: port
+        def allocate(*args, **kwargs):
+            feedback.set_enabled(False)
+            return {'angles_deg': [59.]*8}
+        with patch.object(commander, 'calculate', return_value={'angles_deg': [60.]*8}), \
+             patch('point_control.load_hardware_case', return_value={}), \
+             patch('point_control.apply_integral_to_baseline', side_effect=allocate), \
+             patch('helpers.moveArray') as write:
+            outcome = execute_xy_sequence([XYStep((.01, 0), 0, 180)], commander, 'case',
+                                          active=lambda: True, report=Mock(), feedback=feedback)
+        self.assertEqual(outcome, 'stopped')
+        write.assert_not_called()
 
     def test_velocity_braking_remains_active_inside_position_tolerance(self):
         pid = MagneticForcePID(kp=2, ki=0, kv=3, velocity_tau_s=0)
@@ -160,6 +268,52 @@ class ContinuousRuntimeTests(unittest.TestCase):
         self.assertGreater(len(forces), 8)
         np.testing.assert_allclose(forces, np.tile(forces[0], (len(forces), 1)))
         self.assertFalse(hasattr(feedback, 'disturbance_estimate_n'))
+
+    def test_optional_slow_assist_boosts_stall_then_restores_normal_force_on_motion(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                feedback, gate, monitor, step, now = self.fixture(speed=0)
+                feedback.slow_motion_assist = enabled
+                base_kp, base_ki, base_kv = feedback.pid.kp, feedback.pid.ki, feedback.pid.kv
+                def resume_motion(timeout):
+                    now[0] = round(now[0]+.05, 5)
+                    gate.observe([[-.01+.001*max(0., now[0]-7.), 0]], now[0])
+                gate.condition.wait = resume_motion
+                samples = []
+                def move(*args, **kwargs):
+                    error = np.asarray(step.target_xy_m)-args[2]
+                    normal = base_kp*error*max(0., 1-gate.tolerance_mm/1000/np.linalg.norm(error))-base_kv*feedback.pid.velocity
+                    samples.append((now[0], args[5].copy(), normal, feedback.snapshot()['slow_assist_scale']))
+                    self.assertLessEqual(kwargs['max_angle_step_deg'], feedback.max_angle_step_deg)
+                    kwargs['on_held'](self.result(args[5]))
+                feedback.wait_at_target(step, Mock(move_force_pid=move), 'case', gate,
+                                        lambda: now[0] < 8., Mock())
+                for t, force, normal, scale in samples:
+                    if not enabled or t < 3. or t > 7.1:
+                        np.testing.assert_allclose(force, normal)
+                        self.assertEqual(scale, 1.)
+                    if enabled and 6.5 < t < 7.:
+                        np.testing.assert_allclose(force, 1.5*normal)
+                        self.assertEqual(scale, 1.5)
+                self.assertTrue(any(6.5 < t < 7. for t, *_ in samples))
+                self.assertEqual((feedback.pid.kp, feedback.pid.ki, feedback.pid.kv), (base_kp, base_ki, base_kv))
+                np.testing.assert_array_equal(feedback.pid.integral_force, [0, 0])
+
+    def test_slow_assist_restarts_dwell_after_gap_off_or_new_point_and_excludes_near_target(self):
+        feedback, gate, monitor, step, now = self.fixture(speed=0)
+        feedback.slow_motion_assist = True
+        for t in np.arange(0., 7., .25):
+            scale = feedback._slow_motion_scale(10., 0., t, 1.)
+        self.assertEqual(scale, 1.5)
+        self.assertEqual(feedback._slow_motion_scale(10., 0., 9., 1.), 1.)
+        self.assertEqual(feedback._slow_motion_scale(2., 0., 9.25, 1.), 1.)
+        self.assertIsNone(feedback.slow_since)
+        for reset in (lambda: feedback.set_enabled(False), lambda: feedback.set_manual_mode(True),
+                      lambda: feedback.begin_point(step, [0, 0])):
+            feedback.slow_since, feedback.slow_sample = 0., 6.
+            reset()
+            self.assertIsNone(feedback.slow_since)
+            self.assertEqual(feedback.snapshot()['slow_assist_scale'], 1.)
 
     def test_mode_change_discards_solution_without_integral_commit(self):
         feedback, gate, monitor, step, now = self.fixture()

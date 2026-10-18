@@ -126,6 +126,23 @@ class MovingROICalibrationTests(unittest.TestCase):
             18, 18, (80, 100, 30), 2, 2,
         )
 
+    def test_workspace_circle_restricts_detection_and_preserves_native_coordinates(self):
+        frame = self.frame([(80, 100), (120, 100)])
+        original = frame.copy()
+        tracker = MovingROICalibration([], 10, 10, (100, 100, 90), 1, 1,
+                                       allow_uncalibrated=True)
+        self.assertEqual(len(tracker.detect_candidates(frame)), 2)
+        tracker.workspace_circle = (70, 100, 30)
+        with patch.object(tracker.detector, 'process', wraps=tracker.detector.process) as detect:
+            candidates = tracker.detect_candidates(frame)
+        self.assertEqual([item['center'] for item in candidates], [(80, 100)])
+        self.assertLess(detect.call_args.args[0].shape[1], frame.shape[1])
+        np.testing.assert_array_equal(frame, original)
+        tracker.workspace_circle = (0, 0, 2)
+        self.assertEqual(tracker.detect_candidates(frame), [])
+        tracker.workspace_circle = None
+        self.assertEqual(len(tracker.detect_candidates(frame)), 2)
+
     def frame(self, centers):
         frame = np.full((200, 200, 3), 240, np.uint8)
         for point in centers:

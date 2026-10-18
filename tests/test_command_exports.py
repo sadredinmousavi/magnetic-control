@@ -15,6 +15,18 @@ from command_tab import CommandTab
 
 
 class CommandExportTests(unittest.TestCase):
+    def test_circle_crop_automatically_encloses_pins_despite_small_manual_radius(self):
+        app = CommandTab.__new__(CommandTab)
+        app.frame = np.zeros((600, 800, 3), np.uint8)
+        app.crop_enabled_var = Mock(get=Mock(return_value=True))
+        app.crop_radius_var = Mock(get=Mock(return_value='10'))
+        app.crop_center = (20, 20)
+        app.setup = {'corners_px': [(100, 100), (700, 100), (700, 500), (100, 500)]}
+        x, y, radius = app.recording_circle()
+        np.testing.assert_allclose([x, y], [400, 300])
+        self.assertTrue(np.all(np.linalg.norm(np.array(app.setup['corners_px']) - [x, y], axis=1) <= radius - 35))
+        app.crop_radius_var.get.assert_not_called()
+
     def test_extended_sequence_roundtrip_and_solver_settings(self):
         steps = [XYStep((.01, -.02), 3, 180, 2.5, 45), XYStep((0, 0), 0, 90)]
         with tempfile.TemporaryDirectory() as directory:

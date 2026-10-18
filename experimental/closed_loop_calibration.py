@@ -58,6 +58,7 @@ class MovingROICalibration:
         self.strict_single = strict_single
         self.limit_to_pins = limit_to_pins and self.metric_ready
         self.workspace_mask = None
+        self.workspace_circle = None  # Optional fixed display/processing workspace, in native pixels.
         self.selection_error = None
         self.detector = RobotDetector()
         self.axes = RobotAxes(corners, width_cm, height_cm, axis_samples) if axis_samples else None
@@ -83,11 +84,21 @@ class MovingROICalibration:
         y0 = max(0, min(h, int(np.floor(self.center[1] - self.radius)) - halo))
         x1 = max(0, min(w, int(np.ceil(self.center[0] + self.radius)) + halo + 1))
         y1 = max(0, min(h, int(np.ceil(self.center[1] + self.radius)) + halo + 1))
+        if self.workspace_circle is not None:
+            cx, cy, radius = self.workspace_circle
+            # Retain real-image halo for the blur; never blur a black display mask.
+            x0 = max(x0, int(np.floor(cx - radius)) - halo)
+            y0 = max(y0, int(np.floor(cy - radius)) - halo)
+            x1 = min(x1, int(np.ceil(cx + radius)) + halo + 1)
+            y1 = min(y1, int(np.ceil(cy + radius)) + halo + 1)
         if x1 <= x0 or y1 <= y0:
             return []
         crop = frame[y0:y1, x0:x1]
         offset = np.array([x0, y0])
         mask = circle_detection_mask(crop.shape[:2], (*(self.center - offset), self.radius))
+        if self.workspace_circle is not None:
+            cx, cy, radius = self.workspace_circle
+            mask = cv2.bitwise_and(mask, circle_detection_mask(crop.shape[:2], (cx-x0, cy-y0, radius)))
         if self.limit_to_pins:
             # Rasterize once in full-frame coordinates so fractional corners
             # and slanted pin boundaries exactly match the original mask.

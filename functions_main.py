@@ -664,7 +664,7 @@ class MagneticForcePID:
     Observation and proposal are separate: velocity uses every new frame, while
     integral updates commit only for an accepted/applied allocation. No motor IO.
     """
-    def __init__(self, kp=1e-5, ki=5e-7, kv=1e-5, velocity_tau_s=.15,
+    def __init__(self, kp=1.5e-5, ki=1.5e-7, kv=1.5e-5, velocity_tau_s=.15,
                  integral_limit_n=5e-7, period_s=.25):
         values = np.asarray([kp, ki, kv, velocity_tau_s, integral_limit_n, period_s], float)
         if not np.isfinite(values).all() or np.any(values[:4] < 0) or np.any(values[4:] <= 0):
@@ -675,9 +675,17 @@ class MagneticForcePID:
     def reset(self, *, keep_integral=False):
         if not keep_integral or not hasattr(self, 'integral_force'):
             self.integral_force = np.zeros(2)
+        self.seed_integral(self.integral_force)
         self.position = self.observed_at = self.committed_at = None
         self.velocity = np.zeros(2)
         self.velocity_ready = False
+
+    def seed_integral(self, force_n):
+        force = np.asarray(force_n, float)
+        if force.shape != (2,) or not np.isfinite(force).all():
+            raise ValueError('Integral memory must be a finite X,Y force in newtons.')
+        self.integral_force = (np.clip(force, -self.integral_limit, self.integral_limit).copy()
+                               if self.ki > 0 else np.zeros(2))
 
     def observe(self, position_m, timestamp):
         p = np.asarray(position_m, float)

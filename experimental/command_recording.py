@@ -16,7 +16,7 @@ def video_crop_circle(size, *, corners=None, center=None, radius=300, fit=False)
             raise ValueError('Fit workspace needs four calibrated pins.')
         center, radius = cv2.minEnclosingCircle(points)
         center = tuple(np.rint(center).astype(int))
-        radius = np.ceil(np.linalg.norm(points - center, axis=1).max())
+        radius = np.ceil(np.linalg.norm(points - center, axis=1).max()) + 35
     if center is None:
         center = (width / 2, height / 2)
     values = np.asarray([*center, radius], float)
@@ -54,10 +54,10 @@ TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot
                    'active_point desired_x_mm desired_y_mm error_mm roi_x_px roi_y_px '
                    'roi_radius_px sequence_running arrival_ready arrival_max_error_mm '
                    'desired_ratio desired_angle_deg recording_frame recording_time_s '
-                   'crop_center_x_px crop_center_y_px crop_radius_px '
+                   'crop_center_x_px crop_center_y_px crop_radius_px slow_assist_active slow_assist_scale '
                    'control_enabled control_state control_mode requested_force_n predicted_force_n force_residual_n '
                    'magnet_cosine_inputs stiffness_eigenvalues_n_m control_calculation_time_s force_compensated '
-                   'velocity_xy_mm_s position_error_mm pid_force_n integral_force_n '
+                   'velocity_xy_mm_s position_error_mm pid_force_n integral_force_n inherited_integral_force_n '
                    'observation_age_s control_cycle_time_s force_kp_n_m force_ki_n_m_s force_kv_n_s_m '
                    'robot_speed_mm_s hold_speed_mm_s '
                    'correction_x_mm correction_y_mm commanded_x_mm commanded_y_mm '
@@ -76,7 +76,7 @@ def draw_command_overlay(image, setup, pixels, active_index, detections, tracker
         for x, y in points:
             outside = (setup is not None and cv2.pointPolygonTest(
                 np.asarray(setup['corners_px'], np.float32), (float(x), float(y)), True) < -1e-3)
-            cv2.circle(image, (int(x), int(y)), 2, (68, 68, 255) if outside else (204, 204, 0), 1)
+            cv2.circle(image, (int(x), int(y)), 2, (68, 68, 255) if outside else (139, 139, 0), 1)
         if active_index is not None and active_index < len(points):
             point = tuple(points[active_index])
             cv2.drawMarker(image, point, (0, 153, 255), cv2.MARKER_CROSS, 6, 1, cv2.LINE_AA)
