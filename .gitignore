@@ -234,3 +234,6 @@ __marimo__/
 
 # GUI005 runtime diagnostic sessions
 experimental/diagnostics/
+
+# Experimental CSV exports, including subdirectories
+experimental/**/*.csv
