@@ -14,6 +14,7 @@ from ssh_camera import SSHCameraClient, SSHCameraSettings, preferred_camera_mode
 from closed_loop_calibration import CalibrationTab
 from point_control import PointCommander
 from command_tab import CommandTab
+from trajectory_tab import TrajectoryTab
 from camera_popout import show_view_dialog
 from local_camera import LocalCameraClient
 
@@ -31,9 +32,9 @@ class ClosedLoopGUI(BaseServoGUI):
         self.local_frame_queue, self.local_event_queue = queue.Queue(maxsize=1), queue.Queue()
         self.local_camera = LocalCameraClient(self.local_frame_queue, self.local_event_queue)
         self.webcam_requested_size = None
-        self.camera_source_var = tk.StringVar(value='Pi SSH')
-        self.selected_camera_source = 'Pi SSH'
-        self.camera_source_key = 'Pi SSH'
+        self.camera_source_var = tk.StringVar(value='Iriun / Local webcam')
+        self.selected_camera_source = 'Iriun / Local webcam'
+        self.camera_source_key = 'Iriun / Local webcam:0'
         self.ssh_camera = SSHCameraClient(
             self.camera_frame_queue, self.camera_event_queue
         )
@@ -45,6 +46,8 @@ class ClosedLoopGUI(BaseServoGUI):
 
         self.build_header()
         self.build_workflow()
+        self.camera_connect_button.config(state='disabled')
+        self.restore_camera_mode_controls()
         self.build_status()
 
         self.root.after(40, self.poll_camera)
@@ -66,6 +69,7 @@ class ClosedLoopGUI(BaseServoGUI):
 
     def build_workflow(self):
         notebook = ttk.Notebook(self.root)
+        self.workflow_notebook = notebook
         notebook.pack(fill="both", expand=True, padx=10, pady=(0, 5))
 
         connection_tab = tk.Frame(notebook)
@@ -80,17 +84,47 @@ class ClosedLoopGUI(BaseServoGUI):
         self.calibration = CalibrationTab(calibration_tab, axis_move=self.move_axis_target,
                                           axis_prepare=self.point_commander.prepare_axes,
                                           visible=lambda: notebook.select() == str(calibration_tab))
+        self.calibration.camera_source_key = self.camera_source_key
         command_tab = tk.Frame(notebook)
-        notebook.add(command_tab, text="3. Commands")
+        trajectory_tab = tk.Frame(notebook)
+        notebook.add(command_tab, text="3. Control")
+        notebook.add(trajectory_tab, text="4. Trajectory Track")
+        self.calibration_frame = calibration_tab
         self.commands = CommandTab(
             command_tab, self.calibration, self.point_commander, self.selected_camera_running,
-            set_running=lambda running: (self.calibration.set_command_running(running),
-                                         notebook.tab(calibration_tab, state="disabled" if running else "normal")),
+            set_running=lambda running: self.set_control_running(self.commands, running),
             visible=lambda: notebook.select() == str(command_tab),
+            operation_allowed=lambda: self.control_operation_available(self.commands),
         )
-        notebook.bind("<<NotebookTabChanged>>", lambda event: self.commands.refresh_calibration()
-                      if notebook.select() == str(command_tab) else None)
-        self.build_future_tabs(notebook)
+        # Each workspace owns its preparation cache, diagnostics, and motor settings.
+        self.trajectory_commander = PointCommander(lambda: self.port)
+        self.trajectory = TrajectoryTab(
+            trajectory_tab, self.calibration, self.trajectory_commander, self.selected_camera_running,
+            set_running=lambda running: self.set_control_running(self.trajectory, running),
+            visible=lambda: notebook.select() == str(trajectory_tab),
+            operation_allowed=lambda: self.control_operation_available(self.trajectory),
+        )
+        notebook.bind("<<NotebookTabChanged>>", lambda event: self.refresh_selected_control())
+
+    def control_views(self):
+        trajectory = getattr(self, 'trajectory', None)
+        return (self.commands,) if trajectory is None else (self.commands, trajectory)
+
+    def control_operation_available(self, source):
+        return all(view is source or not (view.running or view.precalculating)
+                   for view in self.control_views())
+
+    def set_control_running(self, source, running):
+        self.calibration.set_command_running(running)
+        self.workflow_notebook.tab(self.calibration_frame, state='disabled' if running else 'normal')
+        for view in self.control_views():
+            if view is not source:
+                self.workflow_notebook.tab(view.parent, state='disabled' if running else 'normal')
+
+    def refresh_selected_control(self):
+        for view in self.control_views():
+            if view.visible():
+                view.refresh_calibration()
 
     def move_axis_target(self, target, case_name, active):
         """Calibration policy; reusable synthesis/motion lives in PointCommander."""
@@ -105,14 +139,6 @@ class ClosedLoopGUI(BaseServoGUI):
             self.camera_event_queue.put(("log", f"Point {target} m, ratio 1: prepared magnet angles [{angles}] deg"))
         return result
 
-    def build_future_tabs(self, notebook):
-        for title, description in (
-            ("4. Detection", "Moving ROI and robot tracking will be added next."),
-        ):
-            frame = tk.Frame(notebook, padx=24, pady=24)
-            notebook.add(frame, text=title, state="disabled")
-            tk.Label(frame, text=description).pack(anchor="w")
-
     def build_serial_panel(self, parent):
         frame = tk.LabelFrame(
             parent, text="Controller — Serial", padx=10, pady=10
@@ -120,8 +146,8 @@ class ClosedLoopGUI(BaseServoGUI):
         frame.pack(fill="x", padx=10, pady=8)
 
         tk.Label(frame, text="Port").grid(row=0, column=0, sticky="w")
-        self.port_entry = tk.Entry(frame, width=16)
-        self.port_entry.insert(0, "COM5")
+        self.port_entry = ttk.Combobox(frame, values=("COM3", "COM5"), width=16, state="normal")
+        self.port_entry.set("COM3")
         self.port_entry.grid(row=0, column=1, padx=(5, 15))
 
         tk.Label(frame, text="Baudrate").grid(row=0, column=2, sticky="w")
@@ -216,9 +242,10 @@ class ClosedLoopGUI(BaseServoGUI):
             pass
 
     def reset_camera_geometry(self, source_key):
-        self.commands.stop_event.set()
-        self.commands.preparation_stop.set()
-        self.commands.stop_recording()
+        for view in self.control_views():
+            view.stop_event.set()
+            view.preparation_stop.set()
+            view.stop_recording()
         self.calibration.frame = self.calibration.frame_received_at = None
         self.calibration.corners, self.calibration.circle = [], None
         self.calibration.transform = None
@@ -226,14 +253,21 @@ class ClosedLoopGUI(BaseServoGUI):
         self.calibration.clear_tracking()
         self.calibration.camera_source_key = source_key
         self.calibration.setup_revision += 1
-        self.commands.frame = self.commands.frame_received_at = None
-        self.commands.setup = self.commands.pixels = self.commands.tracking_tracker = None
-        self.commands.command_roi = None
-        self.commands.roi_override = False
-        self.commands.tracking_detections, self.commands.tracking_group_xy = [], None
-        self.commands.tracking_signature = None
-        self.commands.render_revision += 1
-        for tab in (self.calibration, self.commands):
+        for view in self.control_views():
+            view.scene_epoch = getattr(view, 'scene_epoch', 0) + 1
+            view.analysis_frame = view.measurement_received_at = None
+            view.frame = view.frame_received_at = None
+            view.setup = view.pixels = view.tracking_tracker = None
+            view.command_roi = None
+            view.roi_override = False
+            view.tracking_detections, view.tracking_group_xy = [], None
+            view.tracking_signature = None
+            view.render_revision += 1
+            view.cargo_detection = view.group_geometry = None
+            if hasattr(view, "cargo_tracker"):
+                view.cargo_tracker.center = None
+                view.cargo_tracker.detection = None
+        for tab in (self.calibration, *self.control_views()):
             tab.canvas.camera_transform = None
             tab.canvas.delete('all')
             popup = tab.camera_popout
@@ -552,12 +586,14 @@ class ClosedLoopGUI(BaseServoGUI):
             pass
         if latest_frame is not None:
             popout_open = any(getattr(tab, 'camera_popout', None) is not None and tab.camera_popout.is_open
-                              for tab in (self.calibration, self.commands))
+                              for tab in (self.calibration, *self.control_views()))
             if getattr(self, 'connection_visible', lambda: True)() and not popout_open:
                 self.show_camera_frame(latest_frame)
             self.calibration.accept_live_frame(latest_frame)
-            self.commands.accept_live_frame(latest_frame)
-        self.commands.check_camera_health()
+            for view in self.control_views():
+                view.accept_live_frame(latest_frame)
+        for view in self.control_views():
+            view.check_camera_health()
         try:
             fps = max(1., min(15., float(self.calibration.live_fps_var.get())))
             if not 1 <= fps <= 15:
@@ -583,7 +619,8 @@ class ClosedLoopGUI(BaseServoGUI):
         )
 
     def on_close(self):
-        self.commands.close()
+        for view in self.control_views():
+            view.close()
         self.calibration.close()
         self.ssh_camera.stop()
         self.local_camera.stop()

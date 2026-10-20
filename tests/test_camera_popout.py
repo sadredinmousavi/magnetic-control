@@ -21,6 +21,48 @@ def canvas(width, height):
 
 
 class CameraPopoutTests(unittest.TestCase):
+    def test_preview_render_failure_reports_error_and_keeps_timer_alive(self):
+        view = CameraPopout.__new__(CameraPopout)
+        view.closed = False
+        view.window, view.status_label = Mock(), Mock()
+        view.refresh = Mock(side_effect=ValueError('temporary layout error'))
+        view.tick()
+        view.window.after.assert_called_once_with(100, view.tick)
+        view.status_label.config.assert_called_once_with(text='Camera preview error: temporary layout error')
+        self.assertIsNone(view.last_render_key)
+
+    def test_resize_burst_only_invalidates_until_next_preview_tick(self):
+        view = CameraPopout.__new__(CameraPopout)
+        view.last_render_key = ('old', 800, 600)
+        view.render = Mock()
+        for _ in range(10):
+            view.invalidate()
+        view.render.assert_not_called()
+        self.assertIsNone(view.last_render_key)
+
+    def test_unchanged_widget_state_does_not_trigger_layout_updates(self):
+        widget = Mock()
+        widget.cget.side_effect = lambda key: {'text': 'Ready', 'wraplength': 1000}[key]
+        CameraPopout.configure_changed(widget, text='Ready', wraplength=1000)
+        widget.config.assert_not_called()
+        CameraPopout.configure_changed(widget, text='Tracking', wraplength=1000)
+        widget.config.assert_called_once_with(text='Tracking')
+
+    def test_hidden_calibration_caches_frames_without_running_vision(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.frame = np.zeros((400, 400, 3), np.uint8)
+        app.visible = lambda: False
+        app.camera_popout = None
+        app.axis_busy, app.axis_pending = False, None
+        app.ensure_roi_tracking, app.render = Mock(), Mock()
+        app.tracker = Mock()
+        frame = np.ones_like(app.frame)
+        app.accept_live_frame(frame)
+        self.assertIs(app.frame, frame)
+        app.ensure_roi_tracking.assert_not_called()
+        app.tracker.process.assert_not_called()
+        app.render.assert_not_called()
+
     def test_control_details_update_fixed_cells_and_full_value_hints(self):
         app = CommandTab.__new__(CommandTab)
         app.feedback = None

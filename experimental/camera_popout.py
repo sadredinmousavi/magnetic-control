@@ -76,7 +76,9 @@ class CameraPopout:
         self.status_label.pack(fill='x', padx=8)
         self.canvas = tk.Canvas(self.window, background='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
-        self.canvas.bind('<Configure>', lambda event: self.refresh())
+        # Resize events can arrive in bursts while maximizing. The preview
+        # timer renders the latest size once, after layout has settled.
+        self.canvas.bind('<Configure>', lambda event: self.invalidate())
         self.window.bind('<Escape>', lambda event: self.window.attributes('-fullscreen', False))
         self.window.protocol('WM_DELETE_WINDOW', self.close)
         self.maximize()
@@ -111,25 +113,42 @@ class CameraPopout:
             self.last_render_key = key
         if self.status_refresh is not None:
             self.status_refresh(self.status_widgets)
-        self.status_label.config(text=self.status(), wraplength=max(400, self.window.winfo_width() - 16))
+        self.configure_changed(self.status_label, text=self.status(),
+                               wraplength=max(400, self.window.winfo_width() - 16))
         for button, source in self.actions:
             state = source.cget('state') if source is not None else 'normal'
             if button.cget('text') in self.disabled_actions:
                 state = 'disabled'
-            button.config(state=state if self.controls_enabled() else 'disabled')
+            self.configure_changed(button, state=state if self.controls_enabled() else 'disabled')
             if source is not None and self.mirror_action_text:
                 caption = source.cget('text')
-                button.config(text=self.action_captions.get(caption, caption))
+                self.configure_changed(button, text=self.action_captions.get(caption, caption))
         for widget in self.extra_controls.winfo_children():
             if widget.winfo_class() in ('Entry', 'Spinbox', 'Checkbutton', 'Radiobutton', 'Button'):
-                widget.config(state='normal' if self.controls_enabled() and self.extra_controls_enabled() else 'disabled')
+                self.configure_changed(widget, state='normal' if self.controls_enabled() and self.extra_controls_enabled() else 'disabled')
+
+    @staticmethod
+    def configure_changed(widget, **values):
+        changed = {key: value for key, value in values.items() if str(widget.cget(key)) != str(value)}
+        if changed:
+            widget.config(**changed)
+
+    def invalidate(self):
+        self.last_render_key = None
 
     def tick(self):
         self.after_id = None
         if self.closed:
             return
-        self.refresh()
-        self.after_id = self.window.after(100, self.tick)
+        try:
+            self.refresh()
+        except Exception as error:
+            # A failed preview must not silently cancel all future refreshes.
+            self.last_render_key = None
+            self.status_label.config(text=f'Camera preview error: {error}')
+        finally:
+            if not self.closed:
+                self.after_id = self.window.after(100, self.tick)
 
     def close(self):
         if self.closed:

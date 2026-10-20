@@ -138,26 +138,59 @@ class LocalCameraTests(unittest.TestCase):
         app.camera_frame_queue.put(pi)
         app.local_frame_queue.put(webcam)
         app.calibration, app.commands, app.root = Mock(camera_popout=None), Mock(camera_popout=None), Mock()
+        app.trajectory = Mock(camera_popout=None)
         app.calibration.live_fps_var.get.return_value = '5'
         app.connection_visible = lambda: False
         with patch('gui005.time.monotonic', side_effect=[100,100]):
             app.poll_camera()
         app.calibration.accept_live_frame.assert_called_once_with(webcam)
         app.commands.accept_live_frame.assert_called_once_with(webcam)
+        app.trajectory.accept_live_frame.assert_called_once_with(webcam)
+        app.trajectory.check_camera_health.assert_called_once()
         self.assertIs(app.camera_frame_queue.get_nowait(), pi)
 
     def test_source_switch_cancels_run_recording_and_discards_calibration(self):
         app = ClosedLoopGUI.__new__(ClosedLoopGUI)
         app.calibration, app.commands = Mock(), Mock()
+        app.trajectory = Mock(render_revision=1)
         app.calibration.setup_revision = 1
         app.commands.render_revision = 1
         app.remote_camera_canvas = Mock()
         app.reset_camera_geometry('Iriun / Local webcam:1')
         app.commands.stop_event.set.assert_called_once()
         app.commands.stop_recording.assert_called_once()
+        app.trajectory.stop_event.set.assert_called_once()
+        app.trajectory.preparation_stop.set.assert_called_once()
+        app.trajectory.stop_recording.assert_called_once()
+        self.assertIsNone(app.trajectory.setup)
+        self.assertIsNone(app.trajectory.cargo_detection)
         self.assertEqual(app.calibration.corners, [])
         self.assertIsNone(app.commands.setup)
         self.assertEqual(app.calibration.camera_source_key, 'Iriun / Local webcam:1')
+
+    def test_control_and_trajectory_exclude_each_other_during_runs_and_preparation(self):
+        app = ClosedLoopGUI.__new__(ClosedLoopGUI)
+        app.commands = Mock(running=False, precalculating=False)
+        app.trajectory = Mock(running=False, precalculating=False)
+        self.assertTrue(app.control_operation_available(app.trajectory))
+        app.commands.running = True
+        self.assertFalse(app.control_operation_available(app.trajectory))
+        app.commands.running = False
+        app.trajectory.precalculating = True
+        self.assertFalse(app.control_operation_available(app.commands))
+
+    def test_active_workspace_locks_calibration_and_other_tab_until_finished(self):
+        app = ClosedLoopGUI.__new__(ClosedLoopGUI)
+        app.commands, app.trajectory, app.calibration = Mock(), Mock(), Mock()
+        app.workflow_notebook, app.calibration_frame = Mock(), Mock()
+        app.set_control_running(app.trajectory, True)
+        app.calibration.set_command_running.assert_called_with(True)
+        app.workflow_notebook.tab.assert_any_call(app.commands.parent, state='disabled')
+        app.workflow_notebook.tab.assert_any_call(app.calibration_frame, state='disabled')
+        app.set_control_running(app.trajectory, False)
+        app.calibration.set_command_running.assert_called_with(False)
+        app.workflow_notebook.tab.assert_any_call(app.commands.parent, state='normal')
+        app.workflow_notebook.tab.assert_any_call(app.calibration_frame, state='normal')
 
 
 if __name__ == '__main__':

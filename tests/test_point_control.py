@@ -52,9 +52,9 @@ class PointControlTests(unittest.TestCase):
             commander.prepare_axes('case_100')
             self.assertEqual(calculate.call_count, 7)
             self.assertEqual({tuple(call.args[1]) for call in calculate.call_args_list},
-                             {(0.,0.), (.01,0.), (.02,0.), (.03,0.), (0.,.01), (0.,.02), (0.,.03)})
+                             {(0.,0.), (-.01,0.), (.01,0.), (.02,0.), (0.,-.01), (0.,.01), (0.,.02)})
             move.assert_not_called()
-            for target in ((0, .03), (0, 0), (.02, 0), (.03, 0)):
+            for target in ((0, -.01), (0, 0), (.02, 0), (-.01, 0)):
                 commander.move_prepared_axis('case_100', target)
             self.assertEqual(calculate.call_count, 7)
             self.assertEqual(move.call_count, 4)

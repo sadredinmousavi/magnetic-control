@@ -31,13 +31,25 @@ from functions_main import MagneticForcePID
 from hover_hint import HoverHint
 from learned_corrections import LearnedCorrections, correction_context
 from axis_calibration import RobotAxes
+from position_control import PositionPID
+from scene_worker import LatestSceneWorker
+from swarm_cargo import (RedCargoTracker, CargoPositionFeedback, swarm_geometry,
+                         measurement_positions, cargo_geometry, cargo_label)
 
 
 class CommandTab:
+    view_title = 'Control'
+
     def __init__(self, parent, calibration, commander, camera_running, *, set_running=lambda value: None,
-                 visible=lambda: True):
+                 visible=lambda: True, operation_allowed=lambda: True):
         self.parent, self.calibration, self.commander = parent, calibration, commander
         self.camera_running, self.set_running, self.visible = camera_running, set_running, visible
+        self.operation_allowed = operation_allowed
+        self.vision_worker = LatestSceneWorker()
+        self.vision_after = None
+        self.scene_epoch = 0
+        self.analysis_frame = None
+        self.measurement_received_at = None
         self.steps, self.pixels, self.setup = [], None, None
         self.sequence_path, self.input_units = None, None
         self.frame, self.frame_received_at = None, None
@@ -90,6 +102,8 @@ class CommandTab:
         self.crop_placing = False
         self.arrival_tolerance_var = tk.StringVar(value="1")
         self.arrival_hold_var = tk.StringVar(value="0.5")
+        self.cargo_detection = None
+        self.group_geometry = None
         self.tracking_tracker = None
         self.tracking_detections = []
         self.tracking_group_xy = None
@@ -99,6 +113,15 @@ class CommandTab:
         self.robot_trails = {}
         self.tracking_started_at = None
         self.tracking_frame_number = 0
+        self.control_target_var = tk.StringVar(value='Robots')
+        self.cargo_enabled_var = tk.BooleanVar(value=True)
+        self.cargo_shape_var = tk.StringVar(value='Circle')
+        self.cargo_area_var = tk.StringVar(value='200')
+        self.cargo_radius_var = tk.StringVar(value='100')
+        self.cargo_gain_var = tk.StringVar(value='.2')
+        self.cargo_limit_var = tk.StringVar(value='10')
+        self.cargo_tracker = RedCargoTracker()
+        self.cargo_selecting = False
         self.tracking_count_var = tk.StringVar(value="1")
         self.tracking_area_var = tk.StringVar(value="1")
         self.tracking_contrast_var = tk.StringVar(value="10")
@@ -155,7 +178,7 @@ class CommandTab:
         self.help_button = tk.Button(bar, text='Help ?')
         self.help_button.pack(side='left', padx=6)
         self.help_hint = HoverHint(self.help_button, (
-            "The loaded calibration supplies the default ROI and detection settings. Check Phase 3 robots; "
+            "The loaded calibration supplies the default ROI and detection settings. Check Robots; "
             "use Place ROI to reposition it if needed. Without calibration, Place ROI still starts pixel detection. "
             "Physical XY and running require a complete Phase 2 calibration. "
             "Calibration sizes: cm. Sequence: select mm, cm or m. Auto reads the unit header; without a header it uses mm. "
@@ -209,12 +232,38 @@ class CommandTab:
         self.place_roi_button = tk.Button(tracking_bar, text='Place ROI', command=self.begin_roi_placement)
         self.place_roi_button.pack(side='left', padx=2)
         tk.Button(tracking_bar, text='Clear ROI', command=self.clear_command_roi).pack(side='left', padx=2)
-        HoverHint(self.place_roi_button, 'Set Phase 3 robots and ROI radius, then click the camera to place/reposition the moving ROI. No motors move.')
+        HoverHint(self.place_roi_button, 'Set Robots and ROI radius, then click the camera to place/reposition the moving ROI. No motors move.')
         tk.Button(tracking_bar, text="Export tracking CSV", command=self.export_tracking).pack(side="left", padx=2)
-        for label, variable in (("Phase 3 robots", self.tracking_count_var), ("Min area", self.tracking_area_var),
+        for label, variable in (("Robots", self.tracking_count_var), ("Min area", self.tracking_area_var),
                                 ("Contrast", self.tracking_contrast_var), ("ROI radius (px)", self.tracking_radius_var)):
             tk.Label(tracking_bar, text=label).pack(side="left", padx=(7, 2))
             tk.Entry(tracking_bar, textvariable=variable, width=4).pack(side="left")
+        cargo_bar = tk.Frame(parent)
+        cargo_bar.pack(fill='x', padx=8, pady=3)
+        tk.Label(cargo_bar, text='Control target').pack(side='left')
+        target_selector = ttk.Combobox(cargo_bar, textvariable=self.control_target_var,
+                                       values=('Robots', 'Cargo center'), width=13, state='readonly')
+        target_selector.pack(side='left', padx=4)
+        target_selector.bind('<<ComboboxSelected>>', lambda event: self.change_control_target())
+        tk.Checkbutton(cargo_bar, text='Detect red cargo', variable=self.cargo_enabled_var,
+                       command=self.change_cargo_settings).pack(side='left')
+        tk.Button(cargo_bar, text='Select cargo', command=self.begin_cargo_selection).pack(side='left', padx=3)
+        cargo_feedback_bar = tk.Frame(parent)
+        cargo_feedback_bar.pack(fill='x', padx=8, pady=2)
+        tk.Label(cargo_feedback_bar, text='Cargo type').pack(side='left')
+        cargo_type = ttk.Combobox(cargo_feedback_bar, textvariable=self.cargo_shape_var,
+                                  values=('Circle', 'Rectangle'), width=10, state='readonly')
+        cargo_type.pack(side='left', padx=4)
+        cargo_type.bind('<<ComboboxSelected>>', lambda event: self.change_cargo_settings())
+        HoverHint(cargo_type, 'Rectangle: long-axis angle in calibrated robot XY, counterclockwise from +X, 0?180 degrees. Nearly square cargo has no reliable long axis.')
+        for label, variable in (('Cargo min area', self.cargo_area_var), ('Radius px', self.cargo_radius_var),
+                                ('Cargo Kp', self.cargo_gain_var), ('Max correction mm', self.cargo_limit_var)):
+            container = cargo_bar if variable in (self.cargo_area_var, self.cargo_radius_var) else cargo_feedback_bar
+            tk.Label(container, text=label).pack(side='left', padx=(6, 2))
+            tk.Entry(container, textvariable=variable, width=5).pack(side='left')
+        tk.Label(parent, text='Cargo center uses bounded position feedback (1 mm/s, 0.5 s period). '
+                 'Strong/weak spread axes describe group shape; spread ratio is separate from command ratio.',
+                 anchor='w', wraplength=900, justify='left', foreground='#526274').pack(fill='x', padx=10)
         options = tk.Frame(parent)
         options.pack(fill="x", padx=8)
         for label, variable in (("Show desired lines", self.show_path_var), ("Show moving ROI", self.show_roi_var),
@@ -227,7 +276,7 @@ class CommandTab:
         tk.Label(options, text="In-range hold (s)").pack(side="left", padx=(8, 2))
         self.arrival_hold_entry = tk.Entry(options, textvariable=self.arrival_hold_var, width=4)
         self.arrival_hold_entry.pack(side="left")
-        self.tracking_status = tk.Label(parent, text="Set Phase 3 robots, then Place ROI and click the camera.", anchor="w", wraplength=1000)
+        self.tracking_status = tk.Label(parent, text="Set Robots, then Place ROI and click the camera.", anchor="w", wraplength=1000)
         self.tracking_status.pack(fill="x", padx=10)
         learned_bar = tk.Frame(parent)
         learned_bar.pack(fill='x', padx=8, pady=2)
@@ -500,7 +549,7 @@ class CommandTab:
             self.refresh_point_corrections(setup)
             if not self.steps:
                 self.setup, self.pixels = setup, None
-                self.status.config(text='Calibration ROI/settings applied. Check Phase 3 robots; reposition ROI if needed, then load a sequence.')
+                self.status.config(text='Calibration ROI/settings applied. Check Robots; reposition ROI if needed, then load a sequence.')
                 self.render()
                 return
             self.setup, self.pixels = self.prepare(validate=False)
@@ -514,6 +563,9 @@ class CommandTab:
                                f"{int(outside.sum())} beyond pins, {int(off_frame.sum())} off camera. Select an inside point to run, or review the extrapolation option.")
         except (ValueError, TypeError, KeyError) as error:
             self.setup, self.pixels = None, None
+            self.cargo_detection = self.group_geometry = None
+            if hasattr(self, "cargo_tracker"):
+                self.cargo_tracker = RedCargoTracker()
             self.tracking_tracker = None
             self.tracking_detections = []
             self.tracking_group_xy = None
@@ -534,19 +586,42 @@ class CommandTab:
             if hasattr(self, 'command_roi'):
                 self.command_roi = None
             self.pixels = None
+            self.cargo_detection = self.group_geometry = None
+            if hasattr(self, "cargo_tracker"):
+                self.cargo_tracker = RedCargoTracker()
             self.tracking_tracker = None
             self.tracking_detections = []
             self.tracking_group_xy = None
             self.tracking_status.config(text="Tracking stopped: camera size no longer matches calibration.")
             self.status.config(text="Camera resolution changed. Sequence stopped; load matching calibration before running again.")
+        popup = getattr(self, 'camera_popout', None)
+        preview_open = popup is not None and popup.is_open
+        # Keep the newest image available for tab switches without running a
+        # second vision pipeline for an idle, hidden workspace.
+        if not (self.visible() or preview_open or getattr(self, 'running', False)
+                or getattr(self, 'recording', None) is not None
+                or getattr(self, 'diagnostics', None) is not None):
+            if not getattr(self, '_tracking_suspended', False):
+                self.tracking_detections, self.tracking_group_xy = [], None
+                self.cargo_detection = self.group_geometry = None
+                if getattr(self, 'arrival_gate', None) is not None:
+                    self.arrival_gate.observe(None)
+            self._tracking_suspended = True
+            return
+        self._tracking_suspended = False
         first_row = len(self.tracking_rows)
         if getattr(self, "tracking_tracker", None) is not None:
             self.process_tracking_frame()
+        if getattr(self, 'vision_worker', None) is not None and self.tracking_tracker is not None:
+            return
+        self.finish_frame_io(frame, first_row)
+
+    def finish_frame_io(self, frame, first_row):
         if getattr(self, 'diagnostics', None) is not None:
             self.record_diagnostic_frame(self.tracking_rows[first_row:])
         if getattr(self, 'recording', None) is not None:
             try:
-                options = dict(show_path=self.show_path_var.get(), show_roi=self.show_roi_var.get(),
+                options = dict(geometry=getattr(self, 'group_geometry', None), cargo=getattr(self, 'cargo_detection', None), show_path=self.show_path_var.get(), show_roi=self.show_roi_var.get(),
                                commanded_pixel=self.commanded_pixel() if self.show_commanded_var.get() else None,
                                trails=self.robot_trails if self.show_trails_var.get() else None)
                 args = (self.setup, self.pixels, self.active_index, self.tracking_detections, self.tracking_tracker)
@@ -562,6 +637,7 @@ class CommandTab:
             except (ValueError, OSError, cv2.error) as error:
                 self.stop_recording()
                 self.recording_status.config(text=f'Recording stopped: {error}. Partial files kept.')
+        self.render_revision = getattr(self, "render_revision", 0) + 1
         if self.visible():
             self.render()
 
@@ -569,13 +645,16 @@ class CommandTab:
         if setup.get("coordinate_system") != "robot_axes":
             raise ValueError("Capture Center, +X and +Y, or load a complete robot-axis calibration first.")
         signature = json.dumps({key: setup.get(key) for key in (
-            "corners_px", "rectangle_width_cm", "rectangle_height_cm", "axis_samples_px", "video_size_px",
+            "corners_px", "rectangle_width_cm", "rectangle_height_cm", "axis_samples_px", "axis_capture_moves", "video_size_px",
             "roi_circle_px", "minimum_area", "dark_contrast_threshold")}, sort_keys=True)
         revision = getattr(self.calibration, 'setup_revision', 0)
         revision = revision if isinstance(revision, int) else 0
         loaded_changed = getattr(self, 'calibration_revision', None) != revision
         if loaded_changed or reset:
             self.roi_override = False
+            if hasattr(self, 'cargo_tracker'):
+                self.cargo_tracker = RedCargoTracker()
+                self.cargo_detection = None
         self.calibration_revision = revision
         if not reset and not loaded_changed and signature == self.tracking_signature:
             if self.tracking_enabled and self.tracking_tracker is None and (not hasattr(self, 'command_roi') or self.command_roi is not None):
@@ -591,11 +670,78 @@ class CommandTab:
         self.tracking_contrast_var.set(str(setup.get("dark_contrast_threshold", 10)))
         if not hasattr(self, 'command_roi') or not getattr(self, 'roi_override', False):
             self.tracking_radius_var.set(str(setup["roi_circle_px"][2]))
+        self.cargo_detection = None
+        self.group_geometry = None
         self.tracking_tracker = None
         self.tracking_detections = []
         self.tracking_group_xy = None
         if self.tracking_enabled and (not hasattr(self, 'command_roi') or self.command_roi is not None):
             self.start_tracking(setup=setup)
+
+    def control_target(self):
+        variable = getattr(self, 'control_target_var', None)
+        return 'Robots' if variable is None else variable.get()
+
+    def change_control_target(self):
+        # A target change must invalidate any calculation using the old measurement.
+        if self.running or self.precalculating:
+            self.stop()
+        if self.control_target() == 'Cargo center':
+            self.cargo_enabled_var.set(True)
+        if getattr(self, 'arrival_gate', None) is not None:
+            self.arrival_gate.observe(None)
+        self.precalculated_signature = None
+        self.force_memory_context = None
+        self.refresh_point_corrections()
+        self.tracking_status.config(text=f'Control target: {self.control_target()}. Run again to use this measurement.')
+
+    def change_cargo_settings(self):
+        self.scene_epoch = getattr(self, "scene_epoch", 0) + 1
+        self.analysis_frame = None
+        if self.running or self.precalculating:
+            self.stop()
+        self.cargo_tracker = RedCargoTracker()
+        self.cargo_detection = None
+        if getattr(self, 'arrival_gate', None) is not None:
+            self.arrival_gate.observe(None)
+        self.render()
+
+    def begin_cargo_selection(self):
+        if self.running or self.precalculating:
+            self.stop()
+        self.cargo_enabled_var.set(True)
+        self.cargo_selecting = True
+        self.tracking_status.config(text='Click the red cargo in the camera. Then select Cargo center to control it.')
+
+    def process_cargo(self, tracker):
+        self.cargo_detection = None
+        tracker.excluded_mask = None
+        enabled = getattr(self, 'cargo_enabled_var', None)
+        if enabled is None or not enabled.get():
+            return
+        if getattr(self, 'cargo_tracker', None) is None:
+            self.cargo_tracker = RedCargoTracker()
+        mask = None
+        circle = self.workspace_circle()
+        if circle is not None:
+            mask = np.zeros(self.frame.shape[:2], np.uint8)
+            cv2.circle(mask, tuple(np.rint(circle[:2]).astype(int)), round(circle[2]), 255, -1)
+        cargo = self.cargo_tracker.process(self.frame, float(self.cargo_area_var.get()),
+                                          float(self.cargo_radius_var.get()), mask=mask)
+        red_mask = self.cargo_tracker.detector.last_blob_mask
+        # Red cargo must never become a dark-contrast robot, even during selection loss.
+        if red_mask is not None:
+            tracker.excluded_mask = cv2.dilate(red_mask, np.ones((5, 5), np.uint8))
+        if cargo is not None:
+            cargo['xy_cm'] = tuple(tracker.coordinates([cargo['center']])[0]) if tracker.axes is not None else None
+            shape_var = getattr(self, 'cargo_shape_var', None)
+            cargo = cargo_geometry(cargo, red_mask, tracker.axes,
+                                   'Circle' if shape_var is None else shape_var.get())
+        self.cargo_detection = cargo
+
+    def control_positions(self):
+        return measurement_positions(self.control_target(), self.tracking_detections,
+                                     self.tracking_tracker.count, getattr(self, 'cargo_detection', None))
 
     def new_tracking_engine(self, setup, center=None):
         count = int(self.tracking_count_var.get())
@@ -606,6 +752,7 @@ class CommandTab:
         return MovingROICalibration(
             setup["corners_px"], setup["rectangle_width_cm"], setup["rectangle_height_cm"],
             (*center, radius), count, area, setup.get('axis_samples_px') or None,
+            axis_capture_moves=setup.get("axis_capture_moves"),
             contrast_threshold=contrast, limit_to_pins=False, allow_uncalibrated=True,
         )
 
@@ -615,7 +762,7 @@ class CommandTab:
             self.refresh_next_button()
         try:
             if hasattr(self, 'command_roi') and self.command_roi is None:
-                raise ValueError('Place the Phase 3 ROI around the robots first.')
+                raise ValueError('Place the robot ROI around the robots first.')
             if setup is None:
                 try:
                     setup = self.current_setup()
@@ -630,6 +777,8 @@ class CommandTab:
             self.tracking_status.config(text=f"Cannot start tracking: {error}")
             return
         self.setup = setup
+        self.scene_epoch = getattr(self, "scene_epoch", 0) + 1
+        self.analysis_frame = None
         self.tracking_tracker, self.tracking_enabled = tracker, True
         self.tracking_started_at = time.monotonic()
         self.tracking_frame_number = 0
@@ -643,7 +792,11 @@ class CommandTab:
         self.render()
 
     def stop_tracking(self):
+        self.scene_epoch = getattr(self, "scene_epoch", 0) + 1
+        self.analysis_frame = None
         self.tracking_enabled = False
+        self.cargo_detection = None
+        self.group_geometry = None
         self.tracking_tracker = None
         self.tracking_detections = []
         self.tracking_group_xy = None
@@ -652,6 +805,53 @@ class CommandTab:
             self.refresh_next_button()
         self.tracking_status.config(text="Tracking stopped. Recorded measurements remain available for export; motor execution is unchanged.")
         self.render()
+
+    def submit_scene(self, tracker):
+        enabled = getattr(self, 'cargo_enabled_var', None)
+        settings = dict(
+            robot=dict(corners=tracker.corners, width_cm=tracker.width_cm, height_cm=tracker.height_cm,
+                       circle=(*tracker.center, tracker.radius), count=tracker.count,
+                       minimum_area=tracker.minimum_area, axis_samples=self.setup.get('axis_samples_px') or None,
+                       axis_capture_moves=self.setup.get('axis_capture_moves'),
+                       contrast_threshold=tracker.contrast_threshold, limit_to_pins=False, allow_uncalibrated=True),
+            references=[list(point) for point in tracker.references], workspace=tracker.workspace_circle,
+            cargo_center=None if self.cargo_tracker.center is None else tuple(self.cargo_tracker.center),
+            cargo_enabled=enabled is not None and enabled.get(), cargo_area=float(self.cargo_area_var.get()),
+            cargo_radius=float(self.cargo_radius_var.get()), cargo_shape=self.cargo_shape_var.get())
+        self._scene_request_key = (self.scene_epoch, tracker.count, tracker.minimum_area,
+            tracker.contrast_threshold, tracker.radius, tracker.workspace_circle,
+            settings['cargo_enabled'], settings['cargo_area'], settings['cargo_radius'], settings['cargo_shape'])
+        self.vision_worker.submit(dict(frame=self.frame, observed_at=self.frame_received_at,
+                                      key=self._scene_request_key, settings=settings))
+        if self.vision_after is None:
+            self.vision_after = self.parent.after(20, self.poll_scene)
+
+    def poll_scene(self):
+        self.vision_after = None
+        result = self.vision_worker.take_result()
+        if (result is not None and result['key'] == getattr(self, '_scene_request_key', None)
+                and result['key'][0] == self.scene_epoch and self.tracking_enabled
+                and self.tracking_tracker is not None and self.frame is not None
+                and result['frame'].shape == self.frame.shape
+                and not getattr(self, '_tracking_suspended', False)):
+            if 'error' in result or time.monotonic()-result['observed_at'] > 1.:
+                self.tracking_detections, self.tracking_group_xy = [], None
+                self.cargo_detection = self.group_geometry = self.analysis_frame = None
+                if self.arrival_gate is not None:
+                    self.arrival_gate.observe(None)
+                self.tracking_status.config(text='Tracking unavailable: ' + result.get('error', 'vision result is stale'))
+            else:
+                self.tracking_tracker = tracker = result['tracker']
+                self.cargo_tracker, self.cargo_detection = result['cargo_tracker'], result['cargo']
+                self.tracking_detections, self.tracking_group_xy = result['detections'], result['group_xy']
+                self.group_geometry, self.analysis_frame = result['geometry'], result['frame']
+                if getattr(self, 'command_roi', None) is not None and result['center'] is not None:
+                    self.command_roi = (*tracker.center, tracker.radius)
+                first_row = len(self.tracking_rows)
+                self.finish_tracking_frame(tracker, result['center'], result['observed_at'])
+                self.finish_frame_io(result['frame'], first_row)
+        if self.vision_worker.busy:
+            self.vision_after = self.parent.after(20, self.poll_scene)
 
     def process_tracking_frame(self):
         try:
@@ -669,31 +869,46 @@ class CommandTab:
                     or tracker.minimum_area <= 0 or tracker.radius <= 0 or not 1 <= tracker.contrast_threshold <= 255):
                 raise ValueError("Min area and ROI radius must be positive; contrast must be 1–255.")
             tracker.workspace_circle = self.workspace_circle()
+            if getattr(self, 'vision_worker', None) is not None:
+                self.submit_scene(tracker)
+                return
+            self.process_cargo(tracker)
             self.tracking_detections, center, self.tracking_group_xy = tracker.process(self.frame)
+            self.group_geometry = swarm_geometry(self.tracking_detections, tracker.count, tracker.axes)
+            if self.group_geometry is not None:
+                self.tracking_group_xy = tuple(self.group_geometry['center_mm'] / 10)
             if getattr(self, 'command_roi', None) is not None and center is not None:
                 self.command_roi = (*tracker.center, tracker.radius)
         except (ValueError, TypeError) as error:
+            self.cargo_detection = self.group_geometry = None
             self.tracking_detections, self.tracking_group_xy = [], None
             if getattr(self, "arrival_gate", None) is not None:
                 self.arrival_gate.observe(None)
                 self.refresh_next_button()
             self.tracking_status.config(text=f"Tracking unavailable: {error}")
             return
+        self.finish_tracking_frame(tracker, center, self.frame_received_at)
+
+    def finish_tracking_frame(self, tracker, center, observed_at):
+        self.measurement_received_at = observed_at
         if getattr(self, "arrival_gate", None) is not None:
-            positions = (None if center is None else
-                         np.asarray([item["xy_cm"] for item in sorted(self.tracking_detections, key=lambda item: item['robot_id'])]) * .01)
-            self.arrival_gate.observe(positions, self.frame_received_at)
+            positions = self.control_positions()
+            self.arrival_gate.observe(positions, observed_at)
             self.refresh_next_button()
-        target = None if self.active_index is None else self.steps[self.active_index].target_xy_m
+        target = self.current_tracking_target()
         group_mm = None if self.tracking_group_xy is None else np.asarray(self.tracking_group_xy) * 10
-        error_mm = None if target is None or group_mm is None else float(np.linalg.norm(group_mm - np.asarray(target) * 1000))
+        control_positions = self.control_positions()
+        control_mm = None if control_positions is None else control_positions.mean(axis=0) * 1000
+        error_mm = None if target is None or control_mm is None else float(np.linalg.norm(control_mm - np.asarray(target) * 1000))
+        cargo = getattr(self, 'cargo_detection', None)
+        geometry = getattr(self, 'group_geometry', None)
         visible_ids = {item["robot_id"] for item in self.tracking_detections}
         for robot_id, trail in self.robot_trails.items():
             if robot_id not in visible_ids:
                 trail.append(None)
         for item in self.tracking_detections:
             self.robot_trails.setdefault(item["robot_id"], deque(maxlen=300)).append(item["center"])
-        elapsed = time.monotonic() - self.tracking_started_at
+        elapsed = max(0., observed_at - self.tracking_started_at)
         gate = getattr(self, "arrival_gate", None)
         feedback = getattr(self, 'feedback', None)
         control_data = {} if feedback is None else feedback.snapshot()
@@ -705,6 +920,22 @@ class CommandTab:
                 "robot_y_px": "" if item is None else item["center"][1],
                 "robot_x_mm": "" if item is None or item['xy_cm'] is None else item["xy_cm"][0] * 10,
                 "robot_y_mm": "" if item is None or item['xy_cm'] is None else item["xy_cm"][1] * 10,
+                "control_target": self.control_target(),
+                "control_x_mm": "" if control_mm is None else control_mm[0],
+                "control_y_mm": "" if control_mm is None else control_mm[1],
+                "cargo_valid": int(cargo is not None),
+                "cargo_shape": "" if cargo is None else cargo.get('shape', 'Circle'),
+                "cargo_angle_deg": "" if cargo is None or cargo.get('angle_deg') is None else cargo['angle_deg'],
+                "cargo_angle_valid": int(cargo is not None and cargo.get('angle_deg') is not None),
+                "cargo_length_mm": "" if cargo is None or cargo.get('length_mm') is None else cargo['length_mm'],
+                "cargo_width_mm": "" if cargo is None or cargo.get('width_mm') is None else cargo['width_mm'],
+                "cargo_x_px": "" if cargo is None else cargo['center'][0],
+                "cargo_y_px": "" if cargo is None else cargo['center'][1],
+                "cargo_x_mm": "" if cargo is None or cargo['xy_cm'] is None else cargo['xy_cm'][0]*10,
+                "cargo_y_mm": "" if cargo is None or cargo['xy_cm'] is None else cargo['xy_cm'][1]*10,
+                "spread_ratio": "" if geometry is None or geometry['ratio'] is None else geometry['ratio'],
+                "strong_spread_mm": "" if geometry is None or geometry['strong_mm'] is None else geometry['strong_mm'],
+                "weak_spread_mm": "" if geometry is None or geometry['weak_mm'] is None else geometry['weak_mm'],
                 "group_x_mm": "" if group_mm is None else group_mm[0],
                 "group_y_mm": "" if group_mm is None else group_mm[1],
                 "expected_robots": tracker.count, "detected_robots": len(self.tracking_detections),
@@ -751,7 +982,7 @@ class CommandTab:
                 'calculated_motor_angles_deg': json.dumps(control_data.get('calculated_angles', [])),
                 'sent_motor_angles_deg': json.dumps(control_data.get('sent_angles', [])),
                 'motor_sent_time_s': control_data.get('sent_time_s', ''),
-                'orientation_measured_deg': '',
+                'orientation_measured_deg': '' if geometry is None or geometry['angle_deg'] is None else geometry['angle_deg'],
             })
         self.tracking_frame_number += 1
         detail = "Group missing; ROI held at last complete detection."
@@ -762,16 +993,28 @@ class CommandTab:
         if error_mm is not None:
             detail += f" Active-target error {error_mm:.2f} mm."
         if gate is not None and gate.error_mm is not None:
-            detail += f" Arrival maximum robot error {gate.error_mm:.2f} mm (limit {gate.tolerance_mm:g} mm)."
+            detail += f" Arrival maximum target error {gate.error_mm:.2f} mm (limit {gate.tolerance_mm:g} mm)."
+        if self.control_target() == 'Cargo center':
+            detail += (' Cargo center unavailable; corrections paused.' if control_mm is None else
+                       f' Cargo XY ({control_mm[0]:.2f}, {control_mm[1]:.2f}) mm.')
+        if cargo is not None and cargo.get('shape') == 'Rectangle':
+            angle = cargo.get('angle_deg')
+            detail += ' Cargo direction unavailable (needs calibration and a distinct long axis).' if angle is None else f' Cargo axis {angle:.1f} deg.'
+        if getattr(self, 'cargo_tracker', None) is not None and self.cargo_tracker.error:
+            detail += ' ' + self.cargo_tracker.error
         self.tracking_status.config(text=f"Tracking {len(self.tracking_detections)}/{tracker.count} robots. {detail}")
         if hasattr(self, 'control_details'):
             self.refresh_control_details(self.control_details)
+
+    def current_tracking_target(self):
+        return None if self.active_index is None else self.steps[self.active_index].target_xy_m
 
     def check_camera_health(self):
         if self.tracking_tracker is None:
             return
         if not self.camera_running() or self.frame_received_at is None or time.monotonic() - self.frame_received_at > 2:
-            had_detections = bool(self.tracking_detections)
+            had_detections = bool(self.tracking_detections) or getattr(self, 'cargo_detection', None) is not None
+            self.cargo_detection = self.group_geometry = None
             self.tracking_detections, self.tracking_group_xy = [], None
             if getattr(self, "arrival_gate", None) is not None:
                 self.arrival_gate.observe(None)
@@ -805,11 +1048,14 @@ class CommandTab:
                  'tracking_contrast_var', 'arrival_tolerance_var', 'arrival_hold_var',
                  'force_step_var', 'force_preview_var', 'force_hold_speed_var',
                  'manual_mode_var', 'repeat_motors_var', 'motor_repeat_count_var',
-                 'allow_extrapolation_var', 'use_learned_var', 'slow_assist_var')
+                 'allow_extrapolation_var', 'use_learned_var', 'slow_assist_var',
+                 'control_target_var', 'cargo_enabled_var', 'cargo_area_var', 'cargo_radius_var',
+                 'cargo_gain_var', 'cargo_limit_var', 'cargo_shape_var')
         values = {name: getattr(self, name).get() for name in names if hasattr(self, name)}
         values['pid_display_units'] = {key: var.get() for key, var in self.force_pid_settings.items()}
-        values['controller'] = 'force_pid_cumulative_integral'
-        values['integral_carry_between_points'] = True
+        cargo_mode = self.control_target() == 'Cargo center'
+        values['controller'] = 'cargo_position_feedback' if cargo_mode else 'force_pid_cumulative_integral'
+        values['integral_carry_between_points'] = not cargo_mode
         values['camera_source'] = getattr(self.calibration, 'camera_source_key', None)
         values['processing_fps'] = self.calibration.live_fps_var.get()
         return values
@@ -962,9 +1208,21 @@ class CommandTab:
             return
         self.roi_placement_var.set(True)
         self.place_roi_button.config(text='Click camera')
-        self.tracking_status.config(text='Click the ROI center around all Phase 3 robots; detection starts automatically.')
+        self.tracking_status.config(text='Click the ROI center around all Robots; detection starts automatically.')
 
     def camera_click(self, event, canvas):
+        if getattr(self, 'cargo_selecting', False):
+            transform = getattr(canvas, 'camera_transform', None)
+            if transform is not None and self.frame is not None:
+                ox, oy, scale = transform
+                point = ((event.x-ox)/scale, (event.y-oy)/scale)
+                h, w = self.frame.shape[:2]
+                if 0 <= point[0] < w and 0 <= point[1] < h:
+                    self.cargo_tracker = RedCargoTracker()
+                    self.cargo_tracker.center = point
+                    self.cargo_selecting = False
+                    self.start_tracking()
+            return
         if getattr(self, 'crop_placing', False):
             transform = getattr(canvas, 'camera_transform', None)
             if transform is not None and self.frame is not None and self.recording is None:
@@ -996,7 +1254,7 @@ class CommandTab:
                 return
             radius = float(self.tracking_radius_var.get())
             if not np.isfinite(radius) or radius <= 0 or int(self.tracking_count_var.get()) < 1:
-                raise ValueError('Set a positive ROI radius and Phase 3 robot count.')
+                raise ValueError('Set a positive ROI radius and robot count.')
             self.command_roi = (x, y, radius)
             self.roi_override = True
             self.show_roi_var.set(True)
@@ -1026,7 +1284,7 @@ class CommandTab:
             self.camera_popout.show()
             return
         self.camera_popout = CameraPopout(
-            self.parent, 'GUI005 — Phase 3 camera', self.render,
+            self.parent, f'GUI005 — {self.view_title} camera', self.render,
             status_lines=2,
             toolbar_builder=self.build_popout_roi_controls,
             toolbar_title='Tracking',
@@ -1060,7 +1318,7 @@ class CommandTab:
     def build_popout_roi_controls(self, bar):
         self.popout_roi_entries = {}
         for label, variable, hint in (
-                ('Robots', self.tracking_count_var, 'Expected number of robots in Phase 3. A complete group is required for arrival and feedback.'),
+                ('Robots', self.tracking_count_var, 'Expected number of robots in this workspace. A complete group is required for arrival and feedback.'),
                 ('ROI px', self.tracking_radius_var, 'Moving circular ROI radius in native camera pixels.'),
                 ('Area', self.tracking_area_var, 'Minimum detected robot area in native pixels squared.'),
                 ('Contrast', self.tracking_contrast_var, 'Dark contrast threshold (1–255). Lower values detect fainter robots.')):
@@ -1212,7 +1470,8 @@ class CommandTab:
             calculated=calculated, sent=sent)
         for key, text in values.items():
             widget, hint = fields[key]
-            widget.config(text=text)
+            if widget.cget('text') != text:
+                widget.config(text=text)
             # Full content remains accessible when a narrow window clips a cell.
             hint.text = text
 
@@ -1229,7 +1488,7 @@ class CommandTab:
         if not self.steps:
             raise ValueError('Load an XY sequence first.')
         signature = self.commander.hardware_signature(load_hardware_case(setup['control_case']))
-        context = correction_context(setup, self.steps, signature, self.tracking_count_var.get())
+        context = correction_context(dict(setup, control_target=self.control_target()), self.steps, signature, self.tracking_count_var.get())
         corrections = self.learned.snapshot(context, len(self.steps))
         if not self.use_learned_var.get():
             corrections = [[0.,0.] for step in self.steps]
@@ -1278,7 +1537,7 @@ class CommandTab:
                 raise ValueError('Click inside the camera image.')
             setup = self.setup if self.running else self.current_setup()
             axes = RobotAxes(setup['corners_px'], setup['rectangle_width_cm'],
-                             setup['rectangle_height_cm'], setup['axis_samples_px'])
+                             setup['rectangle_height_cm'], setup['axis_samples_px'], setup.get('axis_capture_moves'))
             target = axes.coordinates([pixel])[0] / 100
             self.validate_corrected_target(target, setup, allow_outside_pins=self.allow_extrapolation_var.get())
             context = self.run_correction_context if self.running else self.learned_snapshot(setup)[0]
@@ -1431,6 +1690,9 @@ class CommandTab:
     def precalculate_all(self):
         if self.running or self.precalculating:
             return
+        if not getattr(self, 'operation_allowed', lambda: True)():
+            self.status.config(text='Wait for the other control workspace to finish, or stop it first.')
+            return
         try:
             if not self.steps:
                 raise ValueError('Load an XY sequence first.')
@@ -1494,8 +1756,23 @@ class CommandTab:
         if self.precalculating:
             self.preparation_after = self.parent.after(50, self.poll_precalculation)
 
+    def make_arrival_gate(self):
+        return ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
+
+    def configure_run_feedback(self, feedback):
+        return feedback
+
+    def execute_sequence(self, steps, commander, case_name, **options):
+        return execute_xy_sequence(steps, commander, case_name, **options)
+
+    def handle_execution_event(self, kind, index, result):
+        return False
+
     def run(self, *, selected_only=False):
         if self.running:
+            return
+        if not getattr(self, 'operation_allowed', lambda: True)():
+            self.status.config(text='Wait for the other control workspace to finish, or stop it first.')
             return
         if getattr(self, 'precalculating', False):
             self.status.config(text='Wait for precalculation to finish, or press Stop.')
@@ -1509,11 +1786,11 @@ class CommandTab:
                     self.precalculated_signature = None  # Changed learned u must not reuse old motor angles.
                 else:
                     prepared = True
-            arrival_gate = ArrivalGate(float(self.arrival_tolerance_var.get()), float(self.arrival_hold_var.get()), require_arrival=False)
+            arrival_gate = self.make_arrival_gate()
             feedback = None
-            if hasattr(self, 'force_step_var'):
-                def validate_correction(target):
-                    self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
+            def validate_correction(target):
+                self.validate_corrected_target(target, setup, allow_outside_pins=allow_extrapolation)
+            if hasattr(self, 'force_step_var') and self.control_target() != 'Cargo center':
                 pid = None
                 angle_rate, deadband = 20., .1
                 if hasattr(self, 'force_pid_settings'):
@@ -1529,6 +1806,18 @@ class CommandTab:
                     slow_motion_assist=self.slow_assist_var.get() if hasattr(self, 'slow_assist_var') else False)
                 if self.control_requested and not manual:
                     feedback.enabled.set()
+            if self.control_target() == 'Cargo center':
+                pid = PositionPID(kp=float(self.cargo_gain_var.get()), limit_mm=float(self.cargo_limit_var.get()),
+                                  slew_mm_s=1., period_s=.5, incremental=True)
+                feedback = CargoPositionFeedback(pid, validate=validate_correction, manual=manual,
+                    preview_only=self.force_preview_var.get(),
+                    observation_valid=lambda: (getattr(self, 'cargo_detection', None) is not None
+                        and self.cargo_detection.get('xy_cm') is not None and self.tracking_enabled
+                        and getattr(self, "measurement_received_at", None) is not None
+                        and time.monotonic()-self.measurement_received_at <= 1.))
+                if self.control_requested and not manual:
+                    feedback.set_enabled(True)
+            feedback = self.configure_run_feedback(feedback)
             setup, pixels = self.prepare(validate=False)
             learned_context, corrections = (self.learned_snapshot(setup) if hasattr(self, 'learned') else
                                             (None, [[0.,0.] for step in self.steps]))
@@ -1553,17 +1842,19 @@ class CommandTab:
             load_hardware_case(setup["control_case"])
             self.configure_tracking(setup)
             if self.tracking_tracker is None or not self.tracking_enabled:
-                raise ValueError('Place the Phase 3 ROI and detect the robots before running.')
+                raise ValueError('Place the robot ROI and detect the robots before running.')
             if hasattr(self, 'command_roi') and (self.command_roi is None or self.tracking_group_xy is None
                     or len(self.tracking_detections) != int(self.tracking_count_var.get())):
-                raise ValueError('Wait for a fresh, complete robot group inside the Phase 3 ROI before running.')
+                raise ValueError('Wait for a fresh, complete robot group inside the robot ROI before running.')
+            if self.control_target() == 'Cargo center' and self.control_positions() is None:
+                raise ValueError('Detect or select the red cargo before running Cargo center control.')
             force_context = None
-            if feedback is not None:
+            if isinstance(feedback, ForcePIDFeedback):
                 signature = self.commander.hardware_signature(load_hardware_case(setup['control_case']))
                 count = self.tracking_count_var.get() if hasattr(self, 'tracking_count_var') else 1
                 revision = getattr(self.calibration, 'setup_revision', 0)
                 revision = revision if isinstance(revision, int) else 0
-                force_context = (correction_context(setup, self.steps, signature, count), revision, port)
+                force_context = (correction_context(dict(setup, control_target=self.control_target()), self.steps, signature, count), revision, port)
                 previous = getattr(self, 'feedback', None)
                 if (self.control_requested and not manual and not feedback.preview_only
                         and isinstance(previous, ForcePIDFeedback) and not previous.manual
@@ -1576,6 +1867,7 @@ class CommandTab:
             return
         self.setup, self.pixels = setup, pixels
         self.running = True
+        self.run_allow_extrapolation = allow_extrapolation
         self.run_manual_mode = manual
         self.active_index = None
         self.stop_event.clear()
@@ -1621,7 +1913,7 @@ class CommandTab:
 
         def worker():
             try:
-                outcome = execute_xy_sequence(steps, self.commander, hardware_case_name(setup["control_case"]),
+                outcome = self.execute_sequence(steps, self.commander, hardware_case_name(setup["control_case"]),
                                               active=active, report=lambda kind, index, result:
                                               self.events.put((job, kind, indices[index], result)),
                                               arrival_gate=arrival_gate, prepared=prepared, feedback=feedback,
@@ -1690,6 +1982,8 @@ class CommandTab:
                 job, kind, index, result = self.events.get_nowait()
                 if job != self.job:
                     continue
+                if self.handle_execution_event(kind, index, result):
+                    continue
                 if kind == 'corrected':
                     self.table.set(str(index), 'angles', ', '.join(f'{angle:.2f}' for angle in result['angles_deg']))
                     continue
@@ -1752,7 +2046,7 @@ class CommandTab:
                 if data.get('commanded_xy_mm') is not None:
                     commanded = np.asarray(data['commanded_xy_mm'])
         axes = RobotAxes(self.setup['corners_px'], self.setup['rectangle_width_cm'],
-                         self.setup['rectangle_height_cm'], self.setup['axis_samples_px'])
+                         self.setup['rectangle_height_cm'], self.setup['axis_samples_px'], self.setup.get('axis_capture_moves'))
         return axes.pixel_positions([commanded/10])[0]
 
     def render(self, canvas=None):
@@ -1761,17 +2055,23 @@ class CommandTab:
         popup = getattr(self, 'camera_popout', None)
         if canvas is None and popup is not None and popup.is_open:
             self.screen_points = None
-            self.canvas.delete('all')
-            self.canvas.create_text(max(1, self.canvas.winfo_width()) / 2, max(1, self.canvas.winfo_height()) / 2,
-                                    text='Camera is displayed in the pop-out window', fill='#c5d9ee')
+            if getattr(self, '_preview_notice', None) is not popup:
+                self.canvas.delete('all')
+                self.canvas.create_text(max(1, self.canvas.winfo_width()) / 2, max(1, self.canvas.winfo_height()) / 2,
+                                        text='Camera is displayed in the pop-out window', fill='#c5d9ee')
+                self._preview_notice = popup
             return
+        self._preview_notice = None
         main_view = canvas is None
         canvas = self.canvas if main_view else canvas
         canvas.delete("all")
         canvas.screen_points = None
-        if self.frame is None:
+        frame = getattr(self, "analysis_frame", None)
+        if frame is None:
+            frame = self.frame
+        if frame is None:
             return
-        h, w = self.frame.shape[:2]
+        h, w = frame.shape[:2]
         cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
         low, high = np.array([0., 0.]), np.array([float(w), float(h)])
         circle = None
@@ -1781,13 +2081,13 @@ class CommandTab:
             pass  # Keep the camera visible while the crop fields are being edited.
         if getattr(self, 'crop_placing', False):
             circle = None  # Use the full image while choosing a new circle center.
-        display_frame = self.frame
+        display_frame = frame
         if circle is not None:
             key = (w, h, *circle)
             if getattr(self, '_live_crop_key', None) != key:
                 self._live_crop = CircularVideoCrop((w, h), circle)
                 self._live_crop_key = key
-            display_frame = self._live_crop.apply(self.frame)
+            display_frame = self._live_crop.apply(frame)
             low = np.array([self._live_crop.left, self._live_crop.top], float)
             high = low + self._live_crop.size
         elif self.pixels is not None:
@@ -1798,7 +2098,13 @@ class CommandTab:
         dw, dh = max(1, round(display_frame.shape[1] * scale)), max(1, round(display_frame.shape[0] * scale))
         ox, oy = (np.array([cw, ch]) - extent * scale) / 2 - low * scale
         image_x, image_y = (low * scale + [ox, oy]) if circle is not None else (ox, oy)
-        canvas.camera_photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)).resize((dw, dh)))
+        image_key = (dw, dh, circle)
+        if (getattr(canvas, 'camera_source_frame', None) is not frame
+                or getattr(canvas, 'camera_image_key', None) != image_key):
+            interpolation = cv2.INTER_AREA if dw < display_frame.shape[1] else cv2.INTER_LINEAR
+            preview = cv2.resize(display_frame, (dw, dh), interpolation=interpolation)
+            canvas.camera_photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)))
+            canvas.camera_source_frame, canvas.camera_image_key = frame, image_key
         if main_view:
             self.photo = canvas.camera_photo
         canvas.create_image(image_x + dw / 2, image_y + dh / 2, image=canvas.camera_photo, anchor="center")
@@ -1849,6 +2155,13 @@ class CommandTab:
                     canvas.create_text(x+6, y+5, text='C', fill='#ff55dd', font=('Segoe UI', 8), anchor='nw')
             except (ValueError, TypeError, KeyError):
                 pass
+        waypoint = getattr(self, 'trajectory_waypoint', None)
+        tracker = getattr(self, 'tracking_tracker', None)
+        if waypoint is not None and tracker is not None and tracker.axes is not None:
+            pixel = tracker.axes.pixel_positions([np.asarray(waypoint)*100])[0]
+            x, y = pixel*scale + [ox, oy]
+            canvas.create_oval(x-5, y-5, x+5, y+5, outline='#ff88dd', width=2)
+            canvas.create_text(x+8, y-8, text='Waypoint', fill='#ff88dd', font=('Segoe UI', 8), anchor='sw')
         tracker = getattr(self, "tracking_tracker", None)
         if tracker is not None and enabled("show_roi_var"):
             x, y = tracker.center * scale + [ox, oy]
@@ -1869,8 +2182,38 @@ class CommandTab:
             x, y = np.asarray(item["center"]) * scale + [ox, oy]
             canvas.create_line(x - 2, y, x + 2, y, fill="#00ff66", width=1)
             canvas.create_line(x, y - 2, x, y + 2, fill="#00ff66", width=1)
-            canvas.create_text(x + 4, y + 4, text=f"R{item['robot_id']}", fill="#00ff66", font=("Segoe UI", 7), anchor="nw")
+            canvas.create_text(x + 4, y + 4, text=(f"R{item['robot_id']}" + ("" if item.get("xy_cm") is None else f" ({item['xy_cm'][0]*10:.1f}, {item['xy_cm'][1]*10:.1f}) mm")), fill="#00ff66", font=("Segoe UI", 7), anchor="nw")
 
+        geometry = getattr(self, 'group_geometry', None)
+        cargo = getattr(self, 'cargo_detection', None)
+        if geometry is not None:
+            x, y = geometry['center_px'] * scale + [ox, oy]
+            canvas.create_line(x-5, y, x+5, y, fill='white', width=1)
+            canvas.create_line(x, y-5, x, y+5, fill='white', width=1)
+            xy, ratio = geometry['center_mm'], geometry['ratio']
+            ratio_text = 'n/a' if ratio is None else ('infinite (line)' if np.isinf(ratio) else f'{ratio:.2f}')
+            canvas.create_text(x+8, y-12, text=f'Group ({xy[0]:.2f}, {xy[1]:.2f}) mm; spread ratio {ratio_text}',
+                               fill='white', font=('Segoe UI', 8), anchor='sw')
+            for name, endpoints in geometry['lines']:
+                points = endpoints * scale + [ox, oy]
+                color = '#ffc800' if name.startswith('Strong') else '#64b4ff'
+                canvas.create_line(*points.ravel(), fill=color, width=1)
+                canvas.create_text(*points[1], text=name, fill=color, font=('Segoe UI', 8), anchor='sw')
+        if cargo is not None:
+            x, y, width, height = cargo['bbox']
+            canvas.create_rectangle(x*scale+ox, y*scale+oy, (x+width)*scale+ox, (y+height)*scale+oy,
+                                    outline='#00ffff')
+            x, y = np.asarray(cargo['center']) * scale + [ox, oy]
+            canvas.create_line(x-5, y, x+5, y, fill='#00ffff')
+            canvas.create_line(x, y-5, x, y+5, fill='#00ffff')
+            if cargo.get('outline_px') is not None:
+                points = cargo['outline_px'] * scale + [ox, oy]
+                canvas.create_polygon(*points.ravel(), outline='#00ffff', fill='')
+            if cargo.get('direction_px') is not None:
+                points = cargo['direction_px'] * scale + [ox, oy]
+                canvas.create_line(*points.ravel(), fill='#ff78ff', width=2)
+            text = cargo_label(cargo)
+            canvas.create_text(x+8, y+12, text=text, fill='#00ffff', font=('Segoe UI', 8), anchor='nw')
         if circle is not None:
             # Cover overlays outside the workspace too, at display resolution only.
             x, y = np.asarray(circle[:2]) * scale + [ox, oy]
@@ -1884,6 +2227,11 @@ class CommandTab:
             canvas.create_image(0, 0, image=canvas.workspace_mask_photo, anchor='nw')
 
     def close(self):
+        if getattr(self, 'vision_worker', None) is not None:
+            self.vision_worker.close()
+        if getattr(self, 'vision_after', None) is not None:
+            self.parent.after_cancel(self.vision_after)
+            self.vision_after = None
         if getattr(self, 'diagnostics', None) is not None:
             self.stop_diagnostics()
         if hasattr(self, 'help_hint'):

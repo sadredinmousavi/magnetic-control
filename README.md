@@ -414,6 +414,59 @@ selected sensor mode and its native dimensions, encoded as MJPEG over SSH, rathe
 than forcing 1280×720. Actual streaming speed also depends on Pi encoding and
 network throughput. The preview scales the complete received frame to fit.
 
+GUI005 has **3. Control** and **4. Trajectory Track** workspaces, each with its
+own sequence, feedback, tracking, cargo, recordings and diagnostics state.
+Tab 4 interpolates each commanded destination into straight-line waypoints no
+more than **5 mm apart**, starting at the measured robot-group center or cargo
+center. Run selected follows the route to that destination; Run all follows each
+loaded destination in order. Every waypoint requires fresh tracking, arrival
+within the selected tolerance (at most 1 mm), and the configured in-range hold.
+Progression is automatic; Stop cancels the remaining route. The current waypoint
+is marked in the camera and reported in the status and control details.
+Waypoint spacing bounds the desired path, not the robot's measured travel or
+the magnet angles. Row wait time applies at the row's final destination.
+
+Tab 4 starts with Control on, lower proportional force gain, greater velocity
+damping, zero integral gain and a lower magnet-angle rate. Cargo uses filtered
+derivative position feedback with a 2.5 mm correction limit and 0.5 mm/s slew.
+These are conservative starting settings; actual overdamping depends on the
+robot/cargo dynamics and requires tuning on hardware. Manual and Preview modes
+must be off. Waypoints are synthesized during the run rather than using the
+endpoint-only precalculation cache. Tab 3 retains its original progression.
+Camera input and calibration are shared. Only one workspace can run or prepare
+motor control at a time. Hidden idle workspaces cache the latest camera frame
+without running vision or accumulating measurements; open pop-outs, active runs,
+recordings and diagnostic sessions continue processing. Tab 4's trajectory logic
+lives in `experimental/trajectory_tab.py`.
+
+Both workspaces support multiple robot labels and XY coordinates,
+the group center, and principal strong/weak **spread** axes. The measured spread
+ratio describes the robot arrangement, not magnetic stiffness or the requested
+command ratio. One robot has no spread ratio; collinear robots have an infinite
+ratio, and nearly circular groups have no unique axis orientation.
+
+For cargo transport, enable **Detect red cargo** (the same red segmentation as
+GUI004), then choose **Cargo center** as the control target. With several red
+objects, use **Select cargo** and click the intended object. Cargo minimum area
+and tracking radius are adjustable. Select **Circle** or **Rectangle** under
+**Cargo type** in either workspace. Rectangle cargo shows a fitted outline and
+long-axis direction after perspective correction, measured counterclockwise
+from calibrated robot +X in the range 0–180 degrees. An unmarked rectangle cannot
+distinguish its two ends. Nearly square cargo (aspect ratio below 1.1), missing
+cargo, and frames without robot-axis calibration report no direction. CSV fields
+include cargo type, angle validity, angle, length and width; cargo orientation is
+separate from group spread orientation. Position feedback still controls the
+cargo center; orientation feedback is not enabled.
+Place the robot ROI and set the robot count
+as usual; red pixels are excluded from robot detection. Cargo mode uses bounded
+position corrections to the commanded equilibrium point: default Kp 0.2,
+maximum correction 10 mm, slew 1 mm/s and period 0.5 s. Click **Control on** to
+enable corrections. Arrival and feedback then use the cargo center; cargo loss
+pauses corrections without substituting the group center. Changing the control
+target stops an active run. The camera overlay, recordings and CSV include cargo
+coordinates, the selected target, group geometry and measured spread ratio.
+These transport gains still need validation with the actual cargo and robots.
+
 GUI005's **2. Calibration** tab uses the same dark-contrast robot detector and
 circular swarm ROI as GUI004, without the alternative color/ArUco modes.
 Use the live Pi camera or **Open movie**, select **Select 4 green points** and

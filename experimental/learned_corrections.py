@@ -13,6 +13,8 @@ def correction_context(setup, steps, hardware_signature, robot_count):
     geometry = {key: setup.get(key) for key in (
         'camera_source', 'video_size_px', 'corners_px', 'rectangle_width_cm',
         'rectangle_height_cm', 'axis_samples_px', 'axis_targets_m', 'coordinate_system', 'control_case')}
+    if setup.get('control_target', 'Robots') != 'Robots':
+        geometry['control_target'] = setup['control_target']
     value = dict(geometry=geometry, steps=[asdict(step) for step in steps],
                  hardware=hardware_signature, robots=int(robot_count))
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()

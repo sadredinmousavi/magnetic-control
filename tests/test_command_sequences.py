@@ -454,6 +454,17 @@ class CommandSequenceTests(unittest.TestCase):
         self.assertTrue(app.control_requested)
         app.feedback.set_enabled.assert_called_once_with(True)
 
+    def test_another_workspace_blocks_run_and_precalculation(self):
+        app = self.run_app()
+        app.precalculating = False
+        app.operation_allowed = lambda: False
+        with patch('command_tab.threading.Thread') as thread:
+            app.run_selected()
+            app.precalculate_all()
+        thread.assert_not_called()
+        self.assertFalse(app.running)
+        self.assertFalse(app.precalculating)
+
     def test_gui_constructs_continuous_force_pid_with_correct_unit_conversion(self):
         app = self.run_app()
         app.force_step_var = Mock(get=Mock(return_value='10'))
@@ -552,7 +563,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.configure_tracking = CommandTab.configure_tracking.__get__(app)
         app.setup = app.calibration.setup_data.return_value
         app.setup.update(robot_count=1, minimum_area=2, dark_contrast_threshold=10, roi_circle_px=[110, 110, 90])
-        app.visible = lambda: False
+        app.visible = lambda: True
         app.tracking_tracker = None
         app.tracking_enabled, app.tracking_signature = True, None
         app.tracking_detections, app.tracking_group_xy = [], None
@@ -571,6 +582,108 @@ class CommandSequenceTests(unittest.TestCase):
         for point in points:
             cv2.circle(frame, point, 3, (20, 20, 20), -1)
         return frame
+
+    def cargo_app(self):
+        app = self.tracking_app()
+        for name, value in (('control_target_var', 'Cargo center'), ('cargo_area_var', '100'),
+                            ('cargo_radius_var', '100'), ('cargo_gain_var', '.2'), ('cargo_limit_var', '10')):
+            setattr(app, name, Mock(get=Mock(return_value=value)))
+        app.cargo_enabled_var = Mock(get=Mock(return_value=True))
+        app.force_preview_var = Mock(get=Mock(return_value=False))
+        return app
+
+    def test_hidden_idle_workspace_caches_frame_without_processing_or_stale_measurements(self):
+        app = self.cargo_app()
+        app.start_tracking()
+        app.visible = lambda: False
+        app.camera_popout = None
+        app.process_tracking_frame = Mock()
+        app.tracking_detections = [{'center': (100, 100)}]
+        app.cargo_detection = {'center': (120, 100), 'xy_cm': (1, 0)}
+        app.arrival_gate = Mock()
+        before = len(app.tracking_rows)
+        frame = self.robot_frame([(110, 110)])
+        app.accept_live_frame(frame)
+        app.process_tracking_frame.assert_not_called()
+        self.assertIs(app.frame, frame)
+        self.assertEqual(len(app.tracking_rows), before)
+        self.assertIsNone(app.cargo_detection)
+        self.assertEqual(app.tracking_detections, [])
+        app.arrival_gate.observe.assert_called_once_with(None)
+
+    def test_popout_and_running_workspace_keep_processing_while_tab_is_hidden(self):
+        app = self.cargo_app()
+        app.start_tracking()
+        app.visible = lambda: False
+        app.process_tracking_frame = Mock()
+        frame = self.robot_frame([(110, 110)])
+        app.camera_popout = Mock(is_open=True)
+        app.accept_live_frame(frame)
+        app.process_tracking_frame.assert_called_once()
+        app.process_tracking_frame.reset_mock()
+        app.camera_popout = None
+        app.running = True
+        app.accept_live_frame(frame)
+        app.process_tracking_frame.assert_called_once()
+
+    def test_cargo_controls_arrival_and_is_excluded_from_robots_and_exported(self):
+        from arrival_control import ArrivalGate
+        app = self.cargo_app()
+        app.start_tracking()
+        gate = ArrivalGate(1, 0)
+        gate.arm((.02, 0))
+        gate.armed_at -= .1  # Windows monotonic clock can share a tick with the frame.
+        app.arrival_gate = gate
+        frame = self.robot_frame([(110, 110)])
+        cv2.circle(frame, (150, 110), 12, (0, 0, 255), -1)
+        app.accept_live_frame(frame)
+        self.assertEqual(len(app.tracking_detections), 1)
+        self.assertEqual(app.tracking_detections[0]['center'], (110, 110))
+        self.assertEqual(app.cargo_detection['center'], (150, 110))
+        np.testing.assert_allclose(gate.positions, [[.02, 0]], atol=1e-6)
+        self.assertTrue(gate.ready)
+        row = app.tracking_rows[-1]
+        self.assertEqual(row['control_target'], 'Cargo center')
+        self.assertAlmostEqual(row['cargo_x_mm'], 20)
+        self.assertAlmostEqual(row['error_mm'], 10)
+        app.accept_live_frame(self.robot_frame([(110, 110)]))
+        self.assertIsNone(gate.positions)
+        self.assertIsNone(app.cargo_detection)
+        self.assertEqual(app.tracking_rows[-1]['control_x_mm'], '')
+        self.assertEqual(app.tracking_rows[-1]['cargo_valid'], 0)
+
+    def test_cargo_run_selects_position_feedback_with_multiple_robots(self):
+        from swarm_cargo import CargoPositionFeedback
+        app = self.cargo_app()
+        app.control_requested = True
+        app.table.selection.return_value = ('0',)
+        app.tracking_count_var.get.return_value = '2'
+        app.start_tracking()
+        frame = self.robot_frame([(100, 110), (120, 110)])
+        cv2.circle(frame, (150, 110), 12, (0, 0, 255), -1)
+        app.accept_live_frame(frame)
+        with patch('command_tab.threading.Thread'), patch('command_tab.load_hardware_case', return_value={}):
+            app.run_selected()
+        self.assertIsInstance(app.feedback, CargoPositionFeedback)
+        self.assertTrue(app.feedback.enabled.is_set())
+        self.assertTrue(app.running)
+
+    def test_rectangle_cargo_exports_direction_separately_from_group_orientation(self):
+        app = self.cargo_app()
+        app.cargo_shape_var = Mock(get=Mock(return_value='Rectangle'))
+        app.start_tracking()
+        frame = self.robot_frame([(110, 110)])
+        cv2.rectangle(frame, (140, 105), (180, 115), (0, 0, 255), -1)
+        app.accept_live_frame(frame)
+        row = app.tracking_rows[-1]
+        self.assertEqual(row['cargo_shape'], 'Rectangle')
+        self.assertEqual(row['cargo_angle_valid'], 1)
+        self.assertAlmostEqual(row['cargo_angle_deg'] % 180, 0, places=4)
+        self.assertGreater(row['cargo_length_mm'], row['cargo_width_mm'])
+        self.assertEqual(row['orientation_measured_deg'], '')  # One robot has no group axis.
+        app.accept_live_frame(self.robot_frame([(110, 110)]))
+        self.assertEqual(app.tracking_rows[-1]['cargo_angle_deg'], '')
+        self.assertEqual(app.tracking_rows[-1]['cargo_angle_valid'], 0)
 
     def test_command_tracking_follows_robot_and_records_xy_and_target_error(self):
         app = self.tracking_app()
@@ -732,10 +845,11 @@ class CommandSequenceTests(unittest.TestCase):
         with patch("command_tab.ImageTk.PhotoImage"):
             CommandTab.render(app)
         colors = [call.kwargs.get("fill") for call in app.canvas.create_line.call_args_list]
-        self.assertEqual(colors, ["#00ff66", "#00ff66"])
+        self.assertEqual(colors.count("#00ff66"), 2)
+        self.assertEqual(colors.count("white"), 2)
         self.assertEqual(app.canvas.create_oval.call_count, 0)
         labels = [call.kwargs["text"] for call in app.canvas.create_text.call_args_list]
-        self.assertIn("R1", labels)
+        self.assertTrue(any(label.startswith("R1 (") and label.endswith("mm") for label in labels))
 
 
 if __name__ == "__main__":

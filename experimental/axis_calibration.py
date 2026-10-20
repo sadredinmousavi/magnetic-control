@@ -9,16 +9,56 @@ from gui004 import calibrated_dwell_coordinates
 AXIS_TARGETS_M = {"Origin": (0.0, 0.0), "+X": (0.01, 0.0), "+Y": (0.0, 0.01)}
 AXIS_MOVE_TARGETS_M = {
     'Origin': (0., 0.),
-    '+X': (.01, 0.), '+2X': (.02, 0.), '+3X': (.03, 0.),
-    '+Y': (0., .01), '+2Y': (0., .02), '+3Y': (0., .03),
+    '-X': (-.01, 0.), '+X': (.01, 0.), '+2X': (.02, 0.),
+    '-Y': (0., -.01), '+Y': (0., .01), '+2Y': (0., .02),
 }
+# Retain saved references from earlier setups without offering these moves.
+AXIS_SAVED_TARGETS_M = dict(AXIS_MOVE_TARGETS_M, **{'+3X': (.03, 0.), '+3Y': (0., .03)})
 AXIS_REFERENCE_NAMES = {name: 'Origin' if name == 'Origin' else '+' + name[-1]
-                        for name in AXIS_MOVE_TARGETS_M}
+                        for name in AXIS_SAVED_TARGETS_M}
 AXIS_DISPLAY_NAMES = {name: 'Center' if name == 'Origin' else name for name in AXIS_MOVE_TARGETS_M}
 
 
+def symmetric_axes(corners, width_cm, height_cm, captures):
+    """Intersect opposite-pair lines in the metric plane; return canonical references."""
+    names = ('-X', '+X', '-Y', '+Y')
+    pixels = np.asarray([captures[name] for name in names], dtype=float)
+    if pixels.shape != (4, 2) or not np.isfinite(pixels).all():
+        raise ValueError('Symmetric captures must be finite XY pairs.')
+    if min(np.linalg.norm(pixels[1] - pixels[0]), np.linalg.norm(pixels[3] - pixels[2])) < 2:
+        raise ValueError('Opposite axis captures are less than 2 pixels apart. Recapture settled positions.')
+    metric = calibrated_dwell_coordinates([{'center': p} for p in pixels], corners, width_cm, height_cm)
+    vectors = np.array([metric[1] - metric[0], metric[3] - metric[2]])
+    lengths = np.linalg.norm(vectors, axis=1)
+    if np.any(lengths < 1e-8):
+        raise ValueError('Opposite axis captures must be distinct.')
+    directions = vectors / lengths[:, None]
+    basis = directions.T
+    if abs(np.linalg.det(basis)) < .5:
+        raise ValueError('The captured X and Y directions are nearly parallel. Recapture the axes.')
+    distances = np.linalg.solve(np.column_stack((directions[0], -directions[1])), metric[2] - metric[0])
+    origin = metric[0] + distances[0] * directions[0]
+    # Use the existing projection so every tracking/command consumer uses the same fit.
+    references = RobotAxes.metric_pixel_positions(
+        origin + np.array([[0., 0.], directions[0], directions[1]]), corners, width_cm, height_cm)
+    samples = dict(zip(AXIS_TARGETS_M, references.tolist()))
+    axes = RobotAxes(corners, width_cm, height_cm, samples)
+    angle = np.degrees(np.arccos(np.clip(np.dot(*directions), -1., 1.)))
+    checks = [f'Measured axis angle: {angle:.2f} deg (90 deg ideal).']
+    for name in ('Origin', '+2X', '+2Y'):
+        if name in captures:
+            observed = axes.coordinates([captures[name]])[0] * 10
+            expected = np.asarray(AXIS_MOVE_TARGETS_M[name]) * 1000
+            error = np.linalg.norm(observed - expected)
+            label = 'Center offset from intersection' if name == 'Origin' else f'{name} target error'
+            checks.append(f'{label}: {error:.2f} mm.')
+    if 'Origin' not in captures:
+        checks.append('Capture Center to check its offset from the intersection.')
+    return samples, ' '.join(checks)
+
+
 class RobotAxes:
-    def __init__(self, corners, width_cm, height_cm, samples):
+    def __init__(self, corners, width_cm, height_cm, samples, capture_moves=None):
         pixels = np.asarray([samples[name] for name in AXIS_TARGETS_M], dtype=float)
         if pixels.shape != (3, 2) or not np.isfinite(pixels).all():
             raise ValueError("Capture the settled robot at Center, +X and +Y first.")
@@ -28,6 +68,10 @@ class RobotAxes:
             [{"center": point} for point in pixels], corners, width_cm, height_cm,
         )
         vectors = metric[1:] - metric[0]
+        # Negative captures observe the opposite of the positive robot axis.
+        for index, name in enumerate(('+X', '+Y')):
+            if (capture_moves or {}).get(name, name).startswith('-'):
+                vectors[index] *= -1
         lengths = np.linalg.norm(vectors, axis=1)
         if np.any(lengths < 1e-8):
             raise ValueError("Axis reference positions must be distinct.")
@@ -55,13 +99,18 @@ class RobotAxes:
         if coordinates.ndim != 2 or coordinates.shape[1] != 2 or not np.isfinite(coordinates).all():
             raise ValueError("Desired coordinates must be finite XY pairs.")
         metric = coordinates @ self.rotation.T + self.origin
+        return self.metric_pixel_positions(metric, self.corners, self.width_cm, self.height_cm)
+
+    @staticmethod
+    def metric_pixel_positions(metric, corners, width_cm, height_cm):
+        """Project coordinates in the pin rectangle's metric plane back to pixels."""
         plane = np.float32([
-            [-self.width_cm / 2, self.height_cm / 2],
-            [self.width_cm / 2, self.height_cm / 2],
-            [self.width_cm / 2, -self.height_cm / 2],
-            [-self.width_cm / 2, -self.height_cm / 2],
+            [-width_cm / 2, height_cm / 2],
+            [width_cm / 2, height_cm / 2],
+            [width_cm / 2, -height_cm / 2],
+            [-width_cm / 2, -height_cm / 2],
         ])
-        inverse = cv2.getPerspectiveTransform(plane, np.asarray(self.corners, np.float32))
+        inverse = cv2.getPerspectiveTransform(plane, np.asarray(corners, np.float32))
         homogeneous = np.column_stack((metric, np.ones(len(metric)))) @ inverse.T
         if np.any(np.abs(homogeneous[:, 2]) < 1e-10):
             raise ValueError("Desired point is outside the usable camera projection.")

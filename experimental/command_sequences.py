@@ -83,7 +83,7 @@ def project_sequence(steps, setup, *, validate=True):
     if setup.get("coordinate_system") != "robot_axes":
         raise ValueError("Capture Center, +X and +Y in Calibration, or load a complete saved setup first.")
     axes = RobotAxes(setup["corners_px"], setup["rectangle_width_cm"],
-                     setup["rectangle_height_cm"], setup["axis_samples_px"])
+                     setup["rectangle_height_cm"], setup["axis_samples_px"], setup.get("axis_capture_moves"))
     pixels = axes.pixel_positions(np.asarray([step.target_xy_m for step in steps]) * 100)
     if validate:
         validate_projected_points(steps, setup, pixels)
@@ -99,7 +99,7 @@ def point_limits(pixels, setup):
 
 
 def sequence_diagnostics(steps, setup, pixels):
-    axes = RobotAxes(setup["corners_px"], setup["rectangle_width_cm"], setup["rectangle_height_cm"], setup["axis_samples_px"])
+    axes = RobotAxes(setup["corners_px"], setup["rectangle_width_cm"], setup["rectangle_height_cm"], setup["axis_samples_px"], setup.get("axis_capture_moves"))
     corners_mm = axes.coordinates(setup["corners_px"]) * 10
     xy_mm = np.asarray([step.target_xy_m for step in steps]) * 1000
     return (f"Sequence range: X [{xy_mm[:, 0].min():g}, {xy_mm[:, 0].max():g}], Y [{xy_mm[:, 1].min():g}, {xy_mm[:, 1].max():g}] mm. "
@@ -153,7 +153,8 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
         initial_options = feedback.initial_move_options() if continuous else {}
         revision = feedback.command_revision if continuous else None
         def initial_active():
-            return (active() and (not initial_options or (
+            return (active() and (feedback is None or getattr(feedback, 'initial_measurement_valid', lambda: True)())
+                    and (not initial_options or (
                 feedback.command_revision == revision and feedback.enabled.is_set() and not feedback.manual)))
 
         result = commander.move(

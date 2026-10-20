@@ -49,7 +49,9 @@ class CircularVideoCrop:
         return result
 
 
-TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot_y_mm '
+TRACKING_FIELDS = ('cargo_shape cargo_angle_deg cargo_angle_valid cargo_length_mm cargo_width_mm '
+                   'control_target control_x_mm control_y_mm cargo_valid cargo_x_px cargo_y_px cargo_x_mm cargo_y_mm spread_ratio strong_spread_mm weak_spread_mm '
+                   'frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot_y_mm '
                    'group_x_mm group_y_mm expected_robots detected_robots group_valid '
                    'active_point desired_x_mm desired_y_mm error_mm roi_x_px roi_y_px '
                    'roi_radius_px sequence_running arrival_ready arrival_max_error_mm '
@@ -65,7 +67,7 @@ TRACKING_FIELDS = ('frame time_s robot_id robot_x_px robot_y_px robot_x_mm robot
 
 
 def draw_command_overlay(image, setup, pixels, active_index, detections, tracker=None,
-                         *, show_path=False, show_roi=False, trails=None, commanded_pixel=None):
+                         *, show_path=False, show_roi=False, trails=None, commanded_pixel=None, geometry=None, cargo=None):
     """Draw in source-image pixels, independently of GUI zoom or visibility."""
     if setup is not None and len(setup['corners_px']) == 4:
         cv2.polylines(image, [np.asarray(setup['corners_px'], np.int32)], True, (153, 85, 153), 1)
@@ -99,8 +101,12 @@ def draw_command_overlay(image, setup, pixels, active_index, detections, tracker
     for item in detections:
         x, y = np.rint(item['center']).astype(int)
         cv2.drawMarker(image, (x, y), (102, 255, 0), cv2.MARKER_CROSS, 4, 1, cv2.LINE_AA)
-        cv2.putText(image, f"R{item['robot_id']}", (x + 4, y + 8), cv2.FONT_HERSHEY_SIMPLEX, .32, (102, 255, 0), 1, cv2.LINE_AA)
-    return image
+        text = f"R{item['robot_id']}"
+        if item.get('xy_cm') is not None:
+            text += f" ({item['xy_cm'][0]*10:.1f}, {item['xy_cm'][1]*10:.1f}) mm"
+        cv2.putText(image, text, (x + 4, y + 8), cv2.FONT_HERSHEY_SIMPLEX, .32, (102, 255, 0), 1, cv2.LINE_AA)
+    from swarm_cargo import draw_measurements
+    return draw_measurements(image, geometry, cargo)
 
 
 class CommandRecording:

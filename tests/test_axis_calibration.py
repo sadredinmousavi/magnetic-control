@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experimental"))
-from axis_calibration import AXIS_TARGETS_M, AXIS_MOVE_TARGETS_M, RobotAxes
+from axis_calibration import AXIS_TARGETS_M, AXIS_MOVE_TARGETS_M, RobotAxes, symmetric_axes
 from control_workflow import calculate_point_control
 from closed_loop_calibration import (
     CalibrationTab, MovingROICalibration, DEFAULT_ROBOT_ROI_RADIUS, DEFAULT_PIN_ROI_RADIUS,
@@ -23,6 +23,60 @@ CORNERS = [(10, 10), (210, 10), (210, 210), (10, 210)]
 
 
 class RobotAxisTests(unittest.TestCase):
+    def test_symmetric_intersection_uses_metric_plane_and_reports_checks(self):
+        corners = [(20, 15), (205, 30), (190, 205), (5, 185)]
+        projection = RobotAxes(corners, 10, 10,
+                               {'Origin': [100, 100], '+X': [125, 100], '+Y': [100, 75]})
+        names = ['-X', '+X', '-Y', '+Y', 'Origin', '+2X']
+        # Unequal travel and an offset Center must not move the line intersection.
+        pixels = projection.pixel_positions([[-.8, 0], [1.2, 0], [0, -1.1], [0, .9], [.3, .4], [2.2, 0]])
+        samples, report = symmetric_axes(corners, 10, 10, dict(zip(names, pixels.tolist())))
+        fitted = RobotAxes(corners, 10, 10, samples)
+        np.testing.assert_allclose(fitted.coordinates(pixels),
+                                   [[-.8, 0], [1.2, 0], [0, -1.1], [0, .9], [.3, .4], [2.2, 0]], atol=1e-5)
+        self.assertIn('90.00 deg', report)
+        self.assertIn('Center offset from intersection: 5.00 mm', report)
+        self.assertIn('+2X target error: 2.00 mm', report)
+
+    def test_symmetric_fit_rejects_parallel_and_unresolved_pairs(self):
+        for captures in (
+            {'-X': [80, 100], '+X': [120, 100], '-Y': [90, 100], '+Y': [130, 100]},
+            {'-X': [100, 100], '+X': [101, 100], '-Y': [100, 120], '+Y': [100, 80]},
+        ):
+            with self.assertRaises(ValueError):
+                symmetric_axes(CORNERS, 10, 10, captures)
+
+    def test_symmetric_capture_any_order_and_save_load(self):
+        app = self.app()
+        app.axis_samples = {}
+        app.axis_raw_captures = {}
+        app.axis_method_var = Mock(get=Mock(return_value='Symmetric pairs'))
+        app.update_axis_tracking = Mock()
+        for name, center in (('+Y', [100, 80]), ('-X', [80, 100]),
+                             ('+X', [120, 100]), ('-Y', [100, 120]), ('Origin', [106, 108])):
+            app.axis_pending = name
+            app.axis_ready_at = app.frame_received_at - .1
+            app.axis_tracker = Mock(center=np.asarray(center, dtype=float), radius=30)
+            app.axis_detections = [{'center': center}]
+            app.record_axis_from_roi()
+            if len(app.axis_raw_captures) < 4:
+                with self.assertRaises(ValueError):
+                    app.setup_data()
+        np.testing.assert_allclose(app.axis_samples['Origin'], [100, 100], atol=1e-5)
+        self.assertIn('5.00 mm', app.axis_status.config.call_args.kwargs['text'])
+        data = app.setup_data()
+        self.assertEqual(data['axis_method'], 'symmetric')
+        self.assertEqual(len(data['axis_raw_captures_px']), 5)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'symmetric.json'
+            path.write_text(json.dumps(data), encoding='utf-8')
+            app.axis_raw_captures = {}
+            with patch('closed_loop_calibration.filedialog.askopenfilename', return_value=str(path)):
+                app.load_setup()
+        self.assertEqual(app.axis_raw_captures, data['axis_raw_captures_px'])
+        app.axis_method_var.set.assert_called_with('Symmetric pairs')
+        np.testing.assert_allclose(app.axis_samples['Origin'], [100, 100], atol=1e-5)
+
     def test_rotated_robot_axes_and_physical_scale(self):
         samples = {"Origin": [100, 100], "+X": [100, 80], "+Y": [98, 100]}
         axes = RobotAxes(CORNERS, 10, 10, samples)
@@ -34,6 +88,30 @@ class RobotAxisTests(unittest.TestCase):
         samples = {"Origin": [100, 100], "+X": [124, 100], "+Y": [100, 102]}
         axes = RobotAxes(CORNERS, 10, 10, samples)
         np.testing.assert_allclose(axes.coordinates([[124, 102]]), [[1.2, .1]], atol=1e-6)
+
+    def test_negative_captures_preserve_positive_axes_after_save_load(self):
+        app = self.app()
+        app.axis_samples = {'Origin': [100, 100]}
+        app.update_axis_tracking = Mock()
+        for name, center in (('-X', [80, 100]), ('-Y', [100, 120])):
+            app.axis_pending = name
+            app.axis_ready_at = app.frame_received_at - .1
+            app.axis_tracker = Mock(center=np.asarray(center, dtype=float), radius=30)
+            app.axis_detections = [{'center': center}]
+            app.record_axis_from_roi()
+        data = app.setup_data()
+        self.assertEqual(data['axis_targets_m']['+X'], (-.01, 0.))
+        self.assertEqual(data['axis_targets_m']['+Y'], (0., -.01))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'negative_axes.json'
+            path.write_text(json.dumps(data), encoding='utf-8')
+            with patch('closed_loop_calibration.filedialog.askopenfilename', return_value=str(path)):
+                app.load_setup()
+        app.tracker = None
+        app.live_started = None
+        app.ensure_roi_tracking()
+        np.testing.assert_allclose(app.tracker.coordinates([[120, 80]]), [[1, 1]], atol=1e-6)
+        np.testing.assert_allclose(app.tracker.axes.pixel_positions([[1, 1]]), [[120, 80]], atol=1e-6)
 
     def test_unresolved_or_parallel_movements_rejected(self):
         for samples in (
