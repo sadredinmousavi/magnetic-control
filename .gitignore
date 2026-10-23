@@ -1,4 +1,5 @@
 *.gif
+experimental/live_control/
 # Saved video recordings
 *.mp4
 *.avi

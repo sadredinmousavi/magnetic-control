@@ -1,0 +1,89 @@
+{
+  "version": 2,
+  "video_size_px": [
+    3840,
+    2160
+  ],
+  "helmholtz_circle_px": null,
+  "helmholtz_center_xy_m": null,
+  "corners_px": [
+    [
+      1214,
+      655
+    ],
+    [
+      2594,
+      674
+    ],
+    [
+      2546,
+      2047
+    ],
+    [
+      1158,
+      2044
+    ]
+  ],
+  "rectangle_width_cm": 10.0,
+  "rectangle_height_cm": 10.0,
+  "roi_circle_px": null,
+  "robot_count": 1,
+  "minimum_area": 1.0,
+  "camera_source": "Iriun / Local webcam:2",
+  "dark_contrast_threshold": 10.0,
+  "axis_method": "manual_lines",
+  "axis_line_points_px": {
+    "-X": [
+      1187.0,
+      1301.0
+    ],
+    "+X": [
+      2573.0,
+      1327.0
+    ],
+    "-Y": [
+      1876.0,
+      2048.0
+    ],
+    "+Y": [
+      1894.0,
+      662.0
+    ]
+  },
+  "axis_raw_captures_px": {},
+  "axis_samples_px": {
+    "Origin": [
+      1885.531120020984,
+      1314.103758384232
+    ],
+    "+X": [
+      2023.6763018822187,
+      1316.6952264422348
+    ],
+    "+Y": [
+      1887.3229013603975,
+      1176.1365952494061
+    ]
+  },
+  "axis_capture_moves": {
+    "Origin": "Origin",
+    "+X": "+X",
+    "+Y": "+Y"
+  },
+  "axis_targets_m": {
+    "Origin": [
+      0.0,
+      0.0
+    ],
+    "+X": [
+      0.01,
+      0.0
+    ],
+    "+Y": [
+      0.0,
+      0.01
+    ]
+  },
+  "control_case": "",
+  "coordinate_system": "robot_axes"
+}

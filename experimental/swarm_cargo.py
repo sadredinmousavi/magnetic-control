@@ -1,4 +1,4 @@
-"""Metric swarm geometry and independent red cargo tracking for GUI005."""
+"""Metric swarm geometry and cargo contrast tracking for GUI005."""
 
 import cv2
 import numpy as np
@@ -24,47 +24,66 @@ class CargoPositionFeedback(PositionFeedback):
             self.enabled.clear()
 
 
-class RedCargoTracker:
+class CargoTracker:
+    """One dark-contrast cargo in a user-selected ROI, independent of its color."""
     def __init__(self):
         self.detector = RobotDetector()
         self.center = None
         self.detection = None
         self.error = ''
 
-    def process(self, frame, minimum_area=200., radius=100., mask=None, selection=None, bounds=None):
+    def process(self, frame, minimum_area=200., radius=100., mask=None, selection=None,
+                bounds=None, roi=None, contrast_threshold=10.):
         if not np.isfinite([minimum_area, radius]).all() or minimum_area <= 0 or radius <= 0:
             raise ValueError('Cargo minimum area and tracking radius must be positive and finite.')
         height, width = frame.shape[:2]
+        search_mask = np.full((height, width), 255, np.uint8) if mask is None else mask.copy()
+        if roi is not None:
+            cx, cy, rr = np.asarray(roi, float)
+            if not np.isfinite([cx, cy, rr]).all() or rr <= 0:
+                raise ValueError('Place a valid cargo ROI first.')
+            roi_mask = np.zeros((height, width), np.uint8)
+            cv2.circle(roi_mask, tuple(np.rint([cx, cy]).astype(int)), round(rr), 255, -1)
+            search_mask = cv2.bitwise_and(search_mask, roi_mask)
+            # Preserve real-image context for the same local contrast estimator.
+            bounds = (int(cx-rr)-32, int(cy-rr)-32, int(cx+rr)+33, int(cy+rr)+33)
         x0, y0, x1, y1 = (0, 0, width, height) if bounds is None else bounds
         x0, y0, x1, y1 = max(0, x0), max(0, y0), min(width, x1), min(height, y1)
+        self.detector.last_blob_mask = np.zeros((height, width), np.uint8)
         if x1 <= x0 or y1 <= y0:
-            self.detector.last_blob_mask = np.zeros((height, width), np.uint8)
-            self.detection = None
-            self.error = 'Cargo search region is outside the camera frame.'
+            self.detection, self.error = None, 'Cargo ROI is outside the camera image.'
             return None
-        _, candidates = self.detector.process(frame[y0:y1, x0:x1], mode='Color blobs', color='Red',
-            minimum_area=minimum_area, morphology_kernel_size=3, draw_annotations=False,
-            detection_mask=None if mask is None else mask[y0:y1, x0:x1])
-        if bounds is not None:
-            cropped_mask = self.detector.last_blob_mask
-            self.detector.last_blob_mask = np.zeros((height, width), np.uint8)
-            self.detector.last_blob_mask[y0:y1, x0:x1] = cropped_mask
-            for item in candidates:
-                item['center'] = (item['center'][0]+x0, item['center'][1]+y0)
-                x, y, w, h = item['bbox']
-                item['bbox'] = (x+x0, y+y0, w, h)
+        binary = self.detector.dark_contrast_mask(frame[y0:y1, x0:x1], contrast_threshold)
+        binary = cv2.bitwise_and(binary, search_mask[y0:y1, x0:x1])
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < minimum_area:
+                continue
+            moments = cv2.moments(contour)
+            x, y, w, h = cv2.boundingRect(contour)
+            candidates.append(dict(center=(round(moments['m10']/moments['m00'])+x0,
+                                           round(moments['m01']/moments['m00'])+y0),
+                                   bbox=(x+x0, y+y0, w, h), area=float(area)))
+            # Local contrast outlines large solid objects. Fill their silhouette
+            # so shape fitting and centroid use the body rather than just its rim.
+            cv2.drawContours(self.detector.last_blob_mask, [contour+[x0, y0]], -1, 255, -1)
+        self.detector.last_blob_mask = cv2.bitwise_and(self.detector.last_blob_mask, search_mask)
         previous = self.center if selection is None else selection
-        # Match GUI004's red segmentation and nearest-position tracking. Require
-        # selection for multiple initial components rather than choosing by size.
         if previous is None and len(candidates) > 1:
-            self.detection = None
-            self.error = 'Multiple red objects: use Select cargo and click the cargo.'
+            self.detection, self.error = None, 'Multiple cargo objects: place the ROI around just the cargo.'
             return None
         self.detection = select_cargo_candidate(candidates, previous, radius)
-        self.error = '' if self.detection is not None else 'Red cargo not detected; corrections paused in Cargo mode.'
+        self.error = '' if self.detection is not None else 'Cargo not detected in ROI; adjust ROI, Contrast or Cargo min area. Corrections paused.'
         if self.detection is not None:
             self.center = self.detection['center']
         return self.detection
+
+
+# Backwards compatibility for callers of the earlier GUI005 tracker name.
+RedCargoTracker = CargoTracker
 
 
 def cargo_geometry(cargo, red_mask, axes, shape='Circle'):
@@ -154,18 +173,23 @@ def measurement_positions(target, detections, expected_count, cargo):
     return np.asarray([d['xy_cm'] for d in sorted(detections, key=lambda d: d['robot_id'])]) * .01
 
 
-def draw_measurements(image, geometry=None, cargo=None):
+def draw_measurements(image, geometry=None, cargo=None, *, show_labels=True,
+                      show_group_center=True, show_spread_axes=True, group_center_size=12,
+                      group_center_thickness=1):
     def label(text, point, color):
-        cv2.putText(image, text, tuple(np.rint(point).astype(int)), cv2.FONT_HERSHEY_SIMPLEX,
+        if show_labels:
+            cv2.putText(image, text, tuple(np.rint(point).astype(int)), cv2.FONT_HERSHEY_SIMPLEX,
                     .4, color, 1, cv2.LINE_AA)
-    if geometry is not None:
+    if geometry is not None and show_group_center:
         center = tuple(np.rint(geometry['center_px']).astype(int))
-        cv2.drawMarker(image, center, (255, 255, 255), cv2.MARKER_CROSS, 12, 1)
+        cv2.drawMarker(image, center, (255, 255, 255), cv2.MARKER_CROSS,
+                       group_center_size, group_center_thickness)
         xy = geometry['center_mm']
         ratio = geometry['ratio']
         ratio_text = 'n/a' if ratio is None else ('infinite (line)' if np.isinf(ratio) else f'{ratio:.2f}')
         label(f'Group ({xy[0]:.2f}, {xy[1]:.2f}) mm; spread ratio {ratio_text}',
               np.asarray(center) + [8, -12], (255, 255, 255))
+    if geometry is not None and show_spread_axes:
         for name, points in geometry['lines']:
             color = (0, 200, 255) if name.startswith('Strong') else (255, 180, 100)
             p1, p2 = np.rint(points).astype(int)

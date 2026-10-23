@@ -8,7 +8,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'experimental'))
 from functions_main import MagneticForcePID, build_actuation_matrix, generate_circular_source_positions
-from control_workflow import ForcePIDFeedback, calculate_force_pid_control, apply_integral_to_baseline
+from control_workflow import (ForcePIDFeedback, OptimizerXYFeedback, calculate_force_pid_control,
+                              calculate_anchored_xy_control, apply_integral_to_baseline)
 from case_loader import load_case, build_common_config
 from arrival_control import ArrivalGate
 from settling_control import SettlingMonitor
@@ -17,6 +18,77 @@ from point_control import PointCommander
 
 
 class ForcePIDMathTests(unittest.TestCase):
+    def test_xy_optimizer_anchor_preserves_real_pose_and_applies_only_optimizer_difference(self):
+        anchor = [.003, -.002]
+        actual, baseline = np.array([55., 63.]), np.array([60., 60.])
+        with patch('control_workflow.calculate_point_control') as solve:
+            zero = calculate_anchored_xy_control({}, anchor, anchor_xy_m=anchor,
+                anchor_angles_deg=actual, baseline_angles_deg=baseline)
+            np.testing.assert_allclose(zero['angles_deg'], actual)
+            solve.assert_not_called()
+            solve.return_value = dict(angles_deg=[59., 61.])
+            shifted = calculate_anchored_xy_control({}, [.004, -.002], anchor_xy_m=anchor,
+                anchor_angles_deg=actual, baseline_angles_deg=baseline, ratio=2., angle_deg=30.)
+            expected = np.cos(np.deg2rad(actual))+np.cos(np.deg2rad([59.,61.]))-np.cos(np.deg2rad(baseline))
+            np.testing.assert_allclose(shifted['u_values'], expected)
+            solve.assert_called_once()
+            np.testing.assert_allclose(solve.call_args.args[1], [.004, -.002])
+            self.assertEqual(solve.call_args.kwargs, dict(ratio=2., angle_deg=30.))
+            self.assertEqual(shifted['allocation_fraction'], 1.)
+
+    def test_xy_optimizer_scales_input_difference_at_physical_bounds(self):
+        with patch('control_workflow.calculate_point_control', return_value=dict(angles_deg=[0., 90.])):
+            result = calculate_anchored_xy_control({}, [.001, 0], anchor_xy_m=[0,0],
+                anchor_angles_deg=[5., 85.], baseline_angles_deg=[60.,60.])
+        self.assertLess(result['allocation_fraction'], 1.)
+        self.assertTrue(np.all(np.asarray(result['angles_deg']) >= 0.))
+        self.assertTrue(np.all(np.asarray(result['angles_deg']) <= 90.))
+
+    def test_incremental_allocation_uses_current_position_and_limits_angle_changes(self):
+        params = load_case('case_100.case')
+        cfg = build_common_config(dict(params, TARGET_SCHEDULE=[(0., np.zeros(2), 1., None)],
+                                       INITIAL_ROBOT_POSITIONS=np.zeros((1, 2))))
+        sources = generate_circular_source_positions(cfg.NUM_SOURCES, cfg.RADIUS)
+        measured = np.array([-.02, .01])
+        angles = np.full(cfg.NUM_SOURCES, 60.)
+        A = build_actuation_matrix(measured, sources, cfg.C_F)
+        current_force = A @ np.cos(np.deg2rad(angles))
+        requested = current_force + [1e-8, -2e-8]
+        with patch('control_workflow.calculate_point_control', side_effect=AssertionError('No equilibrium solve')):
+            result = calculate_force_pid_control(params, [.03, -.02], measured, angles, None, requested,
+                                                 incremental=True, max_angle_step_deg=2.)
+            other_target = calculate_force_pid_control(params, [-.03, .02], measured, angles, None, requested,
+                                                       incremental=True, max_angle_step_deg=2.)
+        np.testing.assert_allclose(result['current_force_n'], current_force)
+        np.testing.assert_allclose(result['force_adjustment_requested_n'], requested-current_force)
+        np.testing.assert_allclose(result['predicted_force_n'], A @ result['u_values'])
+        np.testing.assert_allclose(result['angles_deg'], other_target['angles_deg'])
+        self.assertLessEqual(np.max(np.abs(result['angles_deg']-angles)), 2.+1e-8)
+        self.assertLess(result['force_residual_n'], np.linalg.norm(requested-current_force))
+
+    def test_incremental_waypoints_never_send_equilibrium_poses_and_preserve_history(self):
+        feedback = ForcePIDFeedback(incremental_angles=True)
+        feedback.enabled.set()
+        feedback.initial_sent({'angles_deg': [60.]*8, 'force_compensated': True})
+        feedback.pid.observe([0., 0.], 1.)
+        feedback.pid.observe([.001, 0.], 1.2)
+        feedback.pid.seed_integral([1e-8, -2e-8])
+        velocity = feedback.pid.velocity.copy()
+        applied = feedback.last_result
+        feedback.wait_at_target = Mock(return_value=True)
+        commander = Mock()
+        gate = ArrivalGate()
+        steps = [XYStep((.005,0),0,180), XYStep((.01,0),0,180)]
+        result = execute_xy_sequence(steps, commander, 'case_100', active=lambda: True,
+                                     report=Mock(), arrival_gate=gate, feedback=feedback)
+        self.assertEqual(result, 'finished')
+        commander.move.assert_not_called()
+        self.assertEqual(feedback.wait_at_target.call_count, 2)
+        self.assertIs(feedback.last_result, applied)
+        np.testing.assert_allclose(feedback.pid.integral_force, [1e-8, -2e-8])
+        np.testing.assert_allclose(feedback.pid.velocity, velocity)
+        self.assertTrue(feedback.pid.velocity_ready)
+
     def test_default_integral_has_hundred_second_time_and_gradual_force_growth(self):
         pid = MagneticForcePID()
         self.assertAlmostEqual(pid.kp, 1.5e-5)
@@ -195,6 +267,100 @@ class ForcePIDMathTests(unittest.TestCase):
 
 
 class ContinuousRuntimeTests(unittest.TestCase):
+    def test_xy_stall_keeps_kp_fixed_and_builds_bounded_integral_through_deadband(self):
+        for fraction, sent in ((1., True), (1., False), (.5, False)):
+            with self.subTest(fraction=fraction, sent=sent):
+                _, gate, _, step, now = self.fixture(speed=0., start=-.0015)
+                gate.tolerance_mm = .25
+                feedback = OptimizerXYFeedback(clock=lambda: now[0],
+                    pid=MagneticForcePID(kp=.25, ki=.02, kv=1.5, period_s=.1,
+                                         velocity_tau_s=0., integral_limit_n=.00005))
+                feedback.seed_anchor([-.0015, 0], dict(angles_deg=[60.]*8, sent_time_s=0.))
+                feedback.begin_point(step, [0, 0])
+                feedback.enabled.set()
+                commander = Mock()
+                commander.calculate.return_value = dict(angles_deg=[60.]*8)
+                def move(case, target, **kwargs):
+                    self.assertTrue(kwargs['active']())
+                    result = dict(angles_deg=[59.]*8, allocation_fraction=fraction)
+                    kwargs['on_sent' if sent else 'on_held'](result)
+                    return result
+                commander.move.side_effect = move
+                feedback.wait_at_target(step, commander, 'case', gate,
+                                        lambda: now[0] < 4.5, Mock())
+                self.assertTrue(feedback.snapshot()['stalled'])
+                self.assertEqual(feedback.pid.kp, .25)
+                if fraction == 1.:
+                    self.assertAlmostEqual(feedback.pid.integral_force[0], .00005)
+                    self.assertIn('integral limit reached', feedback.snapshot()['state'])
+                else:
+                    np.testing.assert_allclose(feedback.pid.integral_force, [0., 0.])
+                    self.assertIn('optimizer input limit', feedback.snapshot()['state'])
+
+    def test_xy_stall_requires_consecutive_low_speed_samples_and_resets(self):
+        feedback = OptimizerXYFeedback()
+        for sample in (0., .5, 1., 1.5, 2., 2.5, 3.):
+            feedback._observe_stall(1., 0., sample, .25)
+        self.assertTrue(feedback.snapshot()['stalled'])
+        feedback._observe_stall(1., .1, 3.1, .25)
+        self.assertFalse(feedback.snapshot()['stalled'])
+        for sample in (3.2, 3.7, 4.2, 4.7, 5.2, 5.7, 6.2):
+            feedback._observe_stall(1., 0., sample, .25)
+        self.assertTrue(feedback.snapshot()['stalled'])
+        feedback._observe_stall(1., 0., 7.3, .25)
+        self.assertFalse(feedback.snapshot()['stalled'])  # Camera gap resets timer.
+        feedback._observe_stall(.2, 0., 7.4, .25)
+        self.assertEqual(feedback.snapshot()['stall_duration_s'], 0.)
+        feedback.publish(stalled=True)
+        feedback.set_enabled(False)
+        self.assertFalse(feedback.snapshot()['stalled'])
+
+    def test_xy_arrival_holds_inside_selected_tolerance_without_building_integral(self):
+        _, gate, _, step, now = self.fixture(speed=0., start=-.0002)
+        gate.tolerance_mm = .25
+        feedback = OptimizerXYFeedback(clock=lambda: now[0])
+        feedback.seed_anchor([-.0002, 0], dict(angles_deg=[60.]*8, sent_time_s=0.))
+        feedback.begin_point(step, [0, 0])
+        feedback.enabled.set()
+        commander = Mock()
+        feedback.wait_at_target(step, commander, 'case', gate, lambda: now[0] < 1., Mock())
+        commander.move.assert_not_called()
+        np.testing.assert_allclose(feedback.pid.integral_force, [0., 0.])
+        self.assertFalse(feedback.snapshot()['stalled'])
+
+    def test_xy_pid_optimizes_waypoint_plus_correction_and_keeps_fixed_anchor(self):
+        old, gate, monitor, step, now = self.fixture(speed=0.)
+        feedback = OptimizerXYFeedback(clock=lambda: now[0],
+            pid=MagneticForcePID(kp=.25, ki=.01, kv=.5, period_s=.1, velocity_tau_s=0., integral_limit_n=.002))
+        feedback.seed_anchor([-.01, 0], dict(angles_deg=[60.]*8, sent_time_s=0.))
+        feedback.begin_point(step, [0,0])
+        feedback.enabled.set()
+        commander, calls = Mock(), []
+        commander.calculate.return_value = dict(angles_deg=[62.]*8)
+        def move(case, target, **kwargs):
+            self.assertTrue(kwargs['active']())
+            np.testing.assert_allclose(target, np.asarray(step.target_xy_m)+feedback.pid.kp*(np.asarray(step.target_xy_m)-feedback.pid.position)
+                                       +feedback.pid.integral_force+.01*(np.asarray(step.target_xy_m)-feedback.pid.position)*
+                                       (0 if feedback.pid.committed_at is None else min(feedback.pid.observed_at-feedback.pid.committed_at,.2)))
+            request = kwargs['anchored_xy_request']
+            np.testing.assert_allclose(request['anchor_angles_deg'], [60.]*8)
+            np.testing.assert_allclose(request['anchor_xy_m'], [-.01,0])
+            result = dict(angles_deg=[59.-len(calls)]*8, allocation_fraction=1., force_compensated=False)
+            kwargs['on_calculated'](result)
+            kwargs['on_sent'](result)
+            calls.append(target)
+            return result
+        commander.move.side_effect = move
+        feedback.wait_at_target(step, commander, 'case', gate, lambda: now[0] < 1 and len(calls)<2, Mock())
+        self.assertEqual(len(calls), 2)
+        commander.calculate.assert_called_once()
+        commander.move_force_pid.assert_not_called()
+        before = feedback.pid.integral_force.copy()
+        feedback.begin_point(XYStep((.001,0),0,180), [0,0])
+        np.testing.assert_allclose(feedback.pid.integral_force, before)
+        np.testing.assert_allclose(feedback.anchor_angles, [60.]*8)
+        self.assertNotIn('integral_force_n', feedback.snapshot())
+
     def fixture(self, *, speed=.001, start=-.01):
         now = [0.]
         monitor = SettlingMonitor()
@@ -237,6 +403,22 @@ class ContinuousRuntimeTests(unittest.TestCase):
         self.assertLess(calls[0], .5)  # Before the stationary speed window can complete.
         self.assertGreaterEqual(calls[1]-calls[0], .1-1e-8)
         np.testing.assert_allclose(feedback.pid.integral_force, [0, 0])
+
+    def test_incremental_pid_uses_full_error_without_angle_rate_limit(self):
+        feedback, gate, monitor, step, now = self.fixture(speed=0, start=-.0015)
+        feedback.incremental_angles = True
+        feedback.angle_rate = 0.
+        feedback.max_angle_step_deg = 90.
+        calls = []
+        def move(case, target, measured, angles, reference, pid_force, **kwargs):
+            self.assertEqual(kwargs['max_angle_step_deg'], 90.)
+            np.testing.assert_allclose(pid_force, feedback.pid.kp*(np.asarray(target)-measured))
+            self.assertTrue(kwargs['incremental'])
+            calls.append(1)
+            return None
+        feedback.wait_at_target(step, Mock(move_force_pid=move), 'case', gate,
+                                lambda: now[0] < 1 and not calls, Mock())
+        self.assertEqual(len(calls), 1)
 
     def test_brakes_even_when_already_inside_arrival_tolerance(self):
         feedback, gate, monitor, step, now = self.fixture(speed=.005, start=-.0002)

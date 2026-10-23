@@ -1,6 +1,7 @@
 import sys
 import json
 import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -15,6 +16,39 @@ from gui004 import circle_detection_mask, workspace_detection_mask
 
 
 class MovingROICalibrationTests(unittest.TestCase):
+    def test_load_last_selects_most_recent_saved_file_without_open_dialog(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.frame, app.load_setup = np.zeros((20,20,3), np.uint8), Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            older, newest = root/'z-old.json', root/'a-new.json'
+            older.write_text('{}')
+            newest.write_text('{}')
+            os.utime(older, (100,100))
+            os.utime(newest, (200,200))
+            with patch('closed_loop_calibration.SETUP_DIR', root), \
+                 patch('closed_loop_calibration.filedialog.askopenfilename') as dialog:
+                app.load_last_setup()
+                app.load_setup.assert_called_once_with(newest)
+                dialog.assert_not_called()
+                external = root/'custom'/'saved.json'
+                external.parent.mkdir()
+                external.write_text('{}')
+                os.utime(external, (300,300))
+                app.last_saved_setup_path = external
+                app.load_last_setup()
+                app.load_setup.assert_called_with(external)
+
+    def test_load_last_reports_empty_folder_without_changing_calibration(self):
+        app = CalibrationTab.__new__(CalibrationTab)
+        app.frame, app.load_setup = np.zeros((20,20,3), np.uint8), Mock()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('closed_loop_calibration.SETUP_DIR', Path(directory)), \
+             patch('closed_loop_calibration.show_view_dialog') as dialog:
+            app.load_last_setup()
+        app.load_setup.assert_not_called()
+        self.assertIn('No saved setup', dialog.call_args.args[-1])
+
     def test_clear_roi_cancels_pending_capture_but_preserves_saved_calibration(self):
         app = CalibrationTab.__new__(CalibrationTab)
         app.axis_busy, app.axis_pending = False, '+X'

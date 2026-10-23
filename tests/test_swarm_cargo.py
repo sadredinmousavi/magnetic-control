@@ -59,12 +59,13 @@ class SwarmCargoTests(unittest.TestCase):
         frame = np.full((240, 320, 3), 240, np.uint8)
         cv2.circle(frame, (100, 100), 15, (0, 0, 255), -1)
         cv2.circle(frame, (80, 100), 3, (20, 20, 20), -1)
-        self.assertEqual(tracker.process(frame)['center'], (100, 100))
+        np.testing.assert_allclose(tracker.process(frame)['center'], (100, 100), atol=1.)
+        first_center = tracker.center
         missing = np.full_like(frame, 240)
         cv2.circle(missing, (260, 100), 20, (0, 0, 255), -1)
         self.assertIsNone(tracker.process(missing, radius=50))
-        self.assertEqual(tracker.center, (100, 100))
-        self.assertEqual(tracker.process(frame, radius=50)['center'], (100, 100))
+        self.assertEqual(tracker.center, first_center)
+        self.assertEqual(tracker.process(frame, radius=50)['center'], first_center)
 
     def test_multiple_red_objects_need_selection_and_mask_limits_search(self):
         tracker = RedCargoTracker()
@@ -72,7 +73,7 @@ class SwarmCargoTests(unittest.TestCase):
         cv2.circle(frame, (100, 100), 15, (0, 0, 255), -1)
         cv2.circle(frame, (250, 100), 20, (0, 0, 255), -1)
         self.assertIsNone(tracker.process(frame))
-        self.assertIn('Multiple red', tracker.error)
+        self.assertIn('Multiple cargo', tracker.error)
         self.assertEqual(tracker.process(frame, selection=(95, 100), radius=40)['center'], (100, 100))
         mask = np.zeros(frame.shape[:2], np.uint8)
         mask[:, 200:] = 255

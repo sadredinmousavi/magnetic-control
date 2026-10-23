@@ -14,7 +14,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from case_loader import load_case, normalize_case_name
-from control_workflow import calculate_point_control, calculate_force_pid_control, apply_integral_to_baseline
+from control_workflow import calculate_point_control, calculate_force_pid_control, apply_integral_to_baseline, calculate_anchored_xy_control
 
 
 def hardware_case_name(case_name):
@@ -33,7 +33,7 @@ def load_hardware_case(case_name):
 class PointCommander:
     """Shared across tabs; call move from a worker, not the Tk UI thread."""
 
-    def __init__(self, port_provider, zero_angle_deg=180):
+    def __init__(self, port_provider, zero_angle_deg=180, *, applied_state=None, radial_model=None):
         self.port_provider = port_provider
         self.zero_angle_deg = zero_angle_deg
         self.lock = threading.Lock()
@@ -41,6 +41,30 @@ class PointCommander:
         self.prepared_points = {}
         self.motor_repetitions = 3
         self.diagnostic_sink = None
+        self.applied_state = applied_state if applied_state is not None else {'lock': threading.Lock(), 'pose': None}
+        self.radial_control = None
+        if radial_model is not None:
+            from gui005_radial_control import RadialControl
+            self.radial_control = RadialControl(radial_model)
+
+    def synthesize(self, params, target, **options):
+        solve = self.radial_control.synthesize if self.radial_control else calculate_point_control
+        return solve(params, target, **options)
+
+    def applied_pose(self, case_name, zero_angle_deg):
+        port = self.port_provider()
+        signature = self.hardware_signature(load_hardware_case(case_name))
+        with self.applied_state['lock']:
+            pose = self.applied_state['pose']
+            if (pose is None or pose['port'] is not port or not getattr(port, 'is_open', False)
+                    or pose['case'] != hardware_case_name(case_name) or pose['signature'] != signature
+                    or pose['zero_angle_deg'] != zero_angle_deg):
+                raise ValueError('Current magnet pose is unknown for this connection/hardware. Send Center or a calibration move first.')
+            angles = pose['angles_deg']
+            if (angles.ndim != 1 or not angles.size or not np.isfinite(angles).all()
+                    or np.any(angles < 0) or np.any(angles > 90)):
+                raise ValueError('The last sent pose is outside the supported model-angle range [0,90].')
+            return dict(angles_deg=pose['angles_deg'].copy(), sent_time_s=pose['sent_time_s'], force_compensated=True)
 
     def diagnostic_event(self, kind, **data):
         sink = self.diagnostic_sink
@@ -74,7 +98,7 @@ class PointCommander:
                     return None
                 key = self.point_key(step.target_xy_m, step.ratio, step.angle_deg)
                 if key not in results:
-                    result = calculate_point_control(params, step.target_xy_m, ratio=step.ratio, angle_deg=step.angle_deg)
+                    result = self.synthesize(params, step.target_xy_m, ratio=step.ratio, angle_deg=step.angle_deg)
                     angles = np.asarray(result['angles_deg'], dtype=float)
                     if angles.ndim != 1 or not angles.size or not np.isfinite(angles).all():
                         raise ValueError('Precalculation produced invalid motor angles.')
@@ -86,8 +110,9 @@ class PointCommander:
             self.prepared_points[name] = (signature, results)
             return rows
 
-    @staticmethod
-    def hardware_signature(params):
+    def hardware_signature(self, params):
+        if self.radial_control is not None:
+            params = dict(params, gui005_radial_model=self.radial_control.signature())
         def encode(value):
             if isinstance(value, np.ndarray):
                 return value.tolist()
@@ -105,7 +130,7 @@ class PointCommander:
             signature = self.hardware_signature(params)
             results = {}
             for target in AXIS_MOVE_TARGETS_M.values():
-                result = calculate_point_control(params, target, ratio=1., angle_deg=None)
+                result = self.synthesize(params, target, ratio=1., angle_deg=None)
                 angles = np.asarray(result['angles_deg'], dtype=float)
                 if angles.ndim != 1 or not angles.size or not np.isfinite(angles).all():
                     raise ValueError('Axis preparation did not produce valid motor angles.')
@@ -118,21 +143,22 @@ class PointCommander:
                          active=active, prepared_axis=True)
 
     def calculate(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None):
-        return calculate_point_control(load_hardware_case(case_name), target_xy_m,
+        return self.synthesize(load_hardware_case(case_name), target_xy_m,
                                        ratio=ratio, angle_deg=angle_deg)
 
     def move_force_pid(self, case_name, target_xy_m, measured_xy_m, applied_angles_deg,
                        reference_inputs, pid_force_n, *,
                        max_angle_step_deg=10., ratio=1., angle_deg=None,
                        zero_angle_deg=None, active=lambda: True, on_sent=None, on_calculated=None,
-                       on_held=None, preview_only=False, motor_deadband_deg=.1):
+                       on_held=None, preview_only=False, motor_deadband_deg=.1, incremental=False):
         return self.move(case_name, target_xy_m, zero_angle_deg=zero_angle_deg, active=active,
                          on_sent=on_sent, on_calculated=on_calculated, preview_only=preview_only,
                          on_held=on_held, unchanged_angles_deg=applied_angles_deg,
                          motor_deadband_deg=motor_deadband_deg,
                          force_request=dict(measured_xy_m=measured_xy_m, applied_angles_deg=applied_angles_deg,
                             reference_inputs=reference_inputs, pid_force_n=pid_force_n,
-                            max_angle_step_deg=max_angle_step_deg, ratio=ratio, angle_deg=angle_deg))
+                            max_angle_step_deg=max_angle_step_deg, ratio=ratio, angle_deg=angle_deg,
+                            **({'incremental': True} if incremental else {})))
 
     def move(self, case_name, target_xy_m, **options):
         self.diagnostic_event('move_requested', case=case_name, target_xy_m=target_xy_m,
@@ -147,7 +173,7 @@ class PointCommander:
     def _move(self, case_name, target_xy_m, *, ratio=1.0, angle_deg=None,
              settle_seconds=0, active=lambda: True, zero_angle_deg=None, on_sent=None, prepared_axis=False, prepared_point=False,
              on_calculated=None, force_request=None, preview_only=False, on_held=None,
-             unchanged_angles_deg=None, motor_deadband_deg=0., initial_force_bias_n=None):
+             unchanged_angles_deg=None, motor_deadband_deg=0., initial_force_bias_n=None, anchored_xy_request=None):
         """Calculate fresh motor angles, send them, then wait interruptibly.
 
         Cancellation skips unsent commands; it cannot undo an already sent pose.
@@ -169,8 +195,13 @@ class PointCommander:
             if port is None or not getattr(port, "is_open", False):
                 raise RuntimeError("Connect the serial controller in Connections first.")
             self.diagnostic_event('calculation_started', case=case_name, target_xy_m=target_xy_m)
-            if force_request is not None:
-                result = calculate_force_pid_control(load_hardware_case(case_name), target_xy_m, **force_request)
+            if anchored_xy_request is not None:
+                solve = self.radial_control.anchored if self.radial_control else calculate_anchored_xy_control
+                result = solve(load_hardware_case(case_name), target_xy_m,
+                                                       ratio=ratio, angle_deg=angle_deg, **anchored_xy_request)
+            elif force_request is not None:
+                solve = self.radial_control.allocate if self.radial_control else calculate_force_pid_control
+                result = solve(load_hardware_case(case_name), target_xy_m, **force_request)
             elif prepared_point:
                 name = hardware_case_name(case_name)
                 cached = self.prepared_points.get(name)
@@ -189,7 +220,8 @@ class PointCommander:
             else:
                 result = self.calculate(case_name, target_xy_m, ratio=ratio, angle_deg=angle_deg)
             if initial_force_bias_n is not None:
-                result = apply_integral_to_baseline(
+                solve = self.radial_control.apply_integral if self.radial_control else apply_integral_to_baseline
+                result = solve(
                     load_hardware_case(case_name), target_xy_m, result, initial_force_bias_n)
             self.diagnostic_event('calculation_finished', case=case_name, target_xy_m=target_xy_m,
                                   result=result, preview_only=preview_only)
@@ -212,8 +244,9 @@ class PointCommander:
                                       proposed_angles_deg=angles, deadband_deg=motor_deadband_deg)
                 if on_held is not None:
                     # Use the ACTUAL held pose for anti-windup, not the proposed angles.
-                    held = dict(result, predicted_force_n=result['applied_force_n'],
-                                force_residual_n=result['applied_force_residual_n'])
+                    held = (dict(result) if anchored_xy_request is not None else
+                            dict(result, predicted_force_n=result['applied_force_n'],
+                                 force_residual_n=result['applied_force_residual_n']))
                     on_held(held)
                 return result
             repetitions = self.motor_repetitions
@@ -221,7 +254,14 @@ class PointCommander:
                                   angles_deg=angles, zero_angle_deg=zero_angle_deg,
                                   serial_target_angles_deg=angles+zero_angle_deg,
                                   repetitions=repetitions)
+            # Invalidate before transmission: a partial/failed write cannot seed feedback.
+            with self.applied_state['lock']:
+                self.applied_state['pose'] = None
             moveArray(port, angles, 0, zero_angle_deg, repetitions=repetitions)
+            with self.applied_state['lock']:
+                self.applied_state['pose'] = dict(port=port, case=hardware_case_name(case_name),
+                    signature=self.hardware_signature(load_hardware_case(case_name)),
+                    zero_angle_deg=zero_angle_deg, angles_deg=angles.copy(), sent_time_s=time.monotonic())
             self.diagnostic_event('motor_send_completed', case=case_name, target_xy_m=target_xy_m,
                                   angles_deg=angles, zero_angle_deg=zero_angle_deg,
                                   serial_target_angles_deg=angles+zero_angle_deg,

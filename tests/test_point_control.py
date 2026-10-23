@@ -12,6 +12,48 @@ from command_sequences import XYStep
 
 
 class PointControlTests(unittest.TestCase):
+    def test_anchored_xy_uses_standard_motor_path_and_deadband_without_force_fields(self):
+        port = Mock(is_open=True)
+        commander, on_sent, on_held = PointCommander(lambda: port), Mock(), Mock()
+        result = dict(angles_deg=np.full(8,59.), allocation_fraction=1., force_compensated=False)
+        request = dict(anchor_xy_m=[.002,0], anchor_angles_deg=[60.]*8, baseline_angles_deg=[62.]*8)
+        with patch('point_control.load_hardware_case', return_value={}), \
+             patch('point_control.calculate_anchored_xy_control', return_value=result) as solve, \
+             patch('helpers.moveArray') as write:
+            commander.move('case_100', [.003,0], anchored_xy_request=request, on_sent=on_sent)
+            write.assert_called_once()
+            on_sent.assert_called_once_with(result)
+            np.testing.assert_allclose(commander.applied_pose('case_100',180)['angles_deg'], [59.]*8)
+            commander.move('case_100', [.003,0], anchored_xy_request=request,
+                           unchanged_angles_deg=[59.]*8, motor_deadband_deg=.1, on_held=on_held)
+            on_held.assert_called_once()
+            self.assertEqual(write.call_count, 1)
+            self.assertEqual(solve.call_count, 2)
+
+    def test_applied_pose_is_shared_but_invalidated_by_reconnect_or_failed_write(self):
+        port = Mock(is_open=True)
+        control = PointCommander(lambda: port)
+        trajectory = PointCommander(lambda: port, applied_state=control.applied_state)
+        with patch('point_control.load_hardware_case', return_value={}), \
+             patch.object(control, 'calculate', return_value={'angles_deg': [60.]*8}), \
+             patch('helpers.moveArray') as write:
+            with self.assertRaisesRegex(ValueError, 'unknown'):
+                trajectory.applied_pose('case_100', 180)
+            control.move('case_100', (0., 0.))
+            np.testing.assert_allclose(trajectory.applied_pose('case_100', 180)['angles_deg'], [60.]*8)
+            with self.assertRaisesRegex(ValueError, 'unknown'):
+                trajectory.applied_pose('case_100', 150)
+            replacement = PointCommander(lambda: Mock(is_open=True), applied_state=control.applied_state)
+            with self.assertRaisesRegex(ValueError, 'unknown'):
+                replacement.applied_pose('case_100', 180)
+            control.move('case_100', (0., 0.), preview_only=True)
+            self.assertEqual(write.call_count, 1)
+            write.side_effect = RuntimeError('Partial serial write')
+            with self.assertRaises(RuntimeError):
+                control.move('case_100', (0., 0.))
+            with self.assertRaisesRegex(ValueError, 'unknown'):
+                trajectory.applied_pose('case_100', 180)
+
     def test_sequence_precalculation_reuses_settings_and_has_no_motor_io(self):
         port = Mock(is_open=True)
         commander = PointCommander(lambda: port)

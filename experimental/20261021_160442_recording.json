@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-21T12:34:48.688895+00:00",
+  "started_monotonic_s": 1419021.468,
+  "video_fps": 5.0,
+  "source_size_px": [
+    3840,
+    2160
+  ],
+  "encoded_size_px": [
+    3840,
+    2160
+  ],
+  "coordinates": "native camera pixels; physical positions in mm",
+  "timing": "recording_frame is zero-based; blank means CSV-only observation. Use capture_monotonic_s/recording_time_s for real elapsed time; video is constant FPS.",
+  "settings": {
+    "calibration": {
+      "coordinate_system": "pixels",
+      "corners_px": [],
+      "rectangle_width_cm": 10,
+      "rectangle_height_cm": 10,
+      "video_size_px": [
+        3840,
+        2160
+      ],
+      "axis_samples_px": {},
+      "roi_circle_px": [
+        1560.0,
+        1745.217391304348,
+        300.0
+      ]
+    },
+    "settings": {
+      "tracking_count_var": "1",
+      "tracking_radius_var": "350",
+      "tracking_area_var": "1",
+      "tracking_contrast_var": "10",
+      "arrival_tolerance_var": "1.5",
+      "arrival_hold_var": "1",
+      "force_step_var": "90",
+      "force_preview_var": false,
+      "force_hold_speed_var": ".5",
+      "manual_mode_var": false,
+      "repeat_motors_var": true,
+      "motor_repeat_count_var": "3",
+      "allow_extrapolation_var": true,
+      "use_learned_var": false,
+      "slow_assist_var": false,
+      "control_target_var": "Robots",
+      "cargo_enabled_var": true,
+      "cargo_area_var": "200",
+      "cargo_radius_var": "100",
+      "cargo_gain_var": ".15",
+      "cargo_limit_var": "2.5",
+      "cargo_shape_var": "Circle",
+      "pid_display_units": {
+        "Kp": ".25",
+        "Ki": ".02",
+        "Kd": ".25",
+        "Period s": ".25",
+        "Velocity filter s": ".15",
+        "I max mm": "10",
+        "Deadband deg": ".02"
+      },
+      "controller": "anchored_xy_incremental_pid",
+      "integral_carry_between_points": false,
+      "camera_source": "Iriun / Local webcam:2",
+      "processing_fps": "5",
+      "workspace": "Trajectory Track",
+      "arrival_rule": "position_and_speed_for_full_hold",
+      "integral_carry_between_runs": false,
+      "pid_units": {
+        "Kp": "mm/mm",
+        "Ki": "1/s",
+        "Kv": "s"
+      },
+      "initial_pose": "last_sent_angles_and_measured_xy",
+      "controller_selection": "Incremental XY PID",
+      "speed_settings": {
+        "Speed limit mm/s": ".5",
+        "Brake gain s": "1.5",
+        "Max brake mm": "2"
+      },
+      "speed_braking_rule": "distance_scaled_cap_brake_above_resume_at_80_percent",
+      "incremental_settings": {
+        "Step mm": "1",
+        "Rate mm/s": ".5",
+        "Settle speed mm/s": ".2",
+        "Settle hold s": ".75",
+        "Max offset mm": "5",
+        "Step timeout s": "10"
+      },
+      "incremental_pid_settings": {
+        "Command rate mm/s": ".5",
+        "Command offset max mm": "100",
+        "Slowdown mm": "3"
+      },
+      "integral_limit_used": false,
+      "command_carry_between_points": true
+    },
+    "crop_circle": null,
+    "annotation_options": {
+      "show_path": false,
+      "show_roi": true,
+      "show_pins": true,
+      "show_points": true,
+      "show_labels": false,
+      "robot_marker": "Rectangle",
+      "show_group_center": true,
+      "show_spread_axes": true,
+      "show_robots": true,
+      "show_cargo": true,
+      "show_trails": false,
+      "show_center_trail": false,
+      "show_commanded": false,
+      "show_waypoint": true
+    }
+  },
+  "finished_utc": "2026-10-21T12:37:59.741627+00:00",
+  "encoded_frames": 807,
+  "logged_observations": 898,
+  "accepted_observations": 898,
+  "rejected_observations": 0,
+  "error": null
+}

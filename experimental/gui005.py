@@ -1,6 +1,7 @@
 """Closed-loop experiment GUI: connections and moving-ROI calibration."""
 
 import queue
+from dataclasses import replace
 import threading
 import time
 import tkinter as tk
@@ -17,6 +18,8 @@ from command_tab import CommandTab
 from trajectory_tab import TrajectoryTab
 from camera_popout import show_view_dialog
 from local_camera import LocalCameraClient
+from recording_export_tab import RecordingExportTab
+from gui005_radial_control import load_radial_model, RadialControl
 
 
 class ClosedLoopGUI(BaseServoGUI):
@@ -42,7 +45,9 @@ class ClosedLoopGUI(BaseServoGUI):
         self.camera_modes = []
         self.mode_settings = None
         self.mode_loading = False
-        self.point_commander = PointCommander(lambda: self.port)
+        self.radial_model = load_radial_model()
+        self.radial_base_model = self.radial_model
+        self.point_commander = PointCommander(lambda: self.port, radial_model=self.radial_model)
 
         self.build_header()
         self.build_workflow()
@@ -66,6 +71,10 @@ class ClosedLoopGUI(BaseServoGUI):
             text="Connect hardware, then calibrate XY and track robots inside a moving ROI",
             fg="#555555",
         ).pack(anchor="w")
+        tk.Label(header, text=(
+            f"Helmholtz radial compensation ON | z = 24 mm | polynomial extrapolation | I = {self.radial_model.current_a:.3f} A"
+            if self.radial_model is not None else "Helmholtz radial compensation OFF"),
+            fg="#555555").pack(anchor="w")
 
     def build_workflow(self):
         notebook = ttk.Notebook(self.root)
@@ -83,7 +92,9 @@ class ClosedLoopGUI(BaseServoGUI):
         notebook.add(calibration_tab, text="2. Calibration")
         self.calibration = CalibrationTab(calibration_tab, axis_move=self.move_axis_target,
                                           axis_prepare=self.point_commander.prepare_axes,
-                                          visible=lambda: notebook.select() == str(calibration_tab))
+                                          visible=lambda: notebook.select() == str(calibration_tab),
+                                          helmholtz_center_changed=self.set_helmholtz_center,
+                                          helmholtz_edit_allowed=self.helmholtz_edit_available)
         self.calibration.camera_source_key = self.camera_source_key
         command_tab = tk.Frame(notebook)
         trajectory_tab = tk.Frame(notebook)
@@ -97,26 +108,61 @@ class ClosedLoopGUI(BaseServoGUI):
             operation_allowed=lambda: self.control_operation_available(self.commands),
         )
         # Each workspace owns its preparation cache, diagnostics, and motor settings.
-        self.trajectory_commander = PointCommander(lambda: self.port)
+        self.trajectory_commander = PointCommander(lambda: self.port, applied_state=self.point_commander.applied_state,
+                                                   radial_model=self.radial_model)
         self.trajectory = TrajectoryTab(
             trajectory_tab, self.calibration, self.trajectory_commander, self.selected_camera_running,
             set_running=lambda running: self.set_control_running(self.trajectory, running),
             visible=lambda: notebook.select() == str(trajectory_tab),
             operation_allowed=lambda: self.control_operation_available(self.trajectory),
         )
+        export_tab = self.export_frame = tk.Frame(notebook)
+        notebook.add(export_tab, text='5. Export recordings')
+        self.exports = RecordingExportTab(export_tab, operation_allowed=self.export_operation_available)
         notebook.bind("<<NotebookTabChanged>>", lambda event: self.refresh_selected_control())
 
     def control_views(self):
         trajectory = getattr(self, 'trajectory', None)
         return (self.commands,) if trajectory is None else (self.commands, trajectory)
 
+    def helmholtz_edit_available(self):
+        return all(not (view.running or view.precalculating)
+                   for view in (getattr(self, 'commands', None), getattr(self, 'trajectory', None))
+                   if view is not None)
+
+    def set_helmholtz_center(self, center_xy_m):
+        base = self.radial_base_model
+        model = base if base is None or center_xy_m is None else replace(base, center_xy_m=tuple(center_xy_m))
+        if model == self.radial_model:
+            return
+        self.radial_model = model
+        for commander in (self.point_commander, getattr(self, 'trajectory_commander', None)):
+            if commander is not None:
+                commander.radial_control = None if model is None else RadialControl(model)
+                commander.prepared_axes.clear()
+                commander.prepared_points.clear()
+        calibration = getattr(self, 'calibration', None)
+        if calibration is not None:
+            calibration.prepared_case = None
+        for view in (getattr(self, 'commands', None), getattr(self, 'trajectory', None)):
+            if view is not None:
+                view.precalculated_signature = None
+
     def control_operation_available(self, source):
+        if getattr(self, 'exports', None) is not None and self.exports.busy:
+            return False
         return all(view is source or not (view.running or view.precalculating)
+                   for view in self.control_views())
+
+    def export_operation_available(self):
+        return all(not (view.running or view.precalculating or view.recording is not None or view.recording_finalizing)
                    for view in self.control_views())
 
     def set_control_running(self, source, running):
         self.calibration.set_command_running(running)
         self.workflow_notebook.tab(self.calibration_frame, state='disabled' if running else 'normal')
+        if hasattr(self, 'export_frame'):
+            self.workflow_notebook.tab(self.export_frame, state='disabled' if running else 'normal')
         for view in self.control_views():
             if view is not source:
                 self.workflow_notebook.tab(view.parent, state='disabled' if running else 'normal')
@@ -248,6 +294,8 @@ class ClosedLoopGUI(BaseServoGUI):
             view.stop_recording()
         self.calibration.frame = self.calibration.frame_received_at = None
         self.calibration.corners, self.calibration.circle = [], None
+        self.calibration.helmholtz_circle = None
+        self.set_helmholtz_center(None)
         self.calibration.transform = None
         self.calibration.reset_axes()
         self.calibration.clear_tracking()
@@ -619,6 +667,8 @@ class ClosedLoopGUI(BaseServoGUI):
         )
 
     def on_close(self):
+        if getattr(self, 'exports', None) is not None:
+            self.exports.close()
         for view in self.control_views():
             view.close()
         self.calibration.close()

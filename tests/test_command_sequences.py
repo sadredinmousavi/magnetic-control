@@ -626,7 +626,7 @@ class CommandSequenceTests(unittest.TestCase):
         app.accept_live_frame(frame)
         app.process_tracking_frame.assert_called_once()
 
-    def test_cargo_controls_arrival_and_is_excluded_from_robots_and_exported(self):
+    def test_cargo_only_controls_arrival_without_robot_detections_and_is_exported(self):
         from arrival_control import ArrivalGate
         app = self.cargo_app()
         app.start_tracking()
@@ -637,13 +637,15 @@ class CommandSequenceTests(unittest.TestCase):
         frame = self.robot_frame([(110, 110)])
         cv2.circle(frame, (150, 110), 12, (0, 0, 255), -1)
         app.accept_live_frame(frame)
-        self.assertEqual(len(app.tracking_detections), 1)
-        self.assertEqual(app.tracking_detections[0]['center'], (110, 110))
+        self.assertEqual(app.tracking_detections, [])
+        self.assertIsNone(app.group_geometry)
         self.assertEqual(app.cargo_detection['center'], (150, 110))
         np.testing.assert_allclose(gate.positions, [[.02, 0]], atol=1e-6)
         self.assertTrue(gate.ready)
         row = app.tracking_rows[-1]
         self.assertEqual(row['control_target'], 'Cargo center')
+        self.assertEqual(row['expected_robots'], 0)
+        self.assertEqual(row['detected_robots'], 0)
         self.assertAlmostEqual(row['cargo_x_mm'], 20)
         self.assertAlmostEqual(row['error_mm'], 10)
         app.accept_live_frame(self.robot_frame([(110, 110)]))

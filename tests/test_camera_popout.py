@@ -88,6 +88,28 @@ class CameraPopoutTests(unittest.TestCase):
         for widget, hint in fields.values():
             self.assertTrue(all(set(call.kwargs) == {'text'} for call in widget.config.call_args_list))
 
+    def test_trajectory_measurements_move_to_details_and_clear_after_tracking_loss(self):
+        app = CommandTab.__new__(CommandTab)
+        app.view_title, app.feedback = 'Trajectory Track', None
+        app.group_geometry = dict(center_mm=[-16.13, -6.28], ratio=1.32,
+                                  strong_mm=4., weak_mm=3., angle_deg=45.)
+        app.cargo_detection = dict(shape='Rectangle', xy_cm=[1., 2.], angle_deg=90.)
+        app.trajectory_waypoint = [.01, .02]
+        with patch('command_tab.tk.LabelFrame'), patch('command_tab.tk.Frame'), \
+             patch('command_tab.tk.Label', side_effect=lambda *args, **kwargs: Mock()), \
+             patch('command_tab.HoverHint', side_effect=lambda *args: Mock()):
+            fields = app.build_control_details(Mock())
+        self.assertEqual(fields['group_xy'][1].text, '-16.13, -6.28')
+        self.assertEqual(fields['spread_ratio'][1].text, '1.32')
+        self.assertEqual(fields['spread_mm'][1].text, '4.00, 3.00')
+        self.assertEqual(fields['spread_angle'][1].text, '45.00')
+        self.assertIn('axis 90.0 deg', fields['cargo_info'][1].text)
+        self.assertEqual(fields['waypoint_xy'][1].text, '10.00, 20.00')
+        app.group_geometry = app.cargo_detection = app.trajectory_waypoint = None
+        app.refresh_control_details(fields)
+        for key in ('group_xy', 'spread_ratio', 'spread_angle', 'cargo_info', 'waypoint_xy'):
+            self.assertEqual(fields[key][1].text, '—')
+
     def test_dialog_is_owned_by_open_popout_and_restores_it_after_error(self):
         view = CameraPopout.__new__(CameraPopout)
         view.closed, view.window, view.show = False, Mock(), Mock()

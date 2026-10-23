@@ -19,14 +19,16 @@ AXIS_REFERENCE_NAMES = {name: 'Origin' if name == 'Origin' else '+' + name[-1]
 AXIS_DISPLAY_NAMES = {name: 'Center' if name == 'Origin' else name for name in AXIS_MOVE_TARGETS_M}
 
 
-def symmetric_axes(corners, width_cm, height_cm, captures):
-    """Intersect opposite-pair lines in the metric plane; return canonical references."""
+def manual_line_axes(corners, width_cm, height_cm, captures):
+    """Intersect directed X/Y lines in the metric plane, independent of travel distances."""
     names = ('-X', '+X', '-Y', '+Y')
+    if not isinstance(captures, dict) or any(name not in captures for name in names):
+        raise ValueError('Select -X, +X, -Y and +Y to define both axis lines.')
     pixels = np.asarray([captures[name] for name in names], dtype=float)
     if pixels.shape != (4, 2) or not np.isfinite(pixels).all():
-        raise ValueError('Symmetric captures must be finite XY pairs.')
+        raise ValueError('Axis line points must be finite XY pairs.')
     if min(np.linalg.norm(pixels[1] - pixels[0]), np.linalg.norm(pixels[3] - pixels[2])) < 2:
-        raise ValueError('Opposite axis captures are less than 2 pixels apart. Recapture settled positions.')
+        raise ValueError('Axis line endpoints are less than 2 pixels apart. Select points farther apart.')
     metric = calibrated_dwell_coordinates([{'center': p} for p in pixels], corners, width_cm, height_cm)
     vectors = np.array([metric[1] - metric[0], metric[3] - metric[2]])
     lengths = np.linalg.norm(vectors, axis=1)
@@ -44,7 +46,14 @@ def symmetric_axes(corners, width_cm, height_cm, captures):
     samples = dict(zip(AXIS_TARGETS_M, references.tolist()))
     axes = RobotAxes(corners, width_cm, height_cm, samples)
     angle = np.degrees(np.arccos(np.clip(np.dot(*directions), -1., 1.)))
-    checks = [f'Measured axis angle: {angle:.2f} deg (90 deg ideal).']
+    return samples, f'Measured axis angle: {angle:.2f} deg (90 deg ideal).'
+
+
+def symmetric_axes(corners, width_cm, height_cm, captures):
+    """Intersect robot travel lines and report optional checks against commanded travel."""
+    samples, report = manual_line_axes(corners, width_cm, height_cm, captures)
+    axes = RobotAxes(corners, width_cm, height_cm, samples)
+    checks = [report]
     for name in ('Origin', '+2X', '+2Y'):
         if name in captures:
             observed = axes.coordinates([captures[name]])[0] * 10

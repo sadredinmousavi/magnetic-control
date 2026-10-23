@@ -116,12 +116,14 @@ class ControlDiagnostics:
                     if target is not None:
                         missing.update(desired_x_mm=target[0]*1000, desired_y_mm=target[1]*1000)
                     for key in ('requested_force_n', 'predicted_force_n',
-                                'velocity_xy_mm_s', 'pid_force_n', 'integral_force_n', 'inherited_integral_force_n'):
+                                'velocity_xy_mm_s', 'pid_force_n', 'integral_force_n', 'inherited_integral_force_n',
+                                'integral_xy_mm', 'anchor_xy_mm', 'sent_optimizer_xy_mm'):
                         missing[key] = json.dumps(control.get(key))
                     missing['calculated_motor_angles_deg'] = json.dumps(control.get('calculated_angles'))
                     missing['sent_motor_angles_deg'] = json.dumps(control.get('sent_angles'))
                     missing['slow_assist_active'] = control.get('slow_assist_active', False)
                     missing['slow_assist_scale'] = control.get('slow_assist_scale', 1.)
+                    missing['allocation_fraction'] = control.get('allocation_fraction')
                     for row in data.get('tracking_rows') or [missing]:
                         self.csv.writerow(dict(row, **common))
                     self.frames += 1

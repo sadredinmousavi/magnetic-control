@@ -21,7 +21,7 @@ from gui004 import (
     robot_center_for, workspace_detection_mask,
 )
 from robot_vision import RobotDetector
-from axis_calibration import AXIS_TARGETS_M, AXIS_MOVE_TARGETS_M, AXIS_SAVED_TARGETS_M, AXIS_REFERENCE_NAMES, AXIS_DISPLAY_NAMES, RobotAxes, symmetric_axes
+from axis_calibration import AXIS_TARGETS_M, AXIS_MOVE_TARGETS_M, AXIS_SAVED_TARGETS_M, AXIS_REFERENCE_NAMES, AXIS_DISPLAY_NAMES, RobotAxes, symmetric_axes, manual_line_axes
 from point_control import hardware_case_name
 from camera_popout import CameraPopout, show_view_dialog
 from hover_hint import HoverHint
@@ -167,13 +167,18 @@ class MovingROICalibration:
 
 
 class CalibrationTab:
-    def __init__(self, parent, axis_move=None, axis_prepare=None, *, visible=lambda: True):
+    def __init__(self, parent, axis_move=None, axis_prepare=None, *, visible=lambda: True,
+                 helmholtz_center_changed=None, helmholtz_edit_allowed=lambda: True):
         self.parent = parent
         self.visible = visible
         self.frame = None
         self.corners = []
         self.circle = None
         self.pin_search_circle = None
+        self.helmholtz_circle = None
+        self.helmholtz_center_changed = helmholtz_center_changed
+        self.helmholtz_edit_allowed = helmholtz_edit_allowed
+        self.helmholtz_radius_var = tk.StringVar(value='150')
         self.transform = None
         self.tracker = None
         self.auto_tracking = True
@@ -196,6 +201,8 @@ class CalibrationTab:
         self.axis_samples = {}
         self.axis_capture_moves = {}
         self.axis_raw_captures = {}
+        self.axis_line_points = {}
+        self.axis_method_name = 'Symmetric pairs'
         self.axis_method_var = tk.StringVar(value='Symmetric pairs')
         self.axis_pending = None
         self.axis_busy = False
@@ -228,6 +235,7 @@ class CalibrationTab:
         bar.pack(fill="x", padx=8, pady=6)
         for label, command in (
             ("Save setup", self.save_setup), ("Load setup", self.load_setup),
+            ("Load last", self.load_last_setup),
             ("Export XY CSV", self.export_csv),
         ):
             tk.Button(bar, text=label, command=command).pack(side="left", padx=2)
@@ -269,6 +277,19 @@ class CalibrationTab:
                             command=self.clear_pin_roi).pack(side="left", padx=4)
         tk.Button(tools, text="Clear points", command=self.clear_points).pack(side="left", padx=4)
         tk.Button(tools, text='Clear ROI', command=self.clear_roi).pack(side='left', padx=4)
+        coil_tools = tk.Frame(parent)
+        coil_tools.pack(fill='x', padx=8, pady=2)
+        ttk.Radiobutton(coil_tools, text='Align Helmholtz circle (click / drag)',
+                        variable=self.mode, value='Helmholtz', command=self.clear_pin_roi).pack(side='left')
+        tk.Label(coil_tools, text='Circle radius px').pack(side='left', padx=4)
+        coil_radius = tk.Spinbox(coil_tools, from_=5, to=4000, width=6,
+                                textvariable=self.helmholtz_radius_var, command=self.resize_helmholtz_circle)
+        coil_radius.pack(side='left')
+        coil_radius.bind('<Return>', lambda event: self.resize_helmholtz_circle())
+        coil_radius.bind('<FocusOut>', lambda event: self.resize_helmholtz_circle())
+        tk.Button(coil_tools, text='Clear coil alignment', command=self.clear_helmholtz_circle).pack(side='left', padx=4)
+        self.helmholtz_status = tk.Label(coil_tools, text='Coil center: settings-file fallback', anchor='w')
+        self.helmholtz_status.pack(side='left', padx=4)
         pin_tools = tk.Frame(parent)
         pin_tools.pack(fill="x", padx=8, pady=2)
         tk.Label(pin_tools, text="Pin search radius (px)").pack(side="left")
@@ -276,7 +297,7 @@ class CalibrationTab:
         tk.Checkbutton(pin_tools, text="Manual pin placement", variable=self.manual_pin_var,
                        command=self.on_pin_method_changed).pack(side="left", padx=4)
         tk.Label(pin_tools, text="Auto: click the small ROI over a green pin. Manual: click the exact pin center.").pack(side="left", padx=4)
-        axes_bar = tk.LabelFrame(parent, text="Robot XY axes — use one robot", padx=5, pady=4)
+        axes_bar = tk.LabelFrame(parent, text="Workspace XY axes — robot captures or manual lines", padx=5, pady=4)
         axes_bar.pack(fill="x", padx=8, pady=4)
         axes_bar.columnconfigure(1, weight=1)
         self.control_case_var = tk.StringVar(value="")
@@ -291,9 +312,10 @@ class CalibrationTab:
         self.prepare_button.pack(side='left', padx=4)
         tk.Label(case_row, text='Method:').pack(side='left', padx=(8, 2))
         method = ttk.Combobox(case_row, textvariable=self.axis_method_var,
-                              values=('Symmetric pairs', 'Center reference'), state='readonly', width=17)
+                              values=('Symmetric pairs', 'Center reference', 'Manual axis lines'), state='readonly', width=19)
+        self.axis_method_selector = method
         method.pack(side='left')
-        method.bind('<<ComboboxSelected>>', lambda event: self.reset_axes())
+        method.bind('<<ComboboxSelected>>', lambda event: self.change_axis_method())
         actions = tk.Frame(axes_bar)
         actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.axis_buttons = []
@@ -303,6 +325,10 @@ class CalibrationTab:
             button.pack(side="left", padx=(6 if name in ('+X', '+Y') else 1, 1))
             self.style_axis_move_button(button, name)
             self.axis_buttons.append(button)
+        self.manual_lines_button = tk.Button(actions, text='Start / restart lines', command=self.start_manual_lines)
+        self.manual_lines_button.pack(side='left', padx=3)
+        self.undo_line_button = tk.Button(actions, text='Undo line point', command=self.undo_line_point)
+        self.undo_line_button.pack(side='left', padx=3)
         self.axis_capture_button = tk.Button(actions, text="Capture", command=self.capture_axis, state="disabled")
         self.axis_capture_button.pack(side="left", padx=3)
         tk.Button(actions, text="Reset axes", command=self.reset_axes).pack(side="left", padx=3)
@@ -316,11 +342,12 @@ class CalibrationTab:
             "Symmetric pairs: capture -X, +X, -Y, +Y in any order; Center and +2X/+2Y are checks. Center reference: capture Center first, then one X and Y position."
         ), wraplength=1000)
         self.axis_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self.refresh_axis_method_controls()
         self.capture_hint = tk.Label(axes_bar, anchor='w', foreground='#855300', background='#fff4d6', padx=6, pady=3)
         self.capture_hint.grid(row=4, column=0, columnspan=4, sticky='ew')
         tk.Label(parent, anchor="w", text=(
             "Select four corner dots, enter their rectangle size, then place a circular ROI around all robots. "
-            "Dark contrast detection only. Calibrate robot axes below to replace the default image-aligned XY."
+            "Dark contrast detection only. Calibrate workspace axes using robot captures or manual pen lines."
         ), wraplength=1000).pack(fill="x", padx=10)
         self.status = tk.Label(parent, text="Waiting for a live camera frame.", anchor="w",
                                background='#edf4ff', foreground='#173c68', padx=6, pady=4)
@@ -328,6 +355,7 @@ class CalibrationTab:
         self.canvas = tk.Canvas(parent, background="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.canvas.bind("<Button-1>", self.click)
+        self.canvas.bind('<B1-Motion>', self.drag_helmholtz_circle)
         self.canvas.bind("<Motion>", self.move_pin_roi)
         self.canvas.bind("<Leave>", self.clear_pin_roi)
         self.canvas.bind("<Configure>", lambda event: self.render())
@@ -337,7 +365,7 @@ class CalibrationTab:
     def on_metric_size_changed(self, *args):
         if getattr(self, 'prepared_case', None) != self.control_case_var.get():
             self.prepared_case = None
-        if self.axis_samples or getattr(self, 'axis_raw_captures', {}) or self.axis_busy or self.axis_pending or getattr(self, "axis_tracker", None) is not None:
+        if self.axis_samples or getattr(self, 'axis_raw_captures', {}) or getattr(self, 'axis_line_points', {}) or self.axis_busy or self.axis_pending or getattr(self, "axis_tracker", None) is not None:
             self.reset_axes()
             self.axis_status.config(text="Rectangle size or control case changed. Recalibrate the robot axes.")
 
@@ -413,6 +441,7 @@ class CalibrationTab:
         self.axis_samples = {}
         self.axis_capture_moves = {}
         self.axis_raw_captures = {}
+        self.axis_line_points = {}
         self.axis_tracker = None
         self.axis_detections = []
         self.axis_processed_at = None
@@ -421,13 +450,119 @@ class CalibrationTab:
         if hasattr(self, "axis_capture_button"):
             self.axis_capture_button.config(state="disabled")
         self.axis_status.config(text=self.axis_instructions())
+        if self.manual_lines_method():
+            self.mode.set('AxisLines')
+        elif getattr(self, 'mode', None) is not None and self.mode.get() == 'AxisLines':
+            self.mode.set('ROI')
+        self.refresh_axis_method_controls()
         self.render()
 
     def symmetric_method(self):
         variable = getattr(self, 'axis_method_var', None)
         return variable is not None and variable.get() == 'Symmetric pairs'
 
+    def manual_lines_method(self):
+        variable = getattr(self, 'axis_method_var', None)
+        return variable is not None and variable.get() == 'Manual axis lines'
+
+    def refresh_axis_method_controls(self):
+        manual = self.manual_lines_method()
+        locked = (getattr(self, 'command_running', False) or getattr(self, 'axis_busy', False)
+                  or getattr(self, 'axis_prepare_busy', False))
+        for name in ('axis_method_selector',):
+            if hasattr(self, name):
+                getattr(self, name).config(state='disabled' if locked else 'readonly')
+        for button in getattr(self, 'axis_buttons', []):
+            button.config(state='disabled' if manual or locked else 'normal')
+        if hasattr(self, 'prepare_button'):
+            self.prepare_button.config(state='disabled' if manual or locked else 'normal')
+        for name in ('manual_lines_button', 'undo_line_button'):
+            if hasattr(self, name):
+                getattr(self, name).config(state='normal' if manual and not locked else 'disabled')
+        if manual and hasattr(self, 'axis_capture_button'):
+            self.axis_capture_button.config(state='disabled')
+
+    def change_axis_method(self):
+        if self.helmholtz_locked():
+            self.axis_method_var.set(getattr(self, 'axis_method_name', 'Symmetric pairs'))
+            self.axis_status.config(text='Finish the current operation before changing axis calibration.')
+            return
+        self.axis_method_name = self.axis_method_var.get()
+        self.reset_axes()
+
+    def start_manual_lines(self):
+        if not self.manual_lines_method() or self.helmholtz_locked():
+            return
+        if self.frame is None or len(self.corners) != 4:
+            self.axis_status.config(text='Select the four workspace pins and physical dimensions first.')
+            return
+        self.reset_axes()
+        self.mode.set('AxisLines')
+        self.status.config(text='Place the pen along X. Click -X, then +X; reposition along Y and click -Y, then +Y. Keep camera and workspace fixed.')
+
+    def undo_line_point(self):
+        if not self.manual_lines_method() or self.helmholtz_locked():
+            return
+        points = dict(getattr(self, 'axis_line_points', {}))
+        for name in reversed(('-X', '+X', '-Y', '+Y')):
+            if name in points:
+                del points[name]
+                break
+        self.axis_line_points = points
+        self.axis_samples, self.axis_capture_moves = {}, {}
+        self.clear_tracking()
+        self.mode.set('AxisLines')
+        self.setup_revision = getattr(self, 'setup_revision', 0)+1
+        self.axis_status.config(text=self.axis_instructions())
+        self.render()
+
+    def record_line_point(self, point):
+        if not self.manual_lines_method() or self.helmholtz_locked():
+            return
+        if self.frame is None or len(self.corners) != 4:
+            self.axis_status.config(text='Select the four workspace pins and physical dimensions first.')
+            return
+        points = dict(getattr(self, 'axis_line_points', {}))
+        if len(points) == 4:
+            self.axis_status.config(text=self.axis_instructions())
+            return
+        try:
+            width, height = float(self.width_var.get()), float(self.height_var.get())
+            if not np.isfinite([width, height]).all() or min(width, height) <= 0:
+                raise ValueError('Workspace width and height must be finite and positive.')
+            name = ('-X', '+X', '-Y', '+Y')[len(points)]
+            point = np.asarray(point, float)
+            h, w = self.frame.shape[:2]
+            if point.shape != (2,) or not np.isfinite(point).all() or np.any(point < 0) or np.any(point >= [w, h]):
+                raise ValueError('Click a point inside the camera image.')
+            if name in ('+X', '+Y') and np.linalg.norm(point-np.asarray(points['-'+name[-1]])) < 2:
+                raise ValueError('Select line endpoints farther apart (at least 2 pixels).')
+            points[name] = point.tolist()
+            samples, report = {}, ''
+            if len(points) == 4:
+                samples, report = manual_line_axes(self.corners, width, height, points)
+                origin = np.asarray(samples['Origin'])
+                if np.any(origin < 0) or np.any(origin >= [w, h]):
+                    raise ValueError('The axis intersection is outside the image. Check the pen lines.')
+            self.axis_line_points = points
+            self.axis_samples = samples
+            self.axis_capture_moves = {key: key for key in samples}
+            self.clear_tracking()
+            self.setup_revision = getattr(self, 'setup_revision', 0)+1
+            self.axis_status.config(text=('Manual axis lines complete. '+report+' Save setup to retain the axes.'
+                                          if samples else self.axis_instructions()))
+            self.render()
+        except (ValueError, TypeError) as error:
+            # Keep earlier clicks, so a rejected last point can be clicked again.
+            self.axis_status.config(text=f'Point not saved: {error}')
+
     def axis_instructions(self):
+        if self.manual_lines_method():
+            count = len(getattr(self, 'axis_line_points', {}))
+            if count == 4:
+                return 'Manual axis lines complete. Save setup; Undo line point adjusts +Y, or restart both lines.'
+            name = ('-X', '+X', '-Y', '+Y')[count]
+            return f'Manual axis lines: click {name} on the pen. Order: -X, +X, -Y, +Y. No robot or motor move required.'
         if self.symmetric_method():
             raw = getattr(self, 'axis_raw_captures', {})
             missing = [name for name in ('-X', '+X', '-Y', '+Y') if name not in raw]
@@ -455,6 +590,9 @@ class CalibrationTab:
         self.render()
 
     def prepare_axis_moves(self):
+        if self.manual_lines_method():
+            self.axis_status.config(text=self.axis_instructions())
+            return
         if self.axis_busy or self.axis_prepare_busy or self.command_running:
             self.axis_status.config(text='Wait for the current operation to finish before preparing axes.')
             return
@@ -505,6 +643,9 @@ class CalibrationTab:
         self.render()
 
     def move_axis(self, name):
+        if self.manual_lines_method():
+            self.axis_status.config(text=self.axis_instructions())
+            return
         if self.axis_busy or getattr(self, 'axis_prepare_busy', False) or getattr(self, 'command_running', False):
             return
         try:
@@ -687,6 +828,7 @@ class CalibrationTab:
     def accept_frame(self, frame):
         if self.frame is not None and self.frame.shape[:2] != frame.shape[:2]:
             self.corners, self.circle = [], None
+            self.helmholtz_circle = None
             self.pin_search_circle = None
             self.transform = None
             self.canvas.camera_transform = None
@@ -778,6 +920,7 @@ class CalibrationTab:
         for (button, _), name in zip(self.camera_popout.actions[1:], AXIS_MOVE_TARGETS_M):
             self.style_axis_move_button(button, name)
         canvas.bind('<Button-1>', lambda event: self.click(event, transform=getattr(canvas, 'camera_transform', None)))
+        canvas.bind('<B1-Motion>', lambda event: self.drag_helmholtz_circle(event, transform=getattr(canvas, 'camera_transform', None)))
         canvas.bind('<Motion>', lambda event: self.move_pin_roi(event, transform=getattr(canvas, 'camera_transform', None)))
         canvas.bind('<Leave>', self.clear_pin_roi)
         # Keep the single-row controls reachable even when the view is resized.
@@ -788,14 +931,21 @@ class CalibrationTab:
 
     def build_popout_tools(self, bar):
         # Shared variables keep both pages synchronized without extra setup dialogs.
-        for label, mode in (('4 pins', 'Corners'), ('ROI', 'ROI')):
+        for label, mode in (('4 pins', 'Corners'), ('ROI', 'ROI'), ('Coil', 'Helmholtz')):
             tk.Radiobutton(bar, text=label, variable=self.mode, value=mode,
                            command=self.clear_pin_roi).pack(side='left', padx=1)
+        tk.Button(bar, text='Axis lines', command=self.start_manual_lines).pack(side='left', padx=2)
+        tk.Button(bar, text='Undo line', command=self.undo_line_point).pack(side='left', padx=2)
         tk.Checkbutton(bar, text='Manual', variable=self.manual_pin_var,
                        command=self.on_pin_method_changed).pack(side='left', padx=1)
         for label, variable in (('Pin r', self.pin_radius_var), ('ROI r', self.radius_var)):
             tk.Label(bar, text=label).pack(side='left', padx=(3, 1))
             tk.Entry(bar, textvariable=variable, width=4).pack(side='left')
+        tk.Label(bar, text='Coil r').pack(side='left')
+        radius = tk.Entry(bar, textvariable=self.helmholtz_radius_var, width=4)
+        radius.pack(side='left')
+        radius.bind('<Return>', lambda event: self.resize_helmholtz_circle())
+        radius.bind('<FocusOut>', lambda event: self.resize_helmholtz_circle())
         tk.Label(bar, text='FPS').pack(side='left', padx=(3, 1))
         tk.Spinbox(bar, from_=1, to=15, textvariable=self.live_fps_var, width=3).pack(side='left')
 
@@ -817,10 +967,12 @@ class CalibrationTab:
             count = 0
         robot = self.circle is not None and len(self.detections) == 1
         axes = len(self.axis_samples) == 3
+        manual = self.manual_lines_method()
+        line_count = len(getattr(self, 'axis_line_points', {}))
         return (
             ('1. 4 pins', 'Done' if pins else f'{len(self.corners)}/4 — select pins', pins, not pins),
-            ('2. ROI and robot', 'Detected' if robot else 'Place ROI / detect robot', robot, self.circle is not None and not robot),
-            ('3. Axis', 'Done' if axes else (f'{sum(n in getattr(self, "axis_raw_captures", {}) for n in ("-X", "+X", "-Y", "+Y"))}/4 captures' if self.symmetric_method() else f'{len(self.axis_samples)}/3 captures'), axes, pins and self.circle is not None and not axes),
+            ('2. ROI and robot', 'Not needed for manual axes' if manual else 'Detected' if robot else 'Place ROI / detect robot', manual or robot, not manual and self.circle is not None and not robot),
+            ('3. Axis', 'Done' if axes else (f'{line_count}/4 clicks' if manual else f'{sum(n in getattr(self, "axis_raw_captures", {}) for n in ("-X", "+X", "-Y", "+Y"))}/4 captures' if self.symmetric_method() else f'{len(self.axis_samples)}/3 captures'), axes, pins and (manual or self.circle is not None) and not axes),
         )
 
     def refresh_step_status(self, labels):
@@ -836,6 +988,8 @@ class CalibrationTab:
             return 'Capture disabled: the motor command is still being sent.'
         if getattr(self, 'axis_prepare_busy', False):
             return 'Preparing axis poses: no motors are moved. Wait until preparation finishes.'
+        if self.manual_lines_method():
+            return self.axis_instructions()
         if self.axis_pending:
             return f'Capture ready for {AXIS_DISPLAY_NAMES[self.axis_pending]}: confirm the robot is settled, then press Capture.'
         if len(self.axis_samples) == 3:
@@ -847,8 +1001,70 @@ class CalibrationTab:
 
     def set_command_running(self, running):
         self.command_running = running
+        self.refresh_axis_method_controls()
         if self.camera_popout is not None and self.camera_popout.is_open:
             self.camera_popout.refresh()
+
+    def helmholtz_locked(self):
+        return (getattr(self, 'command_running', False) or getattr(self, 'axis_busy', False)
+                or getattr(self, 'axis_prepare_busy', False)
+                or not getattr(self, 'helmholtz_edit_allowed', lambda: True)())
+
+    def helmholtz_center_m(self):
+        circle = getattr(self, 'helmholtz_circle', None)
+        if circle is None or len(self.corners) != 4:
+            return None
+        samples = getattr(self, 'axis_samples', {})
+        if samples and len(samples) != 3:
+            return None
+        if samples:
+            axes = RobotAxes(self.corners, float(self.width_var.get()), float(self.height_var.get()),
+                             samples, getattr(self, 'axis_capture_moves', {}))
+            xy_cm = axes.coordinates([circle[:2]])[0]
+        else:
+            xy_cm = calibrated_dwell_coordinates([{'center': circle[:2]}], self.corners,
+                                                  float(self.width_var.get()), float(self.height_var.get()))[0]
+        return tuple(np.asarray(xy_cm, float)*.01)
+
+    def refresh_helmholtz_center(self):
+        if not hasattr(self, 'helmholtz_status'):
+            return
+        try:
+            center = self.helmholtz_center_m()
+            self.helmholtz_status.config(text=(f'Coil center XY: {center[0]*1000:.2f}, {center[1]*1000:.2f} mm'
+                if center is not None else ('Coil center: settings-file fallback' if self.helmholtz_circle is None
+                                            else 'Coil center: complete pins / axes')))
+        except (ValueError, TypeError):
+            center = None
+            self.helmholtz_status.config(text='Coil center: complete valid XY calibration')
+        callback = getattr(self, 'helmholtz_center_changed', None)
+        if callback is not None:
+            callback(center)
+
+    def resize_helmholtz_circle(self):
+        if self.helmholtz_locked():
+            return
+        try:
+            radius = float(self.helmholtz_radius_var.get())
+            if not np.isfinite(radius) or radius <= 0:
+                raise ValueError('Coil circle radius must be positive.')
+            if self.helmholtz_circle is not None:
+                self.helmholtz_circle = (*self.helmholtz_circle[:2], radius)
+                self.setup_revision += 1
+            self.render()
+        except ValueError as error:
+            self.status.config(text=str(error))
+
+    def clear_helmholtz_circle(self):
+        if self.helmholtz_locked():
+            return
+        self.helmholtz_circle = None
+        self.setup_revision += 1
+        self.render()
+
+    def drag_helmholtz_circle(self, event, *, transform=None):
+        if self.mode.get() == 'Helmholtz':
+            self.click(event, transform=transform)
 
     def click(self, event, *, transform=None):
         popup = getattr(self, 'camera_popout', None)
@@ -866,6 +1082,23 @@ class CalibrationTab:
             return
         if self.axis_busy:
             self.axis_status.config(text="Wait for the move to finish, then use Capture settled robot.")
+            return
+        if self.mode.get() == 'AxisLines':
+            self.record_line_point(point)
+            return
+        if self.mode.get() == 'Helmholtz':
+            if self.helmholtz_locked():
+                return
+            try:
+                radius = float(self.helmholtz_radius_var.get())
+                if not np.isfinite(radius) or radius <= 0:
+                    raise ValueError('Coil circle radius must be positive.')
+                self.helmholtz_circle = (*point, radius)
+                self.setup_revision += 1
+                self.status.config(text='Align the blue circle with the Helmholtz coil. Its cross marks the force center. Save setup to retain it.')
+                self.render()
+            except ValueError as error:
+                self.status.config(text=str(error))
             return
         if self.axis_pending is not None:
             self.axis_status.config(text="Use Capture settled robot, not a mouse click. Enlarge ROI radius if needed, or Reset axes to reposition the ROI.")
@@ -988,6 +1221,7 @@ class CalibrationTab:
         self.status.config(text="Tracking stopped. Coordinates remain available for export.")
 
     def render(self, canvas=None):
+        self.refresh_helmholtz_center()
         if canvas is None:
             self.render_revision = getattr(self, 'render_revision', 0) + 1
         if hasattr(self, 'step_labels'):
@@ -1075,6 +1309,12 @@ class CalibrationTab:
         elif hasattr(self, "detection_info"):
             self.detection_info.config(text="")
         pin_circle = getattr(self, "pin_search_circle", None)
+        coil_circle = getattr(self, 'helmholtz_circle', None)
+        if coil_circle is not None:
+            center = tuple(round(v) for v in coil_circle[:2])
+            stroke(cv2.circle, center, round(coil_circle[2]), color=(255, 180, 40), width=2)
+            marker(center, (255, 180, 40))
+            label('Helmholtz axis', (center[0]+round(10/scale), center[1]-round(10/scale)), (255, 180, 40))
         if pin_circle is not None and self.mode.get() == "Corners":
             stroke(cv2.circle, tuple(round(v) for v in pin_circle[:2]), round(pin_circle[2]), color=(255, 255, 0))
         if len(self.corners) == 4:
@@ -1109,6 +1349,17 @@ class CalibrationTab:
                     stroke(cv2.arrowedLine, origin, end, color=color, tipLength=.15)
                     stroke(cv2.circle, point, max(3, round(3 / scale)), color=color, width=1)
                     label(name, end, color)
+        if self.manual_lines_method():
+            points = getattr(self, 'axis_line_points', {})
+            for negative, positive, color in (('-X', '+X', (0, 0, 255)), ('-Y', '+Y', (255, 180, 0))):
+                if negative in points and positive in points:
+                    stroke(cv2.line, tuple(np.rint(points[negative]).astype(int)),
+                           tuple(np.rint(points[positive]).astype(int)), color=color)
+                for name in (negative, positive):
+                    if name in points:
+                        point = tuple(np.rint(points[name]).astype(int))
+                        marker(point, color)
+                        label(name+' line', tuple(np.rint(np.asarray(point)+8/scale).astype(int)), color)
         if self.symmetric_method():
             for name, point in getattr(self, 'axis_raw_captures', {}).items():
                 marker(point, (180, 255, 180))
@@ -1123,25 +1374,33 @@ class CalibrationTab:
         canvas.delete("all")
         canvas.create_image(cw / 2, ch / 2, image=canvas.camera_photo, anchor="center")
 
-    def setup_data(self, *, require_capture=True):
+    def setup_data(self, *, require_capture=True, require_roi=True):
         if not require_capture and getattr(self, "axis_busy", False):
             raise ValueError("Wait for the calibration motor move to finish before using the setup in Commands.")
         if require_capture and (getattr(self, "axis_busy", False) or getattr(self, "axis_pending", None)):
             raise ValueError("Capture the current settled robot position before saving.")
-        if self.frame is None or self.circle is None:
-            raise ValueError("Select a frame, four points and an ROI first.")
+        manual = self.manual_lines_method()
+        if manual and len(getattr(self, 'axis_line_points', {})) != 4:
+            raise ValueError('Complete manual axis lines: click -X, +X, -Y, +Y before saving or using the setup.')
+        if self.frame is None or len(self.corners) != 4:
+            raise ValueError('Select a frame and four workspace points first.')
+        if self.circle is None and require_roi and not (manual and require_capture):
+            raise ValueError('Place a robot ROI in Calibration before using the setup for tracking or Commands.')
         data = {
             "version": 2, "video_size_px": list(self.frame.shape[1::-1]),
+            "helmholtz_circle_px": getattr(self, 'helmholtz_circle', None),
+            "helmholtz_center_xy_m": self.helmholtz_center_m(),
             "corners_px": self.corners, "rectangle_width_cm": float(self.width_var.get()),
             "rectangle_height_cm": float(self.height_var.get()),
-            "roi_circle_px": [
+            "roi_circle_px": None if self.circle is None else [
                 *(self.circle[:2] if self.tracker is None else self.tracker.center),
                 float(self.radius_var.get()) if self.tracker is None else self.tracker.radius,
             ],
             "robot_count": 1, "minimum_area": float(self.area_var.get()),
             'camera_source': getattr(self, 'camera_source_key', 'Pi SSH'),
             "dark_contrast_threshold": self.read_contrast_threshold(),
-            "axis_method": "symmetric" if self.symmetric_method() else "center",
+            "axis_method": "manual_lines" if manual else "symmetric" if self.symmetric_method() else "center",
+            "axis_line_points_px": getattr(self, "axis_line_points", {}) if manual else {},
             "axis_raw_captures_px": getattr(self, "axis_raw_captures", {}),
             "axis_samples_px": getattr(self, "axis_samples", {}),
             "axis_capture_moves": {key: getattr(self, 'axis_capture_moves', {}).get(key, key)
@@ -1155,10 +1414,14 @@ class CalibrationTab:
             raise ValueError(self.axis_instructions())
         if data["axis_samples_px"] and len(data["axis_samples_px"]) != 3:
             raise ValueError("Capture Center, +X and +Y or Reset axes before saving. Incomplete axes cannot be saved.")
-        MovingROICalibration(data["corners_px"], data["rectangle_width_cm"],
-                             data["rectangle_height_cm"], data["roi_circle_px"],
-                             data["robot_count"], data["minimum_area"], data["axis_samples_px"],
-                             contrast_threshold=data["dark_contrast_threshold"], axis_capture_moves=data["axis_capture_moves"])
+        if data["roi_circle_px"] is None:
+            RobotAxes(data["corners_px"], data["rectangle_width_cm"], data["rectangle_height_cm"], data["axis_samples_px"])
+        else:
+            MovingROICalibration(data["corners_px"], data["rectangle_width_cm"],
+                                 data["rectangle_height_cm"], data["roi_circle_px"],
+                                 data["robot_count"], data["minimum_area"], data["axis_samples_px"],
+                                 contrast_threshold=data["dark_contrast_threshold"], axis_capture_moves=data["axis_capture_moves"])
+        self.refresh_helmholtz_center()
         return data
 
     def save_setup(self):
@@ -1173,19 +1436,39 @@ class CalibrationTab:
             if path:
                 with open(path, "w", encoding="utf-8") as stream:
                     json.dump(data, stream, indent=2)
-                self.status.config(text="Complete setup saved: four points, physical dimensions, ROI, detection settings, hardware case and XY calibration.")
+                self.last_saved_setup_path = Path(path)
+                self.status.config(text='Manual axis calibration saved. A robot ROI can be placed later.' if data['roi_circle_px'] is None else
+                                   'Complete setup saved: four points, physical dimensions, ROI, detection settings, hardware case and XY calibration.')
         except (ValueError, OSError) as error:
             show_view_dialog(self, messagebox.showerror, "Calibration", str(error))
 
-    def load_setup(self):
+    def load_last_setup(self):
         if self.frame is None:
             show_view_dialog(self, messagebox.showerror, "Calibration", "Wait for a live camera frame first.")
             return
-        SETUP_DIR.mkdir(parents=True, exist_ok=True)
-        path = show_view_dialog(self, filedialog.askopenfilename,
-            title="Load GUI005 calibration", initialdir=str(SETUP_DIR),
-            filetypes=[("JSON", "*.json")],
-        )
+        try:
+            candidates = list(SETUP_DIR.glob('*.json'))
+            saved = getattr(self, 'last_saved_setup_path', None)
+            if saved is not None and Path(saved).is_file():
+                candidates.append(Path(saved))
+            if not candidates:
+                raise ValueError('No saved setup found. Save a setup or use Load setup first.')
+            latest = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+        except (ValueError, OSError) as error:
+            show_view_dialog(self, messagebox.showerror, "Calibration", str(error))
+            return
+        self.load_setup(latest)
+
+    def load_setup(self, path=None):
+        if self.frame is None:
+            show_view_dialog(self, messagebox.showerror, "Calibration", "Wait for a live camera frame first.")
+            return
+        if path is None:
+            SETUP_DIR.mkdir(parents=True, exist_ok=True)
+            path = show_view_dialog(self, filedialog.askopenfilename,
+                title="Load GUI005 calibration", initialdir=str(SETUP_DIR),
+                filetypes=[("JSON", "*.json")],
+            )
         if not path:
             return
         try:
@@ -1201,7 +1484,11 @@ class CalibrationTab:
             if samples and set(samples) != set(AXIS_TARGETS_M):
                 raise ValueError("Saved robot axis references are incomplete.")
             raw_captures = data.get('axis_raw_captures_px', {})
-            symmetric = data.get('axis_method', 'center') == 'symmetric'
+            method = data.get('axis_method', 'center')
+            if method not in ('center', 'symmetric', 'manual_lines'):
+                raise ValueError('Saved axis calibration method is unsupported.')
+            symmetric, manual = method == 'symmetric', method == 'manual_lines'
+            line_points = data.get('axis_line_points_px', {})
             report = ''
             if symmetric and raw_captures and not samples:
                 raise ValueError('Saved symmetric calibration is incomplete.')
@@ -1212,20 +1499,41 @@ class CalibrationTab:
                     raise ValueError('Saved symmetric captures are incomplete.')
                 samples, report = symmetric_axes(data['corners_px'], data['rectangle_width_cm'],
                                                  data['rectangle_height_cm'], raw_captures)
-            capture_moves = data.get('axis_capture_moves', {key: key for key in samples})
+            if manual:
+                if not isinstance(line_points, dict) or set(line_points) != {'-X', '+X', '-Y', '+Y'}:
+                    raise ValueError('Saved manual axis lines are incomplete.')
+                samples, report = manual_line_axes(data['corners_px'], data['rectangle_width_cm'],
+                                                   data['rectangle_height_cm'], line_points)
+            capture_moves = ({key: key for key in samples} if manual else
+                             data.get('axis_capture_moves', {key: key for key in samples}))
             if (not isinstance(capture_moves, dict) or (samples and set(capture_moves) != set(samples))
                     or any(not isinstance(move, str) or AXIS_REFERENCE_NAMES.get(move) != key
                            for key, move in capture_moves.items())):
                 raise ValueError('Saved axis move references are invalid.')
+            roi = data['roi_circle_px']
+            if roi is None and not manual:
+                raise ValueError('Saved robot calibration needs an ROI.')
+            # Validate geometry/settings through the same tracker constructor. This
+            # temporary ROI is never restored or saved as an actual selected ROI.
+            validation_roi = roi if roi is not None else [self.frame.shape[1]/2, self.frame.shape[0]/2, DEFAULT_ROBOT_ROI_RADIUS]
             tracker = MovingROICalibration(
                 data["corners_px"], data["rectangle_width_cm"], data["rectangle_height_cm"],
-                data["roi_circle_px"], 1, data["minimum_area"],
+                validation_roi, 1, data["minimum_area"],
                 samples, axis_capture_moves=capture_moves,
                 contrast_threshold=data.get("dark_contrast_threshold", 10),
             )
             h, w = self.frame.shape[:2]
+            coil_circle = data.get('helmholtz_circle_px')
+            if coil_circle is not None:
+                coil_circle = np.asarray(coil_circle, float)
+                if (coil_circle.shape != (3,) or not np.isfinite(coil_circle).all()
+                        or coil_circle[2] <= 0 or np.any(coil_circle[:2] < 0)
+                        or np.any(coil_circle[:2] >= [w, h])):
+                    raise ValueError('Saved Helmholtz circle is invalid or outside the frame.')
+                coil_circle = tuple(coil_circle)
             points = np.asarray([*tracker.corners, tracker.center,
-                                 *(raw_captures.values() if symmetric else samples.values())], dtype=float)
+                                 *(line_points.values() if manual else raw_captures.values() if symmetric else samples.values()),
+                                 *([samples['Origin']] if manual else [])], dtype=float)
             if not np.isfinite(points).all():
                 raise ValueError('Saved calibration points must be finite.')
             if np.any(points < 0) or np.any(points >= [w, h]):
@@ -1235,7 +1543,10 @@ class CalibrationTab:
             return
         self.reset_axes()
         self.clear_tracking()
-        self.corners, self.circle = tracker.corners, tuple(data["roi_circle_px"])
+        self.corners, self.circle = tracker.corners, None if roi is None else tuple(roi)
+        self.helmholtz_circle = coil_circle
+        if coil_circle is not None:
+            self.helmholtz_radius_var.set(str(coil_circle[2]))
         self.pin_search_circle = None
         for variable, value in ((self.width_var, tracker.width_cm), (self.height_var, tracker.height_cm),
                                 (self.radius_var, tracker.radius), (self.count_var, tracker.count),
@@ -1245,14 +1556,22 @@ class CalibrationTab:
         if hasattr(self, "contrast_var"):
             self.contrast_var.set(str(tracker.contrast_threshold))
         if hasattr(self, 'axis_method_var'):
-            self.axis_method_var.set('Symmetric pairs' if symmetric else 'Center reference')
+            self.axis_method_var.set('Manual axis lines' if manual else 'Symmetric pairs' if symmetric else 'Center reference')
+            self.axis_method_name = self.axis_method_var.get()
         self.axis_raw_captures = raw_captures if symmetric else {}
+        self.axis_line_points = line_points if manual else {}
+        if manual:
+            self.mode.set('AxisLines')
+        elif getattr(self, 'mode', None) is not None and self.mode.get() == 'AxisLines':
+            self.mode.set('ROI')
+        self.refresh_axis_method_controls()
         self.axis_samples = samples
         self.axis_capture_moves = capture_moves if samples else {}
-        self.axis_status.config(text=("Symmetric calibration restored. " + report if symmetric else "Saved robot origin and XY axes restored.") if samples else "Setup has image-aligned XY. Calibrate robot axes if needed.")
+        self.axis_status.config(text=("Manual axis lines restored. " + report if manual else "Symmetric calibration restored. " + report if symmetric else "Saved robot origin and XY axes restored.") if samples else "Setup has image-aligned XY. Calibrate robot axes if needed.")
         self.setup_revision = getattr(self, 'setup_revision', 0) + 1
         self.render()
-        self.status.config(text='Setup loaded. One-robot tracking resumes automatically from the ROI.')
+        self.status.config(text='Setup loaded. Place a robot ROI when ready to track.' if roi is None else
+                                'Setup loaded. One-robot tracking resumes automatically from the ROI.')
 
     def export_csv(self):
         if not self.rows:

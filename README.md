@@ -417,22 +417,180 @@ network throughput. The preview scales the complete received frame to fit.
 GUI005 has **3. Control** and **4. Trajectory Track** workspaces, each with its
 own sequence, feedback, tracking, cargo, recordings and diagnostics state.
 Tab 4 interpolates each commanded destination into straight-line waypoints no
-more than **5 mm apart**, starting at the measured robot-group center or cargo
+more than **2 mm apart**, starting at the measured robot-group center or cargo
 center. Run selected follows the route to that destination; Run all follows each
 loaded destination in order. Every waypoint requires fresh tracking, arrival
-within the selected tolerance (at most 1 mm), and the configured in-range hold.
+within the selected Arrival tolerance (mm), and speed below the Hold speed threshold
+continuously for the configured in-range hold. Crossing while moving too fast does not advance.
 Progression is automatic; Stop cancels the remaining route. The current waypoint
+can also be passed with **Skip waypoint**, available in the main tab and the large camera's Path toolbar.
+This explicitly skips only the armed automatic waypoint, bypassing its arrival, settling and row wait.
+The next waypoint resumes normal arrival checks; skipping the final waypoint completes the route.
+Skip is disabled while stopped, in Manual mode, or during Center reset. It does not mark the robot
+as arrived or bypass tracking/Stop checks. Diagnostics record `waypoint_skipped`, and CSV includes
+the cumulative `waypoints_skipped` count for the run. The current waypoint
 is marked in the camera and reported in the status and control details.
 Waypoint spacing bounds the desired path, not the robot's measured travel or
 the magnet angles. Row wait time applies at the row's final destination.
 
-Tab 4 starts with Control on, lower proportional force gain, greater velocity
-damping, zero integral gain and a lower magnet-angle rate. Cargo uses filtered
-derivative position feedback with a 2.5 mm correction limit and 0.5 mm/s slew.
+Tab 4 uses XY PID followed by the original equilibrium optimizer. In mm and seconds,
+`correction = Kp * (waypoint - measured) + integral - Kd * measured_velocity`, and
+`optimizer_target = waypoint + correction`. The optimizer retains the requested ratio and orientation.
+The **Trajectory controller** selector keeps **XY PID (current)** as the default and also offers
+**Direction-weighted XY PID** and **Incremental move-and-settle**. Choose while stopped;
+selection and its settings lock during a run. These choices use the same waypoints,
+anchored optimizer, ratio/orientation and arrival confirmation.
+The direction-weighted option splits integral memory into components parallel and perpendicular
+to the current error, using `correction = Kp * error + I_parallel + beta * I_perpendicular - Kd * velocity`.
+**Sideways integral weight** is beta (0 to 1, default 0.2). Smaller values reduce sideways memory.
+Opposing integral memory decays exponentially with **Opposing decay s** (default 2 seconds);
+this time constant removes about 63% of an unchanged opposing component in that time.
+Unwinding commits only for accepted optimizer calculations, including motor-deadband holds;
+allocation anti-windup still prevents further integral accumulation into saturation.
+Below 0.001 mm error, the controller skips directional projection to avoid an undefined direction.
+Integral memory and effective integral correction remain bounded per axis by I max.
+Velocity damping remains active, so the commanded point is not constrained to the error ray.
+The new option is a starting configuration to assess from measured tracking, not a guarantee
+that the physical magnetic response follows the commanded-point direction.
+All automatic Tab 4 controllers now prioritize overspeed braking. **Speed limit mm/s** defaults
+to 0.5; above it, waypoint pull and integral correction are suspended. The optimizer target becomes
+`measured_position - Brake_gain_s * measured_velocity`, with vector offset capped by **Max brake mm**.
+Defaults are 1.5 seconds gain and 2 mm maximum offset. Normal control resumes at or below
+80% of the limit (0.4 mm/s by default), preventing rapid switching near the threshold.
+Braking freezes integral memory, cancels incremental ramps and outstanding assistant requests,
+and retains workspace, tracking, stop, optimizer and motor-deadband checks. The status shows
+Speed braking, and CSV includes `speed_limit_mm_s` and `speed_braking`.
+Manual mode is unchanged. This is a reactive measured-speed supervisor, not a guaranteed physical
+speed ceiling: camera/filter delay, optimizer time and limited magnetic authority can allow overshoot.
+Tab 4 also supports **Manual**: stop the current run, tick Manual, then use **First** (Run all)
+or **Selected** to send a table point plus its saved/clicked `u`. Camera clicks during a manual run
+update that original table point directly. **Next** advances through the table on request, respecting
+the row's minimum wait; manual runs do not interpolate waypoints or advance on visual arrival.
+The final Next finishes the run. While stopped, Next selects and runs the next table point.
+Manual/automatic switching is disabled during a run; Stop first. Automatic controller settings
+are inactive in Manual mode, and automatic waypoint behavior remains available with Manual off.
+**Online assistant** is another opt-in choice for live supervision from this chat. Restart GUI005,
+load calibration/path, select this controller, enable Control and start the trajectory. It waits
+for an assistant-selected command after measured settling, rather than choosing automatic nudges.
+The assistant reads `experimental/live_control/state.json` and writes one `command.json` containing
+the matching `session_id`, `request_id`, `issued_monotonic_s` and a two-value `delta_command_mm`.
+Commands expire after 10 seconds, settling requests renew after 15 seconds or 0.25 mm center motion,
+and each accepted request can be used once. Steps must have positive progress toward the waypoint
+and stay within the configured norm limit (at most 1 mm), workspace and optimizer constraints.
+The existing ramp, settling, offset and no-progress checks still apply. Stop/Control off cancels
+further commands. With no assistant response, the GUI holds the last pose; this chat must remain
+actively engaged for subsequent decisions. No network service, API key or unattended AI loop is used.
+The state includes live center, waypoint, speed, spread ratio/angle, command and recent decisions;
+assistant commands and identifiers are included in the saved CSV control snapshots.
+Live-state publishing serializes writers and retries brief Windows/OneDrive sharing conflicts.
+If a conflict persists, it cancels the pending request and unfinished ramp and holds the last sent pose;
+publishing resumes with a fresh settling request when the file becomes available.
+The incremental controller starts from the applied command, changes it by up to **Step mm**
+(default 1 mm, Euclidean XY distance, maximum 1 mm), and ramps toward that command at
+**Rate mm/s** (default 0.5). It then waits until measured speed is below **Settle speed mm/s**
+(default 0.2) for **Settle hold s** (default 0.75) before evaluating the next correction.
+Commands carry across waypoints; each run starts from the measured position and known magnet pose.
+Arrival uses the existing arrival tolerance/hold and Hold speed settings. A 1 mm command change
+does not guarantee 1 mm robot travel. PID gain/integral controls are disabled in incremental mode;
+Period, velocity filter and motor deadband remain shared.
+
+**Max offset mm** (default 5) bounds additional command offset from the waypoint and command lead
+over the measured position. **Step timeout s** (default 10) limits a ramp plus its settling wait;
+it must exceed Step/Rate + Settle hold. The run stops on optimizer saturation, a timeout,
+an offset limit, or three settled steps each improving error by less than 0.1 mm
+(scaled down to 10% of Step for steps smaller than 1 mm). Unsent motor-deadband holds do not
+count as applied steps. Tracking loss holds the last pose and requires fresh settling before
+resuming; passing the waypoint cancels an unfinished ramp. CSV control mode and saved telemetry
+identify the selected controller, phase, proposed/applied command and progress checks.
+At run start, the measured position `p0` and last-sent magnet inputs `c0 = cos(theta0)`
+are fixed anchors. For each ratio/orientation, a nominal optimizer reference is calculated
+at `p0`, with no motor command. Subsequent commands use
+`c = c0 + (c_opt(optimizer_target) - c_opt(p0))`, then `theta = acos(c)`.
+Thus zero displacement from the anchor reproduces the real starting magnet pose;
+the model/physical position discrepancy is not discarded. Input differences are scaled
+together if needed to stay in the physical cosine range [0,1]. This bounded anchoring
+does not guarantee the nominal optimizer's stiffness after applying the real-pose offset.
+The anchor, integral and velocity history persist across waypoints. Each new run captures
+a fresh anchor and resets the XY integral. Cargo mode supplies the cargo-center measurement.
+
+Tab 4 defaults are Kp **0.25 mm/mm**, Ki **0.02/s**, Kd **1.5 s**, integral limit **10 mm per axis**,
+1.5 mm arrival tolerance, 1 second in-range hold, and 0.5 mm/s PID hold speed.
+Set **Arrival tolerance (mm)** and **In-range hold (s)** in the main tab.
+The camera pop-out's annotation row contains checkboxes only; its duplicate tolerance and hold inputs are removed.
+Both camera views share switches for desired lines, moving ROI, commanded point, robot trails,
+calibration boundary, desired points, waypoint, robot markers, group center/axes,
+cargo outline and crop guide. These switches affect drawing, not tracking or control.
+**Robot marker** selects Rectangle (Tab 4 default, using detection bounding boxes) or Cross.
+**Center trail** shows the measured robot-group centroid path in white, independently of robot trails.
+It retains up to 300 observations, breaks at tracking loss or camera gaps, and clears when tracking resets.
+**Group center** and **Spread axes** are separate switches: hide the spread angle lines while keeping
+the center marker and measurements. The selections also apply to offline annotation exports.
+Tab 4 keeps text off the camera image and its annotated recordings: robot IDs/coordinates,
+point labels, group measurements and spread labels are not drawn over the scene.
+The top Control details panel shows group XY, spread ratio, strong/weak spread, spread angle,
+cargo measurements and waypoint XY alongside speed and the other control data.
+Larger arrival tolerances allow earlier waypoint advance.
+
+GUI005 **Start recording** saves one clean, uncropped camera video (`*_camera.mp4`),
+all processed tracking/control observations (`*_tracking.csv`), and recording/calibration metadata
+(`*_recording.json`). Keep these three files together. Live recording does not draw annotations
+or encode extra annotated/overlay videos. Video encoding and buffered CSV writes run on a background
+worker; **Max video FPS** (default 5) caps encoded frames without decimating observation data.
+An observation is each tracking result processed by the GUI, not every frame produced by the camera.
+The bounded queue stops recording with an explicit error if storage/encoding cannot keep up;
+the metadata records accepted, logged and rejected observation counts and any error.
+Stop/save drains queued observations in the background. Closing the GUI waits for finalization.
+The recording toolbar is pinned directly under Camera view in both Control and Trajectory Track.
+The remaining controls and preview scroll vertically so lower settings remain accessible on shorter screens.
+
+CSV includes robot pixel/mm positions and bounding boxes; group center in pixels/mm;
+spread ratio, strong/weak spread and angle; cargo position, dimensions and orientation;
+desired ratio/orientation, waypoint, ROI, error, speed, correction, optimizer allocation,
+calculated/sent motor angles and timestamps. `annotation_snapshot_json` on the first robot row
+of every observation also preserves calibration, desired path, full detections, group axes,
+cargo outline/direction, waypoint/commanded pixels, annotation switches and the control telemetry.
+`recording_frame` is the exact zero-based video frame index, or blank for a CSV-only observation.
+`capture_monotonic_s` and `recording_time_s` give actual capture timing; MP4 playback is constant FPS
+and can differ from elapsed time if the camera/control pipeline delivers frames irregularly.
+
+After stopping control and finalizing recording, open **5. Export recordings** and **Load recording**
+to select `*_camera.mp4` with its matching CSV and metadata beside it. This tab has independent
+checkboxes for paths, points, ROI, calibration boundary, robot markers/trails, center trail, group
+center, spread axes, cargo, commanded point, waypoint and text labels, plus Rectangle/Cross selection.
+Use the frame slider and **Preview** to inspect overlays and actual capture time in seconds.
+**Export / Save video** saves a new MP4 using the same renderer/options; **Save preview PNG** saves
+the displayed frame at source resolution. **Apply saved crop** optionally crops preview/export;
+original recordings and CSV remain intact. Detection/control are not rerun. Trails are rebuilt
+from every CSV observation, including those between encoded frames. Loading, preview and video
+export run in the background with cancellation. Interrupted exports retain their partial output;
+existing video outputs are never overwritten. This tab requires the new recording/snapshot format.
+The former Annotate saved recording button has been removed from the live control toolbars.
+Tab 4 hides the unused Cargo Kp and Max correction controls; cargo uses the same XY PID settings as robots.
+Kp stays fixed: persistent error builds the bounded integral correction instead.
+For example, a constant 1 mm error adds 0.02 mm of correction per second while unconstrained.
+After 3 seconds below 0.1 mm/s outside arrival tolerance, control details report a stall
+and whether the integral is building, disabled, at its limit, or constrained by optimizer inputs.
+Motor-deadband holds still accumulate integral when the optimizer is unconstrained.
+Motion, arrival, tracking loss, a camera gap over 1 second, or a new waypoint clears the stall timer.
+Choose arrival tolerance above measured tracking noise; exact zero is not a practical arrival rule.
+There is no angle-rate limiter. Gains now produce XY correction, not force; old force
+gain values are not interchangeable. PID uses full error outside the reached/hold condition.
+If the optimized command fails workspace validation or tracking changes substantially
+during optimization, the last sent pose is held. Diagnostics include XY correction,
+XY integral, anchor position/angles, optimizer target and input allocation fraction.
+These are starting values for hardware testing, not a guarantee of settling accuracy.
+The known pose is shared across calibration, Control and Trajectory Track. This
+serial path records last-sent angles, not encoder readback. After a fresh serial
+connection or unknown/failed transmission, send Center or a calibration move once
+before starting the trajectory. The controller never invents starting angles.
 These are conservative starting settings; actual overdamping depends on the
 robot/cargo dynamics and requires tuning on hardware. Manual and Preview modes
-must be off. Waypoints are synthesized during the run rather than using the
-endpoint-only precalculation cache. Tab 3 retains its original progression.
+must be off. Tab 3 retains its original controller and progression.
+Tab 4's **Center** button, also in the pop-out's Path controls, sends one direct
+reset command to hardware XY (0, 0) with ratio 1. It needs only the selected
+hardware case and serial connection, without camera frames, pin calibration or
+robot/cargo detection. It bypasses waypoint stepping and PID feedback, and
+restores the loaded sequence afterward.
 Camera input and calibration are shared. Only one workspace can run or prepare
 motor control at a time. Hidden idle workspaces cache the latest camera frame
 without running vision or accumulating measurements; open pop-outs, active runs,
@@ -458,7 +616,7 @@ include cargo type, angle validity, angle, length and width; cargo orientation i
 separate from group spread orientation. Position feedback still controls the
 cargo center; orientation feedback is not enabled.
 Place the robot ROI and set the robot count
-as usual; red pixels are excluded from robot detection. Cargo mode uses bounded
+as usual; red pixels are excluded from robot detection. In tab 3, Cargo mode uses bounded
 position corrections to the commanded equilibrium point: default Kp 0.2,
 maximum correction 10 mm, slew 1 mm/s and period 0.5 s. Click **Control on** to
 enable corrections. Arrival and feedback then use the cargo center; cargo loss

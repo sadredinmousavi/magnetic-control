@@ -1,4 +1,4 @@
-"""Carry central cargo on an upper semicircle and lower half-star path."""
+"""Carry central cargo on a circle-star path, reduced by 20 percent."""
 
 import numpy as np
 
@@ -12,7 +12,8 @@ from .cargo_path_helpers import (
 )
 
 
-PATH_RADIUS = 0.055
+PATH_SCALE = 0.8
+PATH_RADIUS = 0.055 * PATH_SCALE
 UPPER_POINT_COUNT = 13
 
 # Travel from the left junction to the right junction over the upper circle.

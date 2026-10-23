@@ -21,6 +21,8 @@ class ArrivalGate:
         self.error_mm = None
         self.waiting_for_next = False
         self.next_requested = False
+        self.skip_requested = self.last_advance_skipped = False
+        self.skip_count = 0
         self.positions = None
         self.loss_generation = 0
         self.settling = None
@@ -29,10 +31,25 @@ class ArrivalGate:
     @property
     def advance_due(self):
         with self.condition:
-            return self.next_requested and self.clock() >= self.next_not_before
+            return self.skip_requested or (self.next_requested and self.clock() >= self.next_not_before)
+
+    def request_skip(self):
+        with self.condition:
+            if self.target is None or self.skip_requested or self.last_advance_skipped:
+                return False
+            self.skip_requested = self.next_requested = True
+            self.skip_count += 1
+            self.condition.notify_all()
+            return True
+
+    def consume_advance(self):
+        with self.condition:
+            self.last_advance_skipped = self.skip_requested
+            self.skip_requested = self.next_requested = self.waiting_for_next = False
 
     def prepare_point(self, *, preserve_next=False):
         with self.condition:
+            self.skip_requested = self.last_advance_skipped = False
             self.target = None
             self.next_not_before = 0.
             self.observed_at = self.inside_since = self.error_mm = None
@@ -46,6 +63,7 @@ class ArrivalGate:
         if not np.isfinite(minimum_wait_s) or minimum_wait_s < 0:
             raise ValueError('Minimum point wait must be finite and nonnegative.')
         with self.condition:
+            self.skip_requested = self.last_advance_skipped = False
             self.target = np.asarray(target_xy_m, dtype=float)
             self.armed_at = self.clock()
             self.next_not_before = self.armed_at+minimum_wait_s
@@ -121,7 +139,7 @@ class ArrivalGate:
                 self.waiting_for_next = True
                 return bool(active())
             while active():
-                if self._ready():
+                if self.skip_requested or self._ready():
                     self.waiting_for_next = True
                     return True
                 self.condition.wait(.1)
@@ -138,8 +156,8 @@ class ArrivalGate:
     def wait_for_next(self, active):
         with self.condition:
             while active():
-                if self.advance_due and (not self.require_arrival or self._ready()):
-                    self.next_requested = self.waiting_for_next = False
+                if self.advance_due and (self.skip_requested or not self.require_arrival or self._ready()):
+                    self.consume_advance()
                     return True
                 if self.require_arrival and not self._ready():
                     self.next_requested = False

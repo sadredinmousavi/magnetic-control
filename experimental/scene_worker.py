@@ -17,7 +17,8 @@ def analyze_scene(job):
     cargo_tracker = RedCargoTracker()
     cargo_tracker.center = settings['cargo_center']
     cargo = None
-    if settings['cargo_enabled']:
+    cargo_mode = settings.get('target', 'Robots') == 'Cargo center'
+    if cargo_mode:
         mask, bounds = None, None
         if settings['workspace'] is not None:
             cx, cy, radius = settings['workspace']
@@ -25,16 +26,20 @@ def analyze_scene(job):
             cv2.circle(mask, tuple(np.rint([cx, cy]).astype(int)), round(radius), 255, -1)
             bounds = (int(cx-radius)-2, int(cy-radius)-2, int(cx+radius)+3, int(cy+radius)+3)
         cargo = cargo_tracker.process(frame, settings['cargo_area'], settings['cargo_radius'],
-                                     mask=mask, bounds=bounds)
+                                     mask=mask, bounds=bounds,
+                                     roi=(*tracker.center, tracker.radius),
+                                     contrast_threshold=tracker.contrast_threshold)
         red_mask = cargo_tracker.detector.last_blob_mask
-        if red_mask is not None:
-            tracker.excluded_mask = cv2.dilate(red_mask, np.ones((5, 5), np.uint8))
         if cargo is not None:
             cargo['xy_cm'] = tuple(tracker.coordinates([cargo['center']])[0]) if tracker.axes is not None else None
             cargo = cargo_geometry(cargo, red_mask, tracker.axes, settings['cargo_shape'])
-    # Both measurements use exactly this frame, and are published as one result.
-    detections, center, group_xy = tracker.process(frame)
-    geometry = swarm_geometry(detections, tracker.count, tracker.axes)
+    if cargo_mode:
+        detections, center, group_xy, geometry = [], None if cargo is None else cargo['center'], None, None
+        if center is not None:
+            tracker.center = np.asarray(center, float)
+    else:
+        detections, center, group_xy = tracker.process(frame)
+        geometry = swarm_geometry(detections, tracker.count, tracker.axes)
     if geometry is not None:
         group_xy = tuple(geometry['center_mm'] / 10)
     return dict(job, tracker=tracker, cargo_tracker=cargo_tracker, cargo=cargo,

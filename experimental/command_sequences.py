@@ -138,7 +138,22 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
             command = feedback.begin_point(step, correction,
                                            lambda value, point=index: on_correction(point, value))
             feedback.publish(desired_xy_mm=(np.asarray(step.target_xy_m) * 1000).tolist(),
-                             ratio=step.ratio, angle_deg=step.angle_deg, state='Calculating initial pose')
+                             ratio=step.ratio, angle_deg=step.angle_deg,
+                             state='Tracking from applied angles' if getattr(feedback, 'incremental_angles', False) is True
+                             else 'Calculating initial pose')
+        if feedback is not None and getattr(feedback, 'incremental_angles', False) is True:
+            if arrival_gate is None:
+                raise ValueError('Continuous incremental control requires an arrival gate.')
+            # A waypoint changes only the reference. No equilibrium pose is synthesized or sent.
+            arrival_gate.arm(step.target_xy_m, preserve_next=False, minimum_wait_s=step.wait_seconds)
+            report('waiting_arrival', index, None)
+            if not feedback.wait_at_target(step, commander, case_name, arrival_gate, active,
+                                          lambda value: report('corrected', index, value)):
+                return 'stopped'
+            if arrival_gate.last_advance_skipped:
+                report('waypoint_skipped', index, dict(target_xy_m=step.target_xy_m, error_mm=arrival_gate.error_mm))
+            report('completed', index, feedback.last_result)
+            continue
         def sent(result):
             on_correction(index, correction.tolist())
             if arrival_gate is not None:
@@ -181,5 +196,7 @@ def execute_xy_sequence(steps, commander, case_name, *, active, report, arrival_
                 report("arrived", index, None)
                 if not arrival_gate.wait_for_next(active):
                     return "stopped"
+        if arrival_gate is not None and arrival_gate.last_advance_skipped:
+            report('waypoint_skipped', index, dict(target_xy_m=step.target_xy_m, error_mm=arrival_gate.error_mm))
         report("completed", index, result)
     return "finished"

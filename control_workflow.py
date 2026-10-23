@@ -5,6 +5,7 @@ import threading
 import time
 
 import numpy as np
+from scipy.optimize import lsq_linear
 
 from case_loader import build_common_config, unpack_target_schedule_entry, validate_target_schedule
 from functions_main import (
@@ -78,9 +79,42 @@ def calculate_point_control(params, target_xy_m, *, ratio=1.0, angle_deg=None):
     return result.opt_infos[0]
 
 
+def calculate_anchored_xy_control(params, target_xy_m, *, anchor_xy_m, anchor_angles_deg,
+                                  baseline_angles_deg, ratio=1., angle_deg=None):
+    """Apply the original optimizer's input difference to the real starting pose."""
+    target, anchor = np.asarray(target_xy_m, float), np.asarray(anchor_xy_m, float)
+    angles, baseline = np.asarray(anchor_angles_deg, float), np.asarray(baseline_angles_deg, float)
+    if (target.shape != (2,) or anchor.shape != (2,) or angles.ndim != 1 or not angles.size
+            or angles.shape != baseline.shape or not np.isfinite([target, anchor]).all()
+            or not np.isfinite([angles, baseline]).all()
+            or np.any(angles < 0) or np.any(angles > 90)
+            or np.any(baseline < 0) or np.any(baseline > 90)):
+        raise ValueError('Anchored XY control requires finite XY and matching model-angle vectors.')
+    result = (dict(angles_deg=baseline) if np.array_equal(target, anchor) else
+              calculate_point_control(params, target, ratio=ratio, angle_deg=angle_deg))
+    nominal = np.asarray(result['angles_deg'], float)
+    if (nominal.shape != angles.shape or not np.isfinite(nominal).all()
+            or np.any(nominal < 0) or np.any(nominal > 90)):
+        raise ValueError('Optimizer returned invalid angles for anchored XY control.')
+    actual_inputs = np.cos(np.deg2rad(angles))
+    delta = np.cos(np.deg2rad(nominal))-np.cos(np.deg2rad(baseline))
+    fraction = 1.
+    for value, change in zip(actual_inputs, delta):
+        if change > 0:
+            fraction = min(fraction, (1-value)/change)
+        elif change < 0:
+            fraction = min(fraction, -value/change)
+    fraction = float(np.clip(fraction, 0., 1.))
+    inputs = np.clip(actual_inputs+fraction*delta, 0., 1.)
+    return dict(angles_deg=np.rad2deg(np.arccos(inputs)), u_values=inputs,
+                nominal_angles_deg=nominal, anchor_xy_m=anchor, anchor_angles_deg=angles,
+                optimizer_xy_m=target, allocation_fraction=fraction,
+                allocation_mode='anchored_xy_optimizer', force_compensated=False)
+
+
 def calculate_force_pid_control(params, target_xy_m, measured_xy_m, applied_angles_deg,
                                 reference_inputs, pid_force_n, *, max_angle_step_deg=10.,
-                                ratio=1., angle_deg=None):
+                                ratio=1., angle_deg=None, incremental=False):
     """Allocate only the PID force at measured XY; no disturbance/feedforward."""
     started = time.monotonic()
     point_params = dict(params, TARGET_SCHEDULE=[(0., np.asarray(target_xy_m), 1., None)],
@@ -91,6 +125,41 @@ def calculate_force_pid_control(params, target_xy_m, measured_xy_m, applied_angl
     if angles.shape != (cfg.NUM_SOURCES,) or not np.isfinite(angles).all() or np.any(angles < 0) or np.any(angles > 90):
         raise ValueError('Force PID needs last sent model angles in [0,90] degrees.')
     applied = np.cos(np.deg2rad(angles))
+    if incremental:
+        requested = np.asarray(pid_force_n, float)
+        measured = np.asarray(measured_xy_m, float)
+        if (requested.shape != (2,) or measured.shape != (2,)
+                or not np.isfinite([requested, measured]).all()
+                or not np.isfinite(max_angle_step_deg) or not 0 < max_angle_step_deg <= 90):
+            raise ValueError('Incremental force PID requires finite XY/force and a positive angle limit.')
+        A = build_actuation_matrix(measured, sources, cfg.C_F)
+        if not np.isfinite(A).all():
+            raise ValueError('Force coefficients are invalid at the measured position.')
+        current_force = A @ applied
+        change = requested-current_force
+        lower = np.cos(np.deg2rad(np.minimum(90., angles+max_angle_step_deg)))-applied
+        upper = np.cos(np.deg2rad(np.maximum(0., angles-max_angle_step_deg)))-applied
+        scale = max(float(np.linalg.norm(A)), float(np.linalg.norm(change)), 1e-30)
+        # Solve for input CHANGES around the applied pose, using A at measured XY.
+        # The small regularizer selects a nearby solution in the underdetermined system.
+        solve = lsq_linear(np.vstack((A/scale, 1e-4*np.eye(len(applied)))),
+                           np.concatenate((change/scale, np.zeros(len(applied)))),
+                           bounds=(lower, upper), tol=1e-12, max_iter=100)
+        controls = applied+solve.x
+        if (not solve.success or not np.isfinite(controls).all()
+                or np.any(solve.x < lower-1e-9) or np.any(solve.x > upper+1e-9)):
+            raise ValueError('Incremental force allocation failed; last pose is held.')
+        predicted = A @ controls
+        H = calculate_potential_hessian(measured, sources, cfg.C_F, controls)
+        return dict(angles_deg=np.rad2deg(np.arccos(np.clip(controls, 0, 1))),
+                    u_values=controls, reference_inputs=applied, current_force_n=current_force,
+                    force_adjustment_requested_n=change, delta_inputs=solve.x,
+                    requested_force_n=requested, predicted_force_n=predicted,
+                    applied_force_n=current_force, applied_force_residual_n=float(np.linalg.norm(change)),
+                    force_residual_n=float(np.linalg.norm(predicted-requested)),
+                    stiffness_eigenvalues=np.linalg.eigvalsh(H), allocation_position_m=measured,
+                    allocation_mode='incremental_force', allocation_iterations=solve.nit,
+                    force_compensated=True, calculation_time_s=time.monotonic()-started)
     if reference_inputs is None:
         reference_inputs = calculate_point_control(params, target_xy_m, ratio=ratio, angle_deg=angle_deg)['u_values']
     requested = np.asarray(pid_force_n, float)
@@ -127,8 +196,8 @@ class ForcePIDFeedback:
 
     def __init__(self, *, validate=lambda target: None, manual=False,
                  max_angle_step_deg=10., preview_only=False, clock=time.monotonic,
-                 pid=None, angle_rate_deg_s=20., motor_deadband_deg=.1, hold_speed_mm_s=.5,
-                 slow_motion_assist=False):
+                 pid=None, angle_rate_deg_s=20., motor_deadband_deg=.02, hold_speed_mm_s=.5,
+                 slow_motion_assist=False, incremental_angles=False, allocation_position=None):
         if not np.isfinite(max_angle_step_deg) or not 0 < max_angle_step_deg <= 90:
             raise ValueError('Maximum angle step must be in (0, 90] degrees.')
         self.validate, self.manual = validate, bool(manual)
@@ -140,16 +209,18 @@ class ForcePIDFeedback:
         self.last_sent_u = np.zeros(2)
         self.last_sent_at, self.last_result, self.reference_inputs = None, None, None
         self.on_applied = lambda correction: None
-        if (not np.isfinite(angle_rate_deg_s) or angle_rate_deg_s <= 0
+        if (not np.isfinite(angle_rate_deg_s) or angle_rate_deg_s < 0
                 or not np.isfinite(motor_deadband_deg) or motor_deadband_deg < 0
                 or not np.isfinite(hold_speed_mm_s) or hold_speed_mm_s <= 0):
-            raise ValueError('Angle rate/hold speed must be positive; motor deadband nonnegative.')
+            raise ValueError('Angle rate/deadband must be nonnegative; hold speed must be positive. Rate 0 disables limiting.')
         self.pid = pid or MagneticForcePID()
         self.hold_speed_mm_s = float(hold_speed_mm_s)
         self.angle_rate, self.motor_deadband = float(angle_rate_deg_s), float(motor_deadband_deg)
         self.last_control_at = None
         self.last_control_sample = None
         self.slow_motion_assist = bool(slow_motion_assist)
+        self.incremental_angles = bool(incremental_angles)
+        self.allocation_position = allocation_position
         self._reset_slow_assist()
 
     def _reset_slow_assist(self):
@@ -208,6 +279,19 @@ class ForcePIDFeedback:
     def begin_point(self, step, correction, on_applied=lambda correction: None):
         command = np.asarray(step.target_xy_m) + np.asarray(correction)/1000
         self.validate(command)
+        if self.incremental_angles:
+            if self.last_result is None:
+                raise ValueError('Current magnet pose is unknown. Send Center or a calibration move once first.')
+            with self.lock:
+                self.current_step, self.pending_manual = step, None
+                self.command_revision += 1
+                self.on_applied = on_applied
+                self.last_sent_u = np.zeros(2)
+                self.publish(desired_xy_mm=(np.asarray(step.target_xy_m)*1000).tolist(),
+                             commanded_xy_mm=None, correction_mm=[0., 0.],
+                             integral_force_n=self.pid.integral_force.tolist(),
+                             inherited_integral_force_n=self.pid.integral_force.tolist())
+            return np.asarray(step.target_xy_m)
         with self.lock:
             self.current_step, self.pending_manual = step, None
             self.command_revision += 1
@@ -248,19 +332,20 @@ class ForcePIDFeedback:
         if self.last_result is None and initial_result is not None:
             self.initial_sent(initial_result)
         target_mm = np.asarray(step.target_xy_m)*1000
-        self.publish(desired_xy_mm=target_mm.tolist(), commanded_xy_mm=(target_mm+self.last_sent_u).tolist(),
+        self.publish(desired_xy_mm=target_mm.tolist(), commanded_xy_mm=None if self.incremental_angles else (target_mm+self.last_sent_u).tolist(),
                      correction_mm=self.last_sent_u.tolist(), ratio=step.ratio, angle_deg=step.angle_deg)
         while active():
             with gate.condition:
-                if gate.advance_due and (not gate.require_arrival or gate._ready()):
-                    gate.next_requested = gate.waiting_for_next = False
+                if gate.advance_due and (gate.skip_requested or not gate.require_arrival or gate._ready()):
+                    gate.consume_advance()
                     return True
                 positions = None if gate.positions is None else gate.positions.copy()
                 sample, loss_generation = gate.observed_at, gate.loss_generation
             with self.lock:
                 pending, revision = self.pending_manual, self.command_revision
             enabled = self.enabled.is_set() and not self.manual
-            self.publish(mode='manual' if self.manual else 'force_pid')
+            self.publish(mode='manual' if self.manual else getattr(self, 'control_mode',
+                         'incremental_force_pid' if self.incremental_angles else 'force_pid'))
             def request_active():
                 with gate.condition:
                     return active() and not gate.advance_due and self.command_revision == revision
@@ -341,12 +426,14 @@ class ForcePIDFeedback:
             return
         self.last_control_at = self.clock()
         self.last_control_sample = sample
-        proposal = self.pid.propose(step.target_xy_m, tolerance_m=gate.tolerance_mm/1000)
+        control_tolerance = 0. if self.incremental_angles else gate.tolerance_mm/1000
+        proposal = self.pid.propose(step.target_xy_m, tolerance_m=control_tolerance)
         scale = self._slow_motion_scale(float(np.linalg.norm(error)*1000), speed, sample, gate.tolerance_mm)
-        control_error = error*max(0., 1-gate.tolerance_mm/max(float(np.linalg.norm(error)*1000), 1e-30))
+        control_error = error*max(0., 1-control_tolerance/max(float(np.linalg.norm(error)), 1e-30))
         proposal['pid_force_n'] = proposal['pid_force_n'] + (scale-1.)*self.pid.kp*control_error
         elapsed = self.pid.period if self.last_sent_at is None else max(.001, self.clock()-self.last_sent_at)
-        max_step = min(self.max_angle_step_deg, self.angle_rate*elapsed)
+        max_step = (self.max_angle_step_deg if self.angle_rate == 0
+                    else min(self.max_angle_step_deg, self.angle_rate*elapsed))
         def valid():
             with gate.condition:
                 return (active() and self.enabled.is_set() and not self.manual
@@ -376,24 +463,210 @@ class ForcePIDFeedback:
                          **{key: np.asarray(result[key]).tolist() for key in (
                              'requested_force_n', 'predicted_force_n', 'force_residual_n',
                              'stiffness_eigenvalues', 'calculation_time_s')})
+            self.publish(**{key: np.asarray(result[key]).tolist() for key in (
+                'current_force_n', 'force_adjustment_requested_n', 'delta_inputs', 'allocation_position_m') if key in result})
         self.publish(state='Calculating force PID', force_observation_monotonic_s=sample,
                      observation_age_s=self.clock()-sample,
                      force_kp_n_m=float(self.pid.kp*scale), force_ki_n_m_s=float(self.pid.ki), force_kv_n_s_m=float(self.pid.kv))
         try:
+            allocation_position = measured if self.allocation_position is None else self.allocation_position()
+            if allocation_position is None:
+                raise ValueError('Robot position is unavailable for force allocation.')
             commander.move_force_pid(
-                case_name, step.target_xy_m, measured, self.last_result['angles_deg'], self.reference_inputs,
+                case_name, step.target_xy_m, allocation_position, self.last_result['angles_deg'], self.reference_inputs,
                 proposal['pid_force_n'],
                 max_angle_step_deg=max_step, ratio=step.ratio, angle_deg=step.angle_deg,
                 zero_angle_deg=step.zero_angle_deg, active=valid, on_calculated=calculated,
                 on_sent=lambda result: commit(result, sent=True),
                 on_held=lambda result: commit(result, sent=False), motor_deadband_deg=self.motor_deadband,
-                preview_only=self.preview_only)
+                preview_only=self.preview_only,
+                **({'incremental': True} if self.incremental_angles else {}))
             if self.preview_only:
                 self.publish(state='Preview only — force PID not sent')
             elif not accepted[0]:
                 self.publish(state='Force PID discarded — stale frame, tracking or mode changed')
         except ValueError as error:
             self.publish(state=f'Force PID held: {error}')
+        finally:
+            self.publish(control_cycle_time_s=self.clock()-self.last_control_at)
+
+
+class OptimizerXYFeedback(ForcePIDFeedback):
+    """Position PID output in metres, followed by anchored equilibrium optimization."""
+    control_mode = 'anchored_xy_optimizer_pid'
+
+    def __init__(self, *, speed_limit_mm_s=None, brake_gain_s=1.5, max_brake_mm=2., **kwargs):
+        if (speed_limit_mm_s is not None and (not np.isfinite(speed_limit_mm_s) or speed_limit_mm_s <= 0)
+                or not np.isfinite(brake_gain_s) or brake_gain_s <= 0
+                or not np.isfinite(max_brake_mm) or max_brake_mm <= 0):
+            raise ValueError('Speed limit, brake gain and maximum brake offset must be finite and positive.')
+        self.speed_limit_mm_s = speed_limit_mm_s
+        self.brake_gain_s, self.max_brake_m = float(brake_gain_s), float(max_brake_mm)*.001
+        self.speed_braking = False
+        super().__init__(incremental_angles=True, **kwargs)
+        self.anchor_xy = self.anchor_angles = None
+        self.baselines = {}
+
+    def _reset_slow_assist(self):
+        super()._reset_slow_assist()
+        self.speed_braking = False
+        self.publish(speed_braking=False, speed_limit_mm_s=self.speed_limit_mm_s)
+        self.stall_since = self.stall_sample = None
+        self.publish(stalled=False, stall_duration_s=0., stall_reason=None)
+
+    def _observe_stall(self, error_mm, speed_mm_s, sample, tolerance_mm):
+        # Detect lack of measured motion, not lack of changes in the command.
+        # Only consecutive fresh observations may extend this timer.
+        if error_mm <= tolerance_mm or speed_mm_s >= .1:
+            self._reset_slow_assist()
+            return
+        if self.stall_sample is None or not 0 <= sample-self.stall_sample <= 1.:
+            self.stall_since = sample
+        self.stall_sample = sample
+        duration = sample-self.stall_since
+        self.publish(stalled=duration >= 3., stall_duration_s=duration, stall_reason=None)
+
+    def _stall_status(self, fraction, sent, error):
+        if not self.snapshot().get('stalled'):
+            return ''
+        if fraction < 1.-1e-9:
+            reason = 'optimizer input limit; integral constrained'
+        elif self.pid.ki == 0:
+            reason = 'Ki is zero; integral disabled'
+        elif np.any((np.abs(self.pid.integral_force) >= self.pid.integral_limit-1e-12)
+                    & (self.pid.integral_force*error > 0)):
+            reason = 'integral limit reached'
+        else:
+            reason = 'building integral' if sent else 'motor deadband; building integral'
+        self.publish(stall_reason=reason)
+        return '; stalled: '+reason
+
+    def seed_anchor(self, xy_m, pose):
+        self._reset_slow_assist()
+        self.anchor_xy = np.asarray(xy_m, float).copy()
+        self.anchor_angles = np.asarray(pose['angles_deg'], float).copy()
+        self.baselines.clear()
+        self.pid.reset()
+        self.initial_sent(pose)
+        self.last_sent_at = pose['sent_time_s']
+        self.publish(anchor_xy_mm=(self.anchor_xy*1000).tolist(),
+                     anchor_angles_deg=self.anchor_angles.tolist(), integral_xy_mm=[0., 0.])
+
+    def _speed_brake_needed(self):
+        if self.speed_limit_mm_s is None or not self.pid.velocity_ready:
+            self.speed_braking = False
+        else:
+            speed = float(np.linalg.norm(self.pid.velocity)*1000)
+            if speed > self.speed_limit_mm_s:
+                self.speed_braking = True
+            elif speed <= .8*self.speed_limit_mm_s:
+                self.speed_braking = False
+        self.publish(speed_braking=self.speed_braking, speed_limit_mm_s=self.speed_limit_mm_s)
+        return self.speed_braking
+
+    def _on_speed_brake(self):
+        """Subclasses cancel unfinished steps before a braking command."""
+
+    def _speed_brake_applied(self, applied_xy):
+        """Subclasses synchronize their command state after a braking write."""
+
+    def begin_point(self, step, correction, on_applied=lambda correction: None):
+        self._reset_slow_assist()
+        result = super().begin_point(step, correction, on_applied)
+        with self.lock:
+            self.telemetry.pop('integral_force_n', None)
+            self.telemetry.pop('inherited_integral_force_n', None)
+        self.publish(mode=self.control_mode, integral_xy_mm=(self.pid.integral_force*1000).tolist())
+        return result
+
+    def _continuous_update(self, step, commander, case_name, gate, active, report,
+                           measured, sample, loss_generation, revision):
+        if (not self.pid.velocity_ready or self.anchor_xy is None
+                or sample == self.last_control_sample
+                or (self.last_control_at is not None and self.clock()-self.last_control_at < self.pid.period)):
+            return
+        error = np.asarray(step.target_xy_m)-measured
+        braking = self._speed_brake_needed()
+        if not braking:
+            self._observe_stall(float(np.linalg.norm(error)*1000),
+                                float(np.linalg.norm(self.pid.velocity)*1000), sample, gate.tolerance_mm)
+        self.publish(position_error_mm=(error*1000).tolist(),
+                     velocity_xy_mm_s=(self.pid.velocity*1000).tolist())
+        if not braking and np.linalg.norm(error)*1000 <= gate.tolerance_mm and np.linalg.norm(self.pid.velocity)*1000 <= self.hold_speed_mm_s:
+            self.publish(state='Reached — holding optimizer pose')
+            return
+        self.last_control_at, self.last_control_sample = self.clock(), sample
+        if braking:
+            self._on_speed_brake()
+            offset = -self.brake_gain_s*self.pid.velocity
+            offset *= min(1., self.max_brake_m/max(float(np.linalg.norm(offset)), 1e-30))
+            target = measured+offset
+            correction = target-np.asarray(step.target_xy_m)
+            proposal = None  # Neither waypoint pull nor integral accumulation during braking.
+        else:
+            proposal = self.pid.propose(step.target_xy_m, tolerance_m=0.)
+            correction = proposal['pid_force_n']  # Generic PID arithmetic; units here are metres.
+            target = np.asarray(step.target_xy_m)+correction
+        self.publish(mode=self.control_mode, state='Speed braking — calculating optimizer' if braking else 'Calculating XY optimizer',
+                     correction_mm=(correction*1000).tolist(), proposed_xy_mm=(target*1000).tolist(),
+                     integral_xy_mm=(self.pid.integral_force*1000).tolist(),
+                     observation_age_s=self.clock()-sample,
+                     pid_gains=dict(kp=self.pid.kp, ki=self.pid.ki, kd=self.pid.kv))
+        def valid():
+            with gate.condition:
+                return (active() and self.enabled.is_set() and not self.manual
+                        and revision == self.command_revision and not gate.advance_due
+                        and gate.loss_generation == loss_generation and gate.positions is not None
+                        and len(gate.positions) == 1 and gate.observed_at is not None
+                        and self.clock()-gate.observed_at <= 1.
+                        and np.linalg.norm(gate.positions[0]-measured) <= .0005
+                        and (not braking or gate.observed_at == sample))
+        accepted = [False]
+        def commit(result, sent):
+            accepted[0] = True
+            fraction = result['allocation_fraction']
+            unmet = (1-fraction)*(target-self.anchor_xy)
+            if braking:
+                self.pid.committed_at = sample  # Freeze memory and prevent catch-up integration.
+            else:
+                self.pid.commit(proposal, correction, correction-unmet)
+            if sent:
+                self.initial_sent(result)
+                applied = self.anchor_xy+fraction*(target-self.anchor_xy) if braking else target
+                self.last_sent_u = (applied-np.asarray(step.target_xy_m))*1000
+                self.publish(commanded_xy_mm=(applied*1000).tolist(),
+                             sent_optimizer_xy_mm=(applied*1000).tolist())
+                if braking:
+                    self._speed_brake_applied(applied)
+                self.on_applied(self.last_sent_u.tolist())
+                report(result)
+            self.publish(integral_xy_mm=(self.pid.integral_force*1000).tolist(),
+                         allocation_fraction=result['allocation_fraction'],
+                         state=(('Speed braking — sent' if sent else 'Speed braking — motor deadband')
+                                + ('; optimizer input limit' if fraction < 1.-1e-9 else '') if braking else
+                                ('XY optimizer sent' if sent else 'XY optimizer holding — motor deadband')
+                                +self._stall_status(fraction, sent, error)))
+        try:
+            self.validate(target)
+            key = (step.ratio, step.angle_deg)
+            if key not in self.baselines:
+                self.baselines[key] = commander.calculate(case_name, self.anchor_xy,
+                                                          ratio=step.ratio, angle_deg=step.angle_deg)
+            if not valid():
+                self.publish(state='XY optimizer discarded — observation changed')
+                return
+            commander.move(case_name, target, ratio=step.ratio, angle_deg=step.angle_deg,
+                zero_angle_deg=step.zero_angle_deg, active=valid, preview_only=self.preview_only,
+                unchanged_angles_deg=self.last_result['angles_deg'], motor_deadband_deg=self.motor_deadband,
+                anchored_xy_request=dict(anchor_xy_m=self.anchor_xy, anchor_angles_deg=self.anchor_angles,
+                                         baseline_angles_deg=self.baselines[key]['angles_deg']),
+                on_calculated=lambda result: self.publish(calculated_angles=list(result['angles_deg']),
+                    allocation_fraction=result['allocation_fraction']),
+                on_sent=lambda result: commit(result, True), on_held=lambda result: commit(result, False))
+            if not accepted[0]:
+                self.publish(state='XY optimizer preview' if self.preview_only else 'XY optimizer discarded — observation changed')
+        except ValueError as error:
+            self.publish(state=f'{"Speed braking blocked" if braking else "XY optimizer held"}: {error}')
         finally:
             self.publish(control_cycle_time_s=self.clock()-self.last_control_at)
 
