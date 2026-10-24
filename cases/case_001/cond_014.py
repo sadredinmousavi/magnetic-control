@@ -19,5 +19,6 @@ PATH_POINTS = _source.PATH_POINTS.copy()
 # Preserve the pickup and route settings; the loader supplies Case 001's
 # base magnetic and microrobot parameters.
 PARAMS = deepcopy(_source.PARAMS)
+PARAMS["ANIMATION_TITLE"] = "Object Transport Through Equilibrium-Point Control"
 INITIAL_ROBOT_POSITIONS = PARAMS["INITIAL_ROBOT_POSITIONS"]
 TARGET_SCHEDULE = PARAMS["TARGET_SCHEDULE"]

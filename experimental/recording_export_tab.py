@@ -7,7 +7,7 @@ from tkinter import filedialog, ttk
 import cv2
 from PIL import Image, ImageTk
 
-from command_recording import RecordingPreview, annotate_recording, video_crop_circle
+from command_recording import RecordingPreview, annotate_recording, video_crop_circle, render_time_annotation
 from command_tab import CommandTab
 
 
@@ -18,6 +18,7 @@ class RecordingExportTab:
         self.thread = self.after_id = self.recording = self.preview_image = None
         self.cancel_event = threading.Event()
         self.frame_var = tk.DoubleVar(value=0.)
+        self.start_frame_var = tk.StringVar(value='0')
         self.marker_var = tk.StringVar(value='Rectangle')
         self.crop_var = tk.BooleanVar(value=True)
         self.circle_crop_var = tk.BooleanVar(value=False)
@@ -25,6 +26,10 @@ class RecordingExportTab:
         self.crop_center = None
         self.crop_placing = False
         self.preview_transform = None
+        self.time_position = (.03, .03)
+        self.time_bounds = self.time_drag_offset = None
+        self.preview_base = None
+        self.preview_elapsed = 0.
         header = tk.Frame(parent)
         header.pack(fill='x', padx=8, pady=5)
         self.load_button = tk.Button(header, text='Load recording', command=self.load_recording)
@@ -43,7 +48,7 @@ class RecordingExportTab:
                 ('Center trail', 'show_center_trail', True), ('Group center', 'show_group_center', True),
                 ('Spread axes', 'show_spread_axes', False), ('Cargo outline', 'show_cargo', True),
                 ('Commanded point', 'show_commanded', True), ('Waypoint', 'show_waypoint', True),
-                ('Text labels', 'show_labels', False)):
+                ('Text labels', 'show_labels', False), ('Elapsed time (drag in preview)', 'show_time', False)):
             variable = self.options[key] = tk.BooleanVar(value=default)
             self.option_widgets.append(tk.Checkbutton(controls, text=label, variable=variable,
                                                      command=self.preview, pady=0))
@@ -85,13 +90,59 @@ class RecordingExportTab:
         self.slider.pack(fill='x', padx=10)
         self.slider.bind('<ButtonRelease-1>', lambda event: self.preview())
         self.slider.bind('<KeyRelease>', lambda event: self.preview())
+        trim_bar = tk.Frame(parent)
+        trim_bar.pack(fill='x', padx=8, pady=3)
+        tk.Label(trim_bar, text='Export start frame (0-based):').pack(side='left')
+        self.start_frame_entry = tk.Spinbox(trim_bar, from_=0, to=0, width=8,
+                                           textvariable=self.start_frame_var, state='disabled')
+        self.start_frame_entry.pack(side='left', padx=4)
+        self.start_frame_entry.bind('<Return>', lambda event: self.preview())
+        self.start_apply_button = tk.Button(trim_bar, text='Apply start', command=self.preview, state='disabled')
+        self.start_apply_button.pack(side='left')
+        self.start_current_button = tk.Button(trim_bar, text='Use current frame as start',
+                                              command=self.use_current_as_start, state='disabled')
+        self.start_current_button.pack(side='left', padx=4)
+        tk.Label(trim_bar, text='Earlier frames are removed; time starts at 00.0 s.').pack(side='left', padx=4)
         self.status = tk.Label(parent, text='Load a recording, select overlays, preview, then export.',
                                anchor='w', width=1, background='#edf4ff')
         self.status.pack(fill='x', padx=8, pady=3)
         self.canvas = tk.Canvas(parent, background='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True, padx=8, pady=(0, 6))
         self.canvas.bind('<Configure>', lambda event: self.draw_preview())
-        self.canvas.bind('<Button-1>', self.place_crop)
+        self.canvas.bind('<Button-1>', self.begin_preview_drag)
+        self.canvas.bind('<B1-Motion>', self.drag_time)
+        self.canvas.bind('<ButtonRelease-1>', self.end_preview_drag)
+
+    def begin_preview_drag(self, event):
+        if self.crop_placing:
+            self.place_crop(event)
+            return
+        if self.busy or self.preview_transform is None or self.time_bounds is None:
+            return
+        left, top, scale = self.preview_transform
+        x, y = (event.x-left)/scale, (event.y-top)/scale
+        bx, by, width, height = self.time_bounds
+        if bx <= x <= bx+width and by <= y <= by+height:
+            self.time_drag_offset = (x-bx, y-by)
+            self.canvas.config(cursor='fleur')
+
+    def drag_time(self, event):
+        if self.time_drag_offset is None or self.busy:
+            return
+        left, top, scale = self.preview_transform
+        dx, dy = self.time_drag_offset
+        height, width = self.preview_base.shape[:2]
+        _, _, bw, bh = self.time_bounds
+        x = max(0, min(width-bw, (event.x-left)/scale-dx))
+        y = max(0, min(height-bh, (event.y-top)/scale-dy))
+        self.time_position = (x/width, y/height)
+        self.draw_preview()
+
+    def end_preview_drag(self, event):
+        if self.time_drag_offset is not None:
+            self.drag_time(event)
+            self.time_drag_offset = None
+            self.canvas.config(cursor='')
 
     def crop_corners(self):
         if self.recording is None:
@@ -139,7 +190,22 @@ class RecordingExportTab:
             self.change_crop()
 
     def selected_options(self):
-        return dict({key: variable.get() for key, variable in self.options.items()}, robot_marker=self.marker_var.get())
+        return dict({key: variable.get() for key, variable in self.options.items()},
+                    robot_marker=self.marker_var.get(), time_position=self.time_position)
+
+    def selected_start_frame(self):
+        try:
+            index = int(self.start_frame_var.get())
+        except ValueError:
+            raise ValueError('Export start frame must be a whole frame number.') from None
+        self.recording.time_origin(index)  # Validate against the loaded recording.
+        return index
+
+    def use_current_as_start(self):
+        if self.recording is None or self.busy:
+            return
+        self.start_frame_var.set(str(round(self.frame_var.get())))
+        self.preview()
 
     def update_frame_label(self):
         if self.recording is not None:
@@ -156,6 +222,8 @@ class RecordingExportTab:
         self.marker.config(state='disabled' if busy else 'readonly')
         self.crop_radius_entry.config(state='disabled' if busy else 'normal')
         loaded = not busy and self.recording is not None
+        for widget in (self.start_frame_entry, self.start_apply_button, self.start_current_button):
+            widget.config(state='normal' if loaded else 'disabled')
         self.crop_place_button.config(state='normal' if loaded else 'disabled')
         self.slider.config(state='normal' if loaded else 'disabled')
         self.preview_button.config(state='normal' if loaded else 'disabled')
@@ -210,10 +278,15 @@ class RecordingExportTab:
             self.crop_placing = False
             self.canvas.config(cursor='')
             self.preview_image = None
+            self.preview_base = None
+            self.time_bounds = self.time_drag_offset = None
+            self.time_position = (.03, .03)
             self.canvas.delete('all')
             self.file_label.config(text=str(recording.video_path))
             self.frame_var.set(0.)
-            self.slider.config(to=len(recording.frames)-1)
+            self.start_frame_var.set('0')
+            self.start_frame_entry.config(to=len(recording.frames)-1)
+            self.slider.config(from_=0, to=len(recording.frames)-1)
             self.set_busy(False)
             self.preview()
         self.start_task('Loading recording…', lambda cancel, progress: RecordingPreview(path, cancelled=cancel), loaded)
@@ -223,25 +296,34 @@ class RecordingExportTab:
             return
         recording, index = self.recording, round(self.frame_var.get())
         options = self.selected_options()
+        options['show_time'] = False  # Composite locally for smooth mouse dragging.
         try:
+            start_frame = self.selected_start_frame()
             crop, circle = self.selected_crop()
         except (ValueError, TypeError) as error:
             self.status.config(text=str(error))
             return
+        index = max(start_frame, min(len(recording.frames)-1, index))
+        self.slider.config(from_=start_frame)
+        self.frame_var.set(index)
         def shown(value):
-            self.preview_image, elapsed = value
+            self.preview_base, elapsed = value
+            self.preview_elapsed = elapsed
             self.draw_preview()
             self.update_frame_label()
             self.save_image_button.config(state='disabled' if self.crop_placing else 'normal')
-            self.status.config(text=f'Preview ready · frame {index} · capture {elapsed:.3f} s. Export uses these same options.')
+            self.status.config(text=f'Preview ready · frame {index} · export time {elapsed:.3f} s. Export uses these same options.')
             if self.crop_placing:
                 self.status.config(text='Click the preview to place the circle center; radius uses original camera pixels.')
         self.start_task('Rendering preview…',
-            lambda cancel, progress: recording.render(index, options=options, apply_crop=crop, crop_circle=circle, cancelled=cancel), shown)
+            lambda cancel, progress: recording.render(index, options=options, apply_crop=crop, crop_circle=circle,
+                                                       start_frame=start_frame, cancelled=cancel), shown)
 
     def draw_preview(self):
-        if self.preview_image is None or self.closed:
+        if self.preview_base is None or self.closed:
             return
+        self.preview_image = self.preview_base.copy()
+        self.time_bounds = render_time_annotation(self.preview_image, self.preview_elapsed, self.selected_options())
         image = self.preview_image
         width, height = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         scale = min(width/image.shape[1], height/image.shape[0])
@@ -255,6 +337,7 @@ class RecordingExportTab:
         if self.recording is None or self.busy or self.crop_placing:
             return
         try:
+            start_frame = self.selected_start_frame()
             crop, circle = self.selected_crop()
         except (ValueError, TypeError) as error:
             self.status.config(text=str(error))
@@ -268,7 +351,7 @@ class RecordingExportTab:
         options = self.selected_options()
         self.start_task('Exporting video…',
             lambda cancel, progress: annotate_recording(source, path, options=options, apply_crop=crop, crop_circle=circle,
-                                                       cancelled=cancel, progress=progress),
+                                                       start_frame=start_frame, cancelled=cancel, progress=progress),
             lambda count: self.status.config(text=f'Saved {count} annotated frames: {path}'))
 
     def save_preview(self):

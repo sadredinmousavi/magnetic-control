@@ -367,6 +367,8 @@ def render_saved_annotations(frame, snapshot, trails, center_trail, options=None
     """Shared renderer for the Export tab preview and exported video."""
     saved = dict(snapshot.get('options', {}))
     saved.update(options or {})
+    saved.pop('show_time', None)
+    saved.pop('time_position', None)
     saved.update(desired_path_dashed=True, desired_point_radius=5, group_center_size=24,
                  annotation_thickness=2, group_center_thickness=2)
     show_robots = saved.pop('show_robots', True)
@@ -387,6 +389,34 @@ def render_saved_annotations(frame, snapshot, trails, center_trail, options=None
     if show_waypoint and waypoint is not None:
         cv2.circle(frame, tuple(np.rint(waypoint).astype(int)), 6, (221, 136, 255), 2)
     return frame
+
+
+def render_time_annotation(frame, elapsed, options=None):
+    """Draw elapsed capture time after cropping; return its draggable bounds.
+
+    Position is the label's top-left in normalized output-image coordinates.
+    Clamp the whole label inside the image, including on small exports.
+    """
+    options = options or {}
+    if not options.get('show_time', False):
+        return None
+    height, width = frame.shape[:2]
+    text = f'Time : {elapsed:04.1f} s'
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    padding = min(10, max(1, min(width, height)//20))
+    (unit_width, unit_height), unit_baseline = cv2.getTextSize(text, font, 1., 1)
+    scale = max(.01, min(3., (width-2*padding-6)/unit_width,
+                             (height-2*padding-6)/(unit_height+unit_baseline)))
+    thickness = max(1, round(scale*1.5))
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    box_width, box_height = min(width, tw+2*padding), min(height, th+baseline+2*padding)
+    px, py = options.get('time_position', (.03, .03))
+    x = max(0, min(width-box_width, round(float(px)*width)))
+    y = max(0, min(height-box_height, round(float(py)*height)))
+    cv2.rectangle(frame, (x, y), (x+box_width-1, y+box_height-1), (0, 0, 0), -1)
+    cv2.putText(frame, text, (x+padding, y+padding+th), font, scale,
+                (255, 255, 255), thickness, cv2.LINE_AA)
+    return x, y, box_width, box_height
 
 
 class RecordingTrailState:
@@ -448,10 +478,19 @@ class RecordingPreview:
         finally:
             capture.release()
 
-    def render(self, frame_index, *, options=None, apply_crop=True, crop_circle=None, cancelled=lambda: False):
+    def time_origin(self, start_frame=None):
+        if start_frame is None:
+            return float(self.info['started_monotonic_s'])
+        if not isinstance(start_frame, int) or not 0 <= start_frame < len(self.frames):
+            raise ValueError('Export start frame is outside the recording.')
+        return self.observations[self.frames[start_frame]][1]
+
+    def render(self, frame_index, *, options=None, apply_crop=True, crop_circle=None,
+               start_frame=None, cancelled=lambda: False):
         frame_index = int(frame_index)
         if not 0 <= frame_index < len(self.frames):
             raise ValueError('Preview frame is outside the recording.')
+        origin = self.time_origin(start_frame)
         context = RecordingTrailState()
         for snapshot, stamp in self.observations[:self.frames[frame_index]+1]:
             if cancelled():
@@ -469,10 +508,13 @@ class RecordingPreview:
         circle = crop_circle if crop_circle is not None else self.info.get('settings', {}).get('crop_circle')
         if apply_crop and circle is not None:
             frame = CircularVideoCrop(tuple(self.info['source_size_px']), circle).apply(frame)
-        return frame, stamp-float(self.info['started_monotonic_s'])
+        elapsed = stamp-origin
+        render_time_annotation(frame, elapsed, options)
+        return frame, elapsed
 
 
-def annotate_recording(video_path, output_path, *, options=None, apply_crop=True, crop_circle=None, cancelled=lambda: False, progress=lambda count: None):
+def annotate_recording(video_path, output_path, *, options=None, apply_crop=True, crop_circle=None,
+                       start_frame=None, cancelled=lambda: False, progress=lambda count: None):
     """Render saved native-pixel snapshots without rerunning detection/control."""
     video_path, output_path = Path(video_path), Path(output_path)
     if not video_path.stem.endswith('_camera'):
@@ -481,6 +523,8 @@ def annotate_recording(video_path, output_path, *, options=None, apply_crop=True
     csv_path, metadata_path = base.with_name(base.name+'_tracking.csv'), base.with_name(base.name+'_recording.json')
     if output_path.exists():
         raise ValueError('Output already exists. Choose a new filename.')
+    if start_frame is not None and (not isinstance(start_frame, int) or start_frame < 0):
+        raise ValueError('Export start frame must be a nonnegative integer.')
     info = json.loads(metadata_path.read_text(encoding='utf-8'))
     size, fps = tuple(info['encoded_size_px']), float(info['video_fps'])
     crop_circle = (crop_circle if crop_circle is not None else info.get('settings', {}).get('crop_circle')) if apply_crop else None
@@ -488,7 +532,8 @@ def annotate_recording(video_path, output_path, *, options=None, apply_crop=True
     out_size = size if crop is None else tuple(v+v % 2 for v in crop.size)
     capture = cv2.VideoCapture(str(video_path))
     writer = None
-    count, context = 0, RecordingTrailState()
+    count, source_count, context = 0, 0, RecordingTrailState()
+    origin = float(info['started_monotonic_s']) if start_frame is None else None
     try:
         if not capture.isOpened():
             raise ValueError('Cannot open saved camera video.')
@@ -506,20 +551,29 @@ def annotate_recording(video_path, output_path, *, options=None, apply_crop=True
                 context.observe(snapshot, stamp)
                 if row.get('recording_frame', '') == '':
                     continue
-                if int(row['recording_frame']) != count:
+                if int(row['recording_frame']) != source_count:
                     raise ValueError('CSV/video frame sequence does not match.')
                 ok, frame = capture.read()
                 if not ok:
                     raise ValueError('Camera video ended before its CSV frame sequence.')
+                source_index = source_count
+                source_count += 1
+                if start_frame is not None and source_index < start_frame:
+                    continue
+                if origin is None:
+                    origin = stamp
                 render_saved_annotations(frame, snapshot, context.trails, context.center, options)
                 if crop is not None:
                     frame = crop.apply(frame)
                     frame = cv2.copyMakeBorder(frame, 0, out_size[1]-crop.size[1],
                                               0, out_size[0]-crop.size[0], cv2.BORDER_CONSTANT)
+                render_time_annotation(frame, stamp-origin, options)
                 writer.write(frame)
                 count += 1
                 progress(count)
         if count == 0:
+            if start_frame is not None:
+                raise ValueError('Export start frame is outside the recording; no frames exported.')
             raise ValueError('No saved video frames found in the recording CSV.')
         if capture.read()[0]:
             raise ValueError('Camera video has frames missing from its CSV.')

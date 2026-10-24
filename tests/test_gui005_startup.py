@@ -219,6 +219,20 @@ try:
             app.exports.save_preview()
         assert png.exists(), app.exports.status.cget('text')
         from types import SimpleNamespace
+        app.exports.options['show_time'].set(True)
+        app.exports.preview()
+        wait_for_export_task()
+        assert app.exports.preview_image.any()
+        left, top, scale = app.exports.preview_transform
+        x, y, width, height = app.exports.time_bounds
+        old_position = app.exports.time_position
+        app.exports.begin_preview_drag(SimpleNamespace(x=left+(x+2)*scale, y=top+(y+2)*scale))
+        app.exports.drag_time(SimpleNamespace(x=left+(x+2)*scale, y=top+50*scale))
+        app.exports.end_preview_drag(SimpleNamespace(x=left+(x+2)*scale, y=top+50*scale))
+        assert app.exports.time_position != old_position
+        assert app.exports.time_drag_offset is None
+        timed, _ = app.exports.recording.render(0, options=app.exports.selected_options())
+        np.testing.assert_array_equal(app.exports.preview_image, timed)
         app.exports.crop_radius_var.set('20')
         app.exports.begin_crop_placement()
         wait_for_export_task()
@@ -229,6 +243,29 @@ try:
         assert not app.exports.crop_placing
         assert app.exports.preview_image.shape == (40, 40, 3)
         assert app.exports.selected_crop() == (True, (30, 25, 20))
+        app.exports.frame_var.set(1)
+        app.exports.use_current_as_start()
+        wait_for_export_task()
+        assert app.exports.selected_start_frame() == 1
+        assert app.exports.preview_elapsed == 0.
+        assert float(app.exports.slider.cget('from')) == 1.
+        trimmed = Path(directory)/'trimmed.mp4'
+        with patch('recording_export_tab.filedialog.asksaveasfilename', return_value=str(trimmed)):
+            app.exports.export_video()
+        wait_for_export_task()
+        import cv2
+        capture = cv2.VideoCapture(str(trimmed))
+        try:
+            assert round(capture.get(cv2.CAP_PROP_FRAME_COUNT)) == 1
+        finally:
+            capture.release()
+        app.exports.start_frame_var.set('bad')
+        app.exports.preview()
+        assert 'whole frame number' in app.exports.status.cget('text')
+        app.exports.start_frame_var.set('0')
+        app.exports.preview()
+        wait_for_export_task()
+        assert app.exports.preview_elapsed == .2
     app.on_close()
 finally:
     try:

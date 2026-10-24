@@ -12,7 +12,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'experimental'))
-from command_recording import RawCommandRecording, annotate_recording, RecordingPreview, render_saved_annotations
+from command_recording import (RawCommandRecording, annotate_recording, RecordingPreview,
+                               render_saved_annotations, render_time_annotation)
 from command_tab import CommandTab
 
 
@@ -60,6 +61,57 @@ class RawRecordingTests(unittest.TestCase):
                 self.assertEqual(capture.get(cv2.CAP_PROP_FRAME_HEIGHT), 40)
             finally:
                 capture.release()
+            # Time uses capture timestamps, survives cropping, and matches export pixels.
+            options.update(show_time=True, time_position=(.5, .8))
+            timed, elapsed = recording.render(1, options=options, crop_circle=circle)
+            self.assertAlmostEqual(elapsed, .2)
+            timed_frames, times = [], []
+            def draw_time(frame, stamp, settings):
+                times.append(stamp)
+                result = render_time_annotation(frame, stamp, settings)
+                timed_frames.append(frame.copy())
+                return result
+            with patch('command_recording.render_time_annotation', side_effect=draw_time):
+                annotate_recording(recorder.paths[0], Path(directory)/'timed.mp4',
+                                   options=options, crop_circle=circle)
+            np.testing.assert_allclose(times, [0., .2, .4])
+            np.testing.assert_array_equal(timed_frames[1], timed)
+            # Trim at source frame 1: its real capture time becomes the new zero.
+            first, zero = recording.render(1, options=options, crop_circle=circle, start_frame=1)
+            second, later = recording.render(2, options=options, crop_circle=circle, start_frame=1)
+            self.assertEqual(zero, 0.)
+            self.assertAlmostEqual(later, .2)
+            timed_frames.clear()
+            times.clear()
+            trimmed_path = Path(directory)/'trimmed.mp4'
+            with patch('command_recording.render_time_annotation', side_effect=draw_time):
+                count = annotate_recording(recorder.paths[0], trimmed_path,
+                    options=options, crop_circle=circle, start_frame=1)
+            self.assertEqual(count, 2)
+            np.testing.assert_allclose(times, [0., .2])
+            np.testing.assert_array_equal(timed_frames[0], first)
+            np.testing.assert_array_equal(timed_frames[1], second)
+            capture = cv2.VideoCapture(str(trimmed_path))
+            try:
+                self.assertEqual(round(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 2)
+            finally:
+                capture.release()
+            with self.assertRaisesRegex(ValueError, 'start frame'):
+                recording.render(1, start_frame=len(recording.frames))
+            with self.assertRaisesRegex(ValueError, 'start frame'):
+                annotate_recording(recorder.paths[0], Path(directory)/'invalid.mp4', start_frame=-1)
+
+    def test_time_label_clamps_inside_output_and_can_be_disabled(self):
+        frame = np.zeros((60, 80, 3), np.uint8)
+        self.assertIsNone(render_time_annotation(frame, 12.345))
+        self.assertFalse(frame.any())
+        with patch('command_recording.cv2.putText', wraps=cv2.putText) as text:
+            x, y, width, height = render_time_annotation(frame, 12.345,
+                dict(show_time=True, time_position=(1., 1.)))
+        self.assertEqual(text.call_args.args[1], 'Time : 12.3 s')
+        self.assertLessEqual(x+width, 80)
+        self.assertLessEqual(y+height, 60)
+        self.assertTrue(frame.any())
 
     def test_gui_submits_capture_timestamp_without_live_annotation_work(self):
         app = CommandTab.__new__(CommandTab)
